@@ -37,6 +37,8 @@ $ ./bin/tokenmp help
 `tokenmp serve` 从环境变量读取运行配置，启动时执行数据库迁移，暴露
 `GET /healthz`（200）与三个转发端点 `POST /v1/chat/completions`、
 `POST /v1/responses`、`POST /v1/messages`，收到退出信号后优雅关闭。
+对外契约见 [docs/openapi.yaml](docs/openapi.yaml)，参数取舍、跨协议降级与用量计费口径见
+[docs/compatibility.md](docs/compatibility.md)。
 转发端点要求 `Authorization: Bearer <key>`。鉴权通过后先做额度预检与窗口限额
 判定：无可用额度回 402；账户或 API key 维度的窗口用量达到限额时按限额处置回 429，
 `reject` 的错误码为 `quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
@@ -155,6 +157,16 @@ internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
 .github/workflows/   CI 与发布链路
 ```
+
+## 文档
+
+| 文件 | 内容 |
+|---|---|
+| [docs/openapi.yaml](docs/openapi.yaml) | 数据面 OpenAPI 3.1 规范：端点、请求/响应 schema、SSE、错误体与状态码 |
+| [docs/compatibility.md](docs/compatibility.md) | 三方言参数处理、模型名替换、跨协议降级、流式用量帧与用量计费口径 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发门禁与提交规范 |
+| [RELEASE.md](RELEASE.md) | 发布链路与本地验证 |
+| [CHANGELOG.md](CHANGELOG.md) | 由 release-please 维护的变更记录 |
 
 ## 版本
 
