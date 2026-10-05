@@ -151,7 +151,7 @@ func adminChannelList(ctx context.Context, args []string, env *adminEnv) int {
 		})
 	}
 	return env.emit(*asJSON,
-		[]string{flagID, flagMerchant, flagName, flagVendor, flagType, flagCredGroup, flagBaseURL, flagPriority, flagWeight, headerEnabled},
+		[]string{flagID, flagMerchant, flagName, flagVendor, flagType, headerCredGroup, headerBaseURL, flagPriority, flagWeight, headerEnabled},
 		rows, channels)
 }
 

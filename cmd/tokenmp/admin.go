@@ -98,6 +98,23 @@ const (
 	headerStatus    = "status"
 )
 
+// 表格列名用下划线命名的取值；对应的 flag 常量是连字符形态，不能直接当表头。
+const (
+	headerCredGroup = "cred_group"
+	headerBaseURL   = "base_url"
+	headerScopeID   = "scope_id"
+	headerValidFrom = "valid_from"
+	headerValidTo   = "valid_to"
+	headerTimeFrom  = "time_from"
+	headerTimeTo    = "time_to"
+)
+
+// usageName 同时是管理组名与用量流水表的列名。
+const usageName = "usage"
+
+// minAdminArgs 是组 + 动作两个参数的最小个数。
+const minAdminArgs = 2
+
 // adminEnv 是一次 admin 命令执行的依赖与输出流。
 type adminEnv struct {
 	service *admin.Service
@@ -168,7 +185,7 @@ var adminGroups = []adminGroupSpec{
 	{"price", []string{actionPublish, actionList}},
 	{"rule", []string{actionAdd, actionList, actionDel}},
 	{"calendar", []string{actionImport, actionList}},
-	{"usage", []string{actionList}},
+	{usageName, []string{actionList}},
 	{"adjust", []string{actionAdd, actionList}},
 }
 
@@ -200,14 +217,14 @@ func cmdAdmin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return writeAdminUsage(stderr, exitUsage, "缺少管理组名")
 	}
-	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+	if args[0] == helpName || args[0] == helpShortFlag || args[0] == helpLongFlag {
 		return writeAdminUsage(stdout, exitOK, "")
 	}
 	group, ok := lookupGroup(args[0])
 	if !ok {
 		return writeAdminUsage(stderr, exitUsage, fmt.Sprintf("未知管理组 %q", args[0]))
 	}
-	if len(args) < 2 {
+	if len(args) < minAdminArgs {
 		return writeAdminUsage(stderr, exitUsage, fmt.Sprintf("%s 需要动作：%s", group.name, strings.Join(group.actions, " / ")))
 	}
 	if !group.allows(args[1]) {
@@ -275,11 +292,11 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminRule(ctx, rest, env)
 	case "calendar":
 		return adminCalendar(ctx, rest, env)
-	case "usage":
+	case usageName:
 		return adminUsage(ctx, rest, env)
 	case "adjust":
 		return adminAdjust(ctx, rest, env)
-	case "help", "-h", "--help":
+	case helpName, helpShortFlag, helpLongFlag:
 		_, _ = io.WriteString(env.stdout, adminUsageText())
 		return exitOK
 	default:

@@ -218,7 +218,7 @@ func adminRuleList(ctx context.Context, args []string, env *adminEnv) int {
 		})
 	}
 	return env.emit(*asJSON,
-		[]string{flagID, flagScope, flagScopeID, flagMetric, flagMultiplier, flagValidFrom, flagValidTo, flagTimeFrom, flagTimeTo, "weekday_mask", "day_kind_mask", flagCalendar, flagPriority},
+		[]string{flagID, flagScope, headerScopeID, flagMetric, flagMultiplier, headerValidFrom, headerValidTo, headerTimeFrom, headerTimeTo, "weekday_mask", "day_kind_mask", flagCalendar, flagPriority},
 		rows, rules)
 }
 

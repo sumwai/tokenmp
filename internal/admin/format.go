@@ -64,6 +64,16 @@ type CredentialView struct {
 	Enabled    bool   `json:"enabled"`
 }
 
+// plaintextPrefix 返回明文的前 visiblePrefixLen 个字符，作为 key_prefix 列的取值。
+//
+// 存原始前缀而不带省略号：该列名义上供展示与检索，带省略号会让 LIKE 前缀查询失配。
+func plaintextPrefix(value string) string {
+	if len(value) <= visiblePrefixLen {
+		return value
+	}
+	return value[:visiblePrefixLen]
+}
+
 // parseDecimal 把定点小数字符串解析为 decimal。
 func parseDecimal(raw string) (decimal.Decimal, error) {
 	return decimal.NewFromString(strings.TrimSpace(raw))

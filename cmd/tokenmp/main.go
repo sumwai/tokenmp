@@ -11,6 +11,13 @@ import (
 	"strings"
 )
 
+// 帮助入口的三个形态；一并声明避免字面量在入口之间漂移。
+const (
+	helpName      = "help"
+	helpShortFlag = "-h"
+	helpLongFlag  = "--help"
+)
+
 // programName 同时用作子命令提示里的程序名与版本行的前缀。
 const programName = "tokenmp"
 
@@ -47,7 +54,7 @@ func runWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return cmdVersion(stdout, stderr)
 	case "admin":
 		return cmdAdmin(args[1:], stdin, stdout, stderr)
-	case "help", "-h", "--help":
+	case helpName, helpShortFlag, helpLongFlag:
 		return usageWithExit(stdout, exitOK)
 	default:
 		// 提示与用法都写 stderr。写失败不改变退出码：进程已在退出路径上，

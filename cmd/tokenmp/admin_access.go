@@ -80,7 +80,7 @@ func adminCredentialList(ctx context.Context, args []string, env *adminEnv) int 
 		})
 	}
 	return env.emit(*asJSON,
-		[]string{flagID, flagMerchant, "cred_group", flagName, "prefix", headerEnabled}, rows, views)
+		[]string{flagID, flagMerchant, headerCredGroup, flagName, "prefix", headerEnabled}, rows, views)
 }
 
 func adminCredentialDisable(ctx context.Context, args []string, env *adminEnv) int {

@@ -109,6 +109,17 @@ func TestKnownEnums(t *testing.T) {
 			t.Errorf("QuotaEvent %q 校验失败：%v", QuotaEventReset, err)
 		}
 	})
+
+	t.Run("Source", func(t *testing.T) {
+		for _, v := range []Source{SourcePurchase, SourceGrant, SourceRecharge} {
+			if !v.Known() {
+				t.Errorf("Source %q 应在白名单内", v)
+			}
+			if err := ValidateSource(v); err != nil {
+				t.Errorf("Source %q 校验失败：%v", v, err)
+			}
+		}
+	})
 }
 
 // TestValidateRejectsUnknown 验证写入方向严格：未知值必须被拒绝。
@@ -127,6 +138,7 @@ func TestValidateRejectsUnknown(t *testing.T) {
 		{name: "未知 Action", validate: func() error { return ValidateAction(Action("warn")) }},
 		{name: "未知 Fallback", validate: func() error { return ValidateFallback(Fallback("retry")) }},
 		{name: "未知 QuotaEvent", validate: func() error { return ValidateQuotaEvent(QuotaEvent("grant")) }},
+		{name: "未知 Source", validate: func() error { return ValidateSource(Source("gift")) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,6 +180,9 @@ func TestFromDBIsLenient(t *testing.T) {
 	}
 	if got := QuotaEventFromDB("grant"); got != QuotaEvent("grant") {
 		t.Errorf("QuotaEventFromDB 应原样返回，得到 %q", got)
+	}
+	if got := SourceFromDB("airdrop"); got != Source("airdrop") {
+		t.Errorf("SourceFromDB 应原样返回，得到 %q", got)
 	}
 	if got := MetricFromDB("input_token"); got != MetricInputToken {
 		t.Errorf("MetricFromDB 已知值应等于常量，得到 %q", got)

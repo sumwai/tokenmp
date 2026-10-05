@@ -127,7 +127,7 @@ func (s *Service) IssueKey(ctx context.Context, in IssueKeyInput) (*IssuedKey, e
 	if err != nil {
 		return nil, err
 	}
-	prefix := maskPrefix(plaintext)
+	prefix := plaintextPrefix(plaintext)
 	hash := hashAPIKey(plaintext)
 	id, err := s.store.InsertAPIKey(ctx, store.APIKey{
 		AccountID:  in.AccountID,
