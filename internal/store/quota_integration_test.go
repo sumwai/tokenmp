@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -82,8 +83,8 @@ func TestQuotaUsageIntegration(t *testing.T) {
 	}
 
 	for _, usage := range []map[billing.Metric]int{
-		{billing.MetricInputToken: 100, billing.MetricOutputToken: 5},
-		{billing.MetricInputToken: 50},
+		{billing.MetricInputToken: 100, billing.MetricOutputToken: 5, billing.MetricRequest: 1},
+		{billing.MetricInputToken: 50, billing.MetricRequest: 1},
 	} {
 		if _, err := s.InsertUsage(ctx, store.UsageRow{
 			MerchantID: 1, AccountID: accountID, ChannelID: channelID, Model: "up-model", Usage: usage,
@@ -128,6 +129,12 @@ func TestQuotaUsageIntegration(t *testing.T) {
 		Scope: billing.ScopeAccount, ScopeID: accountID, QuotaID: quotaID,
 		Metric: billing.MetricInputToken, Since: farPast,
 	}, "150")
+
+	// request 聚合键：一次请求一行流水、每行写 request=1，窗口内聚合值即行数。
+	assertUsage(ctx, t, s, quota.UsageQuery{
+		Scope: billing.ScopeAccount, ScopeID: accountID, QuotaID: quotaID,
+		Metric: billing.MetricRequest, Since: farPast,
+	}, "2")
 
 	// scope 维度映射：channel 维度按 channel_id 命中同一批流水。
 	assertUsage(ctx, t, s, quota.UsageQuery{
@@ -175,6 +182,45 @@ func TestQuotaUsageIntegration(t *testing.T) {
 		Metric: billing.MetricInputToken, Since: farPast,
 	}); err == nil {
 		t.Error("plan 维度应报错而不是静默聚合")
+	}
+
+	// request 限额判定链路：窗口内聚合值等于行数，达到 limit 即超限（>= 而非 >）。
+	// 用 total 口径避开自然日边界，只验证「行数 → 已用量 → 超限」。下一条流水
+	// （第 4 次请求）落库后就会被拦。
+	requestQuotaID, err := s.InsertQuota(ctx, store.Quota{
+		Scope: billing.ScopeAccount, ScopeID: accountID, Metric: billing.MetricRequest,
+		WindowKind: billing.WindowKindCalendar, Period: billing.PeriodTotal,
+		LimitAmount: "3", Action: billing.ActionReject,
+	})
+	if err != nil {
+		t.Fatalf("写入 request 限额失败：%v", err)
+	}
+	requestLimit := quota.Limit{
+		ID: requestQuotaID, Scope: billing.ScopeAccount, ScopeID: accountID,
+		Metric: billing.MetricRequest, WindowKind: billing.WindowKindCalendar,
+		Period: billing.PeriodTotal, LimitAmount: decimal.NewFromInt(3), Action: billing.ActionReject,
+	}
+	// 已落库 2 行 → 已用量 2，尚未达到 3。
+	used, ok, err := quota.Used(ctx, s, requestLimit, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("聚合 request 用量失败：ok=%v err=%v", ok, err)
+	}
+	if !decimalEqual(used.String(), "2") || requestLimit.Exceeded(used) {
+		t.Fatalf("request 已用量 = %s，期望 2 且未超限", used)
+	}
+	// 第 3 行落库后已用量达到 3，判定超限；下一次（第 4 次）请求因此被拦。
+	if _, err := s.InsertUsage(ctx, store.UsageRow{
+		MerchantID: 1, AccountID: accountID, ChannelID: channelID, Model: "up-model",
+		Usage: map[billing.Metric]int{billing.MetricRequest: 1},
+	}); err != nil {
+		t.Fatalf("写入 request 用量失败：%v", err)
+	}
+	used, ok, err = quota.Used(ctx, s, requestLimit, time.Now())
+	if err != nil || !ok {
+		t.Fatalf("聚合 request 用量失败：ok=%v err=%v", ok, err)
+	}
+	if !decimalEqual(used.String(), "3") || !requestLimit.Exceeded(used) {
+		t.Fatalf("request 已用量 = %s，期望 3 且已超限", used)
 	}
 }
 

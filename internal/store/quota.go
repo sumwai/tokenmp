@@ -95,6 +95,9 @@ func scanQuotaLimits(rows *sql.Rows) ([]quota.Limit, error) {
 //   - metric 取 usage JSON 的对应键，路径以参数传入，不拼字符串；
 //   - 求和统一按 DECIMAL(24,8) 精确聚合：limit_amount 是 DECIMAL，整数计数在
 //     DECIMAL 下同样精确，因此不需要为整数指标单开一条路径，也不引入浮点；
+//   - 键不存在的行（如未写 request 键的历史流水）JSON_EXTRACT 返回 NULL，
+//     NULL 不进 SUM，等同于按 0 计；一行都不含该键时 SUM 为 NULL，由 COALESCE 兜成 0。
+//     append-only 流水不回填，历史用量按 0 计是既定口径；
 //   - 下界取「窗口起点」与「最近 reset 基准」的较大者，reset 只截断不回退；
 //   - created_at > 下界为严格大于，与 account_quota_event.baseline_at 的注释一致。
 const quotaUsageSQL = "SELECT COALESCE(SUM(CAST(JSON_EXTRACT(`usage`, ?) AS DECIMAL(24,8))), 0) " +
