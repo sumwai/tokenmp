@@ -64,6 +64,11 @@ func (o *attemptObserver) RecordAttempt(ctx context.Context, rec domain.AttemptR
 		"duration_ms", rec.EndedAt.Sub(rec.StartedAt).Milliseconds(),
 	}
 	args = append(args, usageLogArgs(rec.Usage)...)
+	// 只在等满 1ms 时出字段：未配置限流与令牌即时可用是绝大多数情形，
+	// 恒零字段只会淹没真正命中限流的那些尝试。
+	if waitedMS := rec.RateLimitWait.Milliseconds(); waitedMS > 0 {
+		args = append(args, "rate_limit_wait_ms", waitedMS)
+	}
 	// 成功尝试没有错误码与排障细节，空值不出字段，避免日志里全是无意义的空串。
 	if rec.ErrorCode != "" {
 		args = append(args, "error_code", rec.ErrorCode)
