@@ -65,6 +65,8 @@ type gatewayStore interface {
 	LookupAPIKey(ctx context.Context, keyHash string, now time.Time) (*store.APIKeyAuth, error)
 	RouteCandidates(ctx context.Context, channelType store.ChannelType, model string, merchantID uint64) ([]store.RouteCandidate, error)
 	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
+	// InsertUsage 写一条 billing_usage 流水，返回新行 id。
+	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
 }
 
 // 编译期断言：真实存储层满足装配层的依赖面。
@@ -146,6 +148,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Adapters:    lookupAdapter,
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
+		Usage:       newUsageRecorder(st, nil),
 		MaxAttempts: attempts,
 	})
 	if err != nil {

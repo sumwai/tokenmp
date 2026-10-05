@@ -396,6 +396,30 @@ type Observer interface {
 	RecordAttempt(ctx context.Context, rec AttemptRecord) error
 }
 
+// UsageRecord 是一次进入终态的转发的用量归属。
+//
+// 流水线只交出与协议无关的事实：归属商家与账户由实现从请求上下文解析，
+// 流水线不感知鉴权，也不需要知道流水要写进哪张表。
+type UsageRecord struct {
+	// RequestID 关联本次请求的观测记录。
+	RequestID string
+	// ChannelID 是本次实际履约的渠道数字主键。
+	ChannelID uint64
+	// Model 是实际发往上游的模型名：计费按履约模型而不是客户端请求的别名。
+	Model string
+	// Usage 是本次请求进入终态时的用量；未取得时是来源未知的零值。
+	Usage Usage
+}
+
+// UsageRecorder 记录一次转发的用量流水。
+//
+// 与 Observer 的分工：Observer 每次上游尝试都记一条（含重试），UsageRecorder 只在
+// 一次请求进入终态时写一行流水，因此重试的失败尝试不产生流水。
+// 实现失败不得影响转发结果，调用方忽略其返回值。
+type UsageRecorder interface {
+	RecordUsage(ctx context.Context, rec UsageRecord) error
+}
+
 // NonRetryableUpstreamErrorType 判断上游错误的类型名或机器码是否属于
 // 「换渠道重试也不会成功」的一类：
 //

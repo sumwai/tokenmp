@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,13 @@ type fakeGatewayStore struct {
 	routes         []store.RouteCandidate
 	credentials    []store.Credential
 	wantMerchantID uint64
+
+	// mu 保护用量记录：流式请求下 InsertUsage 在服务端 goroutine 里被调用。
+	mu sync.Mutex
+	// usageRows 按写入顺序保存流水行，供端到端用例断言分量。
+	usageRows []store.UsageRow
+	// insertErr 非 nil 时 InsertUsage 返回它，用于验证落库失败不影响转发。
+	insertErr error
 }
 
 func (f *fakeGatewayStore) LookupAPIKey(_ context.Context, keyHash string, _ time.Time) (*store.APIKeyAuth, error) {
@@ -50,6 +58,23 @@ func (f *fakeGatewayStore) CredentialsByGroup(_ context.Context, _ string, merch
 		return nil, nil
 	}
 	return f.credentials, nil
+}
+
+func (f *fakeGatewayStore) InsertUsage(_ context.Context, row store.UsageRow) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.insertErr != nil {
+		return 0, f.insertErr
+	}
+	f.usageRows = append(f.usageRows, row)
+	return uint64(len(f.usageRows)), nil
+}
+
+// usageSnapshot 返回已写入流水行的一份拷贝。
+func (f *fakeGatewayStore) usageSnapshot() []store.UsageRow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.UsageRow(nil), f.usageRows...)
 }
 
 // activeAuth 返回一份鉴权通过的最小事实。
@@ -124,6 +149,8 @@ type recordedUpstream struct {
 	path    string
 	headers http.Header
 	model   string
+	// includeUsage 记录上游请求体是否带了用量索取开关。
+	includeUsage bool
 }
 
 // TestGatewayForwardingThreeDialects 覆盖三方言的非流式端到端往返。

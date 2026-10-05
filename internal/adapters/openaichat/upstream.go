@@ -1,6 +1,7 @@
 package openaichat
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,11 @@ const (
 	modelField               = "model"
 	maxTokensField           = "max_tokens"
 	maxCompletionTokensField = "max_completion_tokens"
+	// streamField 是流式开关字段名：只有流式请求才注入用量索取开关。
+	streamField = "stream"
+	// streamOptionsField 与 includeUsageField 是用量索取开关的字段名。
+	streamOptionsField = "stream_options"
+	includeUsageField  = "include_usage"
 )
 
 // upstreamRequestWire 是重建上游请求体时使用的线上结构。
@@ -36,6 +42,16 @@ type upstreamRequestWire struct {
 	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
 	Temperature         *float64 `json:"temperature,omitempty"`
 	Stream              bool     `json:"stream"`
+	// StreamOptions 在网关代客户端索取流式用量时注入。
+	StreamOptions *upstreamStreamOptions `json:"stream_options,omitempty"`
+}
+
+// upstreamStreamOptions 是 Chat Completions 的流式选项。
+//
+// 只建模 include_usage：未建模的选项在同协议透传路径由 RewriteRawBody 原样保留，
+// 跨协议重建时本就不存在这些客户端字段。
+type upstreamStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type upstreamMessageWire struct {
@@ -112,6 +128,11 @@ func (a *Adapter) EncodeRequest(req *domain.Request, options domain.RewriteOptio
 			parts = append(parts, domain.RewritePartRequestOutputLimit)
 		}
 	}
+	// 只在流式请求上注入：非流式响应的用量本就随响应体返回。
+	if options.IncludeUsage && req.Stream {
+		wire.StreamOptions = &upstreamStreamOptions{IncludeUsage: true}
+		parts = append(parts, domain.RewritePartRequestUsageSwitch)
+	}
 	body, err := json.Marshal(wire)
 	if err != nil {
 		return nil, nil, domain.NewError(domain.CodeInternal, "编码上游请求失败").WithCause(err)
@@ -121,14 +142,15 @@ func (a *Adapter) EncodeRequest(req *domain.Request, options domain.RewriteOptio
 
 // RewriteRawBody 对同协议透传的原始报文做字段级改写。
 //
-// 没有任何改写项启用时逐字节返回入参；启用改写时只改动以下两处字段，其余字段取值保持原样：
+// 没有任何改写项启用时逐字节返回入参；启用改写时只改动以下字段，其余字段取值保持原样：
 //   - model：替换或补齐上游模型名
 //   - max_tokens / max_completion_tokens：按统一口径处理输出上限
 //     （客户端未声明时补 max_completion_tokens，已存在时按 max_tokens 优先钳制）
+//   - stream_options.include_usage：流式请求注入用量索取开关
 //
 // 第二个返回值由本适配器按实际发生的变化填报，无改动时为空。
 func (a *Adapter) RewriteRawBody(body []byte, options domain.RewriteOptions) ([]byte, domain.RewriteParts, error) {
-	if options.MaxOutputTokens == nil && options.UpstreamModel == "" {
+	if options.MaxOutputTokens == nil && !options.IncludeUsage && options.UpstreamModel == "" {
 		return body, nil, nil
 	}
 	fields, err := domain.DecodeRawFields(body)
@@ -143,6 +165,15 @@ func (a *Adapter) RewriteRawBody(body []byte, options domain.RewriteOptions) ([]
 		domain.SetRawOutputLimit(fields, []string{maxTokensField, maxCompletionTokensField}, maxCompletionTokensField, options.MaxOutputTokens) {
 		parts = append(parts, domain.RewritePartRequestOutputLimit)
 	}
+	if options.IncludeUsage {
+		injected, injectErr := injectIncludeUsage(fields)
+		if injectErr != nil {
+			return nil, nil, injectErr
+		}
+		if injected {
+			parts = append(parts, domain.RewritePartRequestUsageSwitch)
+		}
+	}
 	if len(parts) == 0 {
 		return body, nil, nil
 	}
@@ -151,6 +182,54 @@ func (a *Adapter) RewriteRawBody(body []byte, options domain.RewriteOptions) ([]
 		return nil, nil, domain.NewError(domain.CodeInternal, "编码改写后的请求失败").WithCause(err)
 	}
 	return encoded, parts, nil
+}
+
+// injectIncludeUsage 在流式请求里合并 stream_options.include_usage，返回是否发生改写。
+//
+//  1. 非流式请求不注入；
+//  2. stream_options 已有其它键时逐键保留，只补上 include_usage（合并而非替换）；
+//  3. 开关已是 true 时不改写，幂等。
+func injectIncludeUsage(fields map[string]json.RawMessage) (bool, error) {
+	stream := false
+	if raw, ok := fields[streamField]; ok {
+		stream, _ = jsonBool(raw)
+	}
+	if !stream {
+		return false, nil
+	}
+	options := map[string]json.RawMessage{}
+	if raw, ok := fields[streamOptionsField]; ok && !isJSONNull(raw) {
+		if err := json.Unmarshal(raw, &options); err != nil {
+			return false, domain.NewError(domain.CodeInvalidRequest, "stream_options 必须是 JSON 对象")
+		}
+	}
+	if isJSONTrue(options[includeUsageField]) {
+		return false, nil
+	}
+	options[includeUsageField] = json.RawMessage("true")
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return false, domain.NewError(domain.CodeInternal, "编码 stream_options 失败").WithCause(err)
+	}
+	fields[streamOptionsField] = encoded
+	return true, nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func isJSONTrue(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("true"))
+}
+
+// jsonBool 解析 JSON 布尔；取值不是布尔时第二个返回值为 false。
+func jsonBool(raw json.RawMessage) (bool, bool) {
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, false
+	}
+	return value, true
 }
 
 // UpstreamHeaders 返回调用上游 Chat Completions 时应携带的请求头。

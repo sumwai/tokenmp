@@ -37,6 +37,10 @@ type Options struct {
 	Routes domain.RouteResolver
 	// Observer 记录每次上游尝试；可为 nil，记录失败不影响转发结果。
 	Observer domain.Observer
+	// Usage 记录每次请求进入终态时的用量流水；可为 nil（不记录）。
+	// 非流式在回写客户端之前落库，流式在流结束后落库；落库失败由实现记日志，
+	// 流水线忽略其返回值，不改变对客户端的响应。
+	Usage domain.UsageRecorder
 	// Breaker 是渠道熔断器；可为 nil（不熔断，候选渠道按解析顺序逐个尝试）。
 	// 非 nil 时，遍历候选时跳过处于熔断打开态的渠道，并在每次上游尝试结束后上报结果。
 	Breaker Breaker
@@ -52,6 +56,7 @@ type Pipeline struct {
 	upstream    domain.UpstreamCaller
 	routes      domain.RouteResolver
 	observer    domain.Observer
+	usage       domain.UsageRecorder
 	breaker     Breaker
 	maxAttempts int
 	backoff     backoff
@@ -97,6 +102,7 @@ func New(opts Options) (*Pipeline, error) {
 		upstream:    opts.Upstream,
 		routes:      opts.Routes,
 		observer:    opts.Observer,
+		usage:       opts.Usage,
 		breaker:     opts.Breaker,
 		maxAttempts: maxAttempts,
 		backoff:     newBackoff(opts.Backoff),
@@ -147,6 +153,9 @@ func (p *Pipeline) completeAttempt(
 	}
 	result.Completion = completion
 	result.Usage = completion.Response.Usage
+	// 先落 billing_usage 再回写客户端：流水是扣费与对账的事实来源，
+	// 客户端拿到响应时它必须已经存在。客户端写出失败不回滚流水——上游已经产生过用量。
+	p.recordUsage(ctx, req, route, result.Usage)
 	parts, writeErr := p.writeCompletion(client, req, route, completion, out)
 	result.ResponseParts = parts
 	if writeErr != nil {
@@ -263,6 +272,8 @@ func (p *Pipeline) forward(
 
 	attemptLimit := p.maxAttempts
 	var lastErr error
+	var lastRoute domain.Route
+	var lastResult attemptResult
 	attemptsMade := 0
 	for i := 0; i < len(candidateRoutes) && attemptsMade < attemptLimit; i++ {
 		route := candidateRoutes[i]
@@ -281,10 +292,16 @@ func (p *Pipeline) forward(
 		attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
 		p.recordAttempt(ctx, req, route, attemptsMade, attempt)
 		if attempt.Err == nil {
+			p.recordStreamUsage(ctx, req, route, attempt)
 			return nil
 		}
 		lastErr = attempt.Err
+		lastRoute = route
+		lastResult = attempt
 		if !domain.Retryable(attempt.Err) || ctx.Err() != nil || attempt.WroteBytes {
+			// 本次尝试已是终态（不可重试、上下文取消或已向客户端写出字节），
+			// 流式在此落库；可重试且未写出的失败尝试会换渠道，不产生流水。
+			p.recordStreamUsage(ctx, req, route, attempt)
 			if attempt.WroteBytes && !attempt.clientWriteFailed {
 				// 状态码与响应头已送达客户端，只能下发协议自身的流式错误帧。
 				writeStreamError(client, out, attempt.Err)
@@ -305,6 +322,8 @@ func (p *Pipeline) forward(
 		}
 		return domain.NewError(domain.CodeUpstreamUnavailable, "候选渠道或尝试次数耗尽")
 	}
+	// 候选耗尽或退避等待被取消：最后一次尝试已是终态，流式在此落库。
+	p.recordStreamUsage(ctx, req, lastRoute, lastResult)
 	return lastErr
 }
 
@@ -372,6 +391,30 @@ func (p *Pipeline) recordAttempt(
 	_ = p.observer.RecordAttempt(ctx, rec)
 }
 
+// recordUsage 把一次请求进入终态时的用量交给注入的记账实现；未配置时不记录。
+//
+// 实现失败只由实现自己记日志：记账是转发的旁路，不得改变对客户端的响应。
+func (p *Pipeline) recordUsage(ctx context.Context, req *domain.Request, route domain.Route, usage domain.Usage) {
+	if p.usage == nil {
+		return
+	}
+	_ = p.usage.RecordUsage(ctx, domain.UsageRecord{
+		RequestID: req.RequestID,
+		ChannelID: route.ChannelID,
+		// 记录实际履约的上游模型名：定价按履约模型解析，客户端别名不参与计费。
+		Model: domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel}),
+		Usage: usage,
+	})
+}
+
+// recordStreamUsage 在流式尝试进入终态时落库；非流式已在回写客户端之前落库，此处跳过。
+func (p *Pipeline) recordStreamUsage(ctx context.Context, req *domain.Request, route domain.Route, attempt attemptResult) {
+	if !req.Stream {
+		return
+	}
+	p.recordUsage(ctx, req, route, attempt.Usage)
+}
+
 // mergeParts 合并请求侧与响应侧改写标注，去重并保持出现顺序。
 func mergeParts(base, extra domain.RewriteParts) domain.RewriteParts {
 	if len(extra) == 0 {
@@ -415,6 +458,8 @@ func (p *Pipeline) finalizeRequest(req *domain.Request, route domain.Route) ([]b
 	options := domain.RewriteOptions{
 		MaxOutputTokens: route.OutputLimit,
 		UpstreamModel:   route.UpstreamModel,
+		// 流式转发向支持该开关的上游索取用量：不注入就拿不到末尾的用量帧。
+		IncludeUsage: req.Stream,
 	}
 	if route.Protocol == req.Protocol {
 		return builder.RewriteRawBody(req.RawBody, options)

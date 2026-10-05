@@ -20,6 +20,12 @@ type RewriteOptions struct {
 	//
 	// nil 或非正表示渠道未配置输出上限，此时不设置该字段。
 	MaxOutputTokens *int
+	// IncludeUsage 为 true 时向支持该开关的上游协议索取用量。
+	//
+	// 目前只有 OpenAI Chat Completions 有这个概念（流式请求的 stream_options.include_usage）；
+	// OpenAI Responses 与 Anthropic Messages 的用量本就随流下发，实现保持原样。
+	// 只对流式请求有意义：非流式请求的用量随响应体一并返回。
+	IncludeUsage bool
 	// UpstreamModel 是本次转发要写入上游请求体的模型名，取自选路结果的
 	// Route.UpstreamModel；空串表示本项关闭、不改写模型名。
 	//
@@ -132,6 +138,9 @@ const (
 	// RewritePartRequestOutputLimit 表示上游请求的输出上限被网关改写：
 	// 客户端声明值超限被钳制，或客户端未声明被渠道上限补齐。
 	RewritePartRequestOutputLimit RewritePart = "request_output_limit"
+	// RewritePartRequestUsageSwitch 表示上游请求被网关补上索取用量的开关。
+	// 只有支持该开关的协议（当前是 OpenAI Chat Completions）会产生本取值。
+	RewritePartRequestUsageSwitch RewritePart = "request_usage_switch"
 	// RewritePartRequestModel 表示上游请求的模型名被网关改写：
 	// 用渠道对应的上游模型名替换或补齐客户端请求里的模型名。
 	RewritePartRequestModel RewritePart = "request_model"
