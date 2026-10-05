@@ -31,6 +31,17 @@ CI 另外在真实 MySQL 上执行 `make check-integration` 与 `make e2e`，两
 `type` 前缀必须是 ASCII 英文（release-please 靠它归类与定版号），描述不限语言。
 合并 release PR 后，条目会进入 [CHANGELOG.md](CHANGELOG.md) 的对应分区。
 
+## 行为变更与规范同步
+
+对外可观察的行为变更必须在同一个 PR 里同步更新规范：
+
+- 端点路径、请求/响应字段、状态码、错误码、SSE 事件形态变更 → 更新 [docs/openapi.yaml](docs/openapi.yaml)；
+- 参数处理、模型名替换、跨协议降级、用量与计费口径变更 → 更新 [docs/compatibility.md](docs/compatibility.md)；
+- 命令、目录、环境变量或版本行为的变更 → 更新 [README.md](README.md)。
+
+规范只写已经存在的事实：功能先落地，再改规范；不写计划、进度与待办。
+新增根目录文档前先确认职责不与上表及 [AGENTS.md](AGENTS.md) 的文档职责表重叠。
+
 ## 协作
 
 - 所有改动走分支 → PR → squash 合并。`main` 受分支保护：禁止 force push、禁止删除、
