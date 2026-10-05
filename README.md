@@ -56,6 +56,9 @@ $ ./bin/tokenmp help
 | `TOKENMP_USAGE_WRITE_TIMEOUT` | 写用量流水超时 | `5s` |
 | `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 上游凭据类失败后的冷却时长 | `60s` |
 | `TOKENMP_UPSTREAM_RATE_LIMIT_WAIT` | 渠道限流下等待令牌的最长时间 | `2s` |
+| `TOKENMP_UPSTREAM_BREAKER_THRESHOLD` | 渠道连续失败多少次后熔断打开 | `5` |
+| `TOKENMP_UPSTREAM_BREAKER_COOLDOWN` | 渠道熔断打开后多久允许一笔探测 | `30s` |
+| `TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY` | 半开态同时放行的探测条数 | `1` |
 
 超时与连接池取值必须为正数或合法时长，非法取值在启动前报错并以 1 退出。
 流式转发不设整体超时，只受首字节与空闲读两级约束。
@@ -67,6 +70,11 @@ $ ./bin/tokenmp help
 取令牌与并发位，令牌不足时短暂等待，超过等待上限则按可重试失败换下一条候选。
 流式请求占并发位到流终态才释放。限流状态是进程内的，多实例部署时各实例独立计数。
 
+渠道连续出现上游硬故障（5xx、连接失败、上游超时）达到阈值时进入熔断：冷却期内该渠道
+不参与调度，冷却期后放行探测，成功恢复闭合、失败重新打开。上游限流、上游 4xx 拒绝、
+客户端取消与本端写出失败不计入熔断。全部候选都处于打开态时放行其中一条探测一次，
+而不是直接把请求判为失败。熔断状态是进程内的，多实例部署时各实例独立计数。
+
 选路按两级取候选：与客户端方言一致的渠道成段在前，不限方言的渠道成段在后，回退按链上顺序推进。
 同协议候选始终排在跨协议候选之前；跨协议段排除已在同协议段出现过的渠道。
 两级都无候选时仍回 404。
@@ -76,6 +84,7 @@ $ ./bin/tokenmp help
 
 每次上游尝试另写一条 JSON 尝试日志：同一请求 id、尝试序号、渠道 id、协议方言、
 上游状态码、耗时、是否重试、是否换渠道、是否跨协议重建、错误码与已取得的用量分量。
+被熔断跳过的候选也各写一条 `outcome=skipped` 的记录，说明该候选未发起上游调用。
 一次请求发生重试或换渠道时会留下多行，与请求日志按请求 id 关联。凭据与密钥不进入日志。
 
 ## 管理面
@@ -132,6 +141,8 @@ internal/pipeline/   核心转发流水线：选路、请求定稿、上游调�
 internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
 internal/upstream/   调用上游渠道的 HTTP 客户端
 internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
+internal/ratelimit/  渠道级进程内限流：令牌桶与并发位
+internal/circuit/    渠道级进程内熔断：连续失败隔离与半开探测
 internal/store/      MySQL 连接、迁移与 schema 读写
 internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
 internal/billing/    计费指标与用量映射
