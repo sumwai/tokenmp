@@ -1,10 +1,11 @@
-package main
+package gateway
 
 import (
 	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/observability"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -280,7 +282,7 @@ func activeAuth() *store.APIKeyAuth {
 }
 
 // newTestGateway 装配网关；装配失败即让用例失败。
-func newTestGateway(t *testing.T, st gatewayStore) *gateway {
+func newTestGateway(t *testing.T, st gatewayStore) *Gateway {
 	t.Helper()
 	gw, err := newGateway(st, gatewayOptions{CompleteTimeout: 5 * time.Second})
 	if err != nil {
@@ -714,7 +716,7 @@ func TestGatewayLogsAttemptsAcrossChannelFallback(t *testing.T) {
 	var buf bytes.Buffer
 	gw, err := newGateway(st, gatewayOptions{
 		CompleteTimeout: 5 * time.Second,
-		Observer:        newAttemptObserver(newJSONLogger(&buf)),
+		Observer:        observability.NewAttemptObserver(observability.NewJSONLogger(&buf)),
 	})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
@@ -1234,7 +1236,7 @@ func TestGatewayRateLimitTimeoutFallsBackToNextChannel(t *testing.T) {
 	gw, err := newGateway(st, gatewayOptions{
 		CompleteTimeout: 5 * time.Second,
 		RateLimitWait:   time.Nanosecond,
-		Observer:        newAttemptObserver(newJSONLogger(&buf)),
+		Observer:        observability.NewAttemptObserver(observability.NewJSONLogger(&buf)),
 	})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
@@ -1316,7 +1318,7 @@ func TestGatewayBreakerSkipsFailingChannel(t *testing.T) {
 		CompleteTimeout:  5 * time.Second,
 		BreakerThreshold: threshold,
 		BreakerCooldown:  time.Minute,
-		Observer:         newAttemptObserver(newJSONLogger(&buf)),
+		Observer:         observability.NewAttemptObserver(observability.NewJSONLogger(&buf)),
 	})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
@@ -1385,7 +1387,7 @@ func TestGatewayBreakerProbesWhenAllChannelsOpen(t *testing.T) {
 		CompleteTimeout:  5 * time.Second,
 		BreakerThreshold: 1,
 		BreakerCooldown:  time.Minute,
-		Observer:         newAttemptObserver(newJSONLogger(&buf)),
+		Observer:         observability.NewAttemptObserver(observability.NewJSONLogger(&buf)),
 	})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
@@ -1634,14 +1636,21 @@ func testGatewayWithLogs(t *testing.T, st gatewayStore) (http.Handler, *bytes.Bu
 	access := &bytes.Buffer{}
 	gw, err := newGateway(st, gatewayOptions{
 		CompleteTimeout: 5 * time.Second,
-		Observer:        newAttemptObserver(newJSONLogger(attempts)),
-		Logger:          newAccessLogger(access),
+		Observer:        observability.NewAttemptObserver(observability.NewJSONLogger(attempts)),
+		Logger:          observability.NewAccessLogger(access),
 	})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
 	}
 	t.Cleanup(gw.Close)
 	return gw.handler, attempts, access
+}
+
+// failingObserver 是一个恒返回错误的观测器，用于验证实现内部的失败不回传转发链。
+type failingObserver struct{}
+
+func (failingObserver) RecordAttempt(context.Context, domain.AttemptRecord) error {
+	return errors.New("观测后端不可用")
 }
 
 // assertAttemptLogCrossProtocol 断言尝试日志恰有一行，且跨协议标记与响应重建标注符合期望。

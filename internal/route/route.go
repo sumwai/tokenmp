@@ -1,4 +1,12 @@
-package main
+// Package route 实现选路的两件事：同优先级候选的加权随机首选，以及同协议段与跨协议段的拼链。
+//
+// 从 cmd 下沉到本包：加权与分层是纯规则，不依赖数据库与 HTTP，单独成包后可用表驱动
+// 单测覆盖，命令包只做装配。端点地址拼接（endpointURL）与选路结果映射（routeOf）
+// 同属选路口径，一并放在这里。
+//
+// 随机源以 intN 注入：默认为 math/rand，测试注入确定性序列后即可断言「选中了哪一条」，
+// 而不必对分布做统计性断言。
+package route
 
 import (
 	"bytes"
@@ -6,15 +14,11 @@ import (
 	"log/slog"
 	"math/rand"
 	"strconv"
+	"strings"
 
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
 )
-
-// 本文件实现选路的两件事：同优先级候选的加权随机首选，以及同协议段与跨协议段的拼链。
-//
-// 随机源以 intN 注入：默认为 math/rand，测试注入确定性序列后即可断言「选中了哪一条」，
-// 而不必对分布做统计性断言。
 
 // defaultIntN 是未注入随机源时使用的默认实现：返回 [0, n) 内的均匀随机整数。
 //
@@ -112,7 +116,7 @@ func orderCandidatesByWeight(candidates []store.RouteCandidate, intN func(int) i
 	}
 }
 
-// routeChain 把两级候选拼成本次请求的唯一回退链：同协议候选成段在前，跨协议候选补段在后。
+// RouteChain 把两级候选拼成本次请求的唯一回退链：同协议候选成段在前，跨协议候选补段在后。
 //
 // 分层与降级顺序只有本函数一处实现：
 //
@@ -125,7 +129,7 @@ func orderCandidatesByWeight(candidates []store.RouteCandidate, intN func(int) i
 // 同协议候选始终排在跨协议候选之前：同协议透传的保真度与延迟优于重建，
 // 低优先级的同协议候选也先于高优先级的跨协议候选，只在同协议缺位或耗尽时才降到跨协议。
 // 空表入参合法：两段都为空时返回空链，由流水线回「没有可用渠道」。
-func routeChain(client domain.Protocol, sameProtocol, crossProtocol []store.RouteCandidate, intN func(int) int) []domain.Route {
+func RouteChain(client domain.Protocol, sameProtocol, crossProtocol []store.RouteCandidate, intN func(int) int) []domain.Route {
 	sameSegment := append([]store.RouteCandidate(nil), sameProtocol...)
 	orderCandidatesByWeight(sameSegment, intN)
 	crossSegment := append([]store.RouteCandidate(nil), crossProtocol...)
@@ -172,4 +176,16 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 		RateLimitQPS:         candidate.RateLimitQPS,
 		RateLimitConcurrency: candidate.RateLimitConcurrency,
 	}
+}
+
+// endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
+//
+// 库里只存到端点段之前（如 https://host/api/v3）：同一台主机上的不同协议端点因此共享一段根地址，
+// 端点段由本次协议决定。拼接去掉根地址末尾的斜杠，避免出现 //chat/completions 这样的双斜杠。
+func endpointURL(base string, protocol domain.Protocol) string {
+	root := strings.TrimRight(strings.TrimSpace(base), "/")
+	if root == "" {
+		return ""
+	}
+	return root + protocol.EndpointSegment()
 }

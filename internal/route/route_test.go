@@ -1,4 +1,4 @@
-package main
+package route
 
 import (
 	"testing"
@@ -161,7 +161,7 @@ func TestRouteChainSameProtocolSegmentComesFirst(t *testing.T) {
 		{ChannelID: 21, Priority: 999, Weight: 1, ChannelType: store.ChannelTypeAnthropicMessages, BaseURL: "https://cross.example.com"},
 	}
 
-	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
+	routes := RouteChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
 	assertChainIDs(t, routes, []uint64{11, 12, 21})
 	if routes[0].Protocol != domain.ProtocolOpenAIChat || routes[1].Protocol != domain.ProtocolOpenAIChat {
 		t.Errorf("同协议段的协议应为客户端协议，得到 %q、%q", string(routes[0].Protocol), string(routes[1].Protocol))
@@ -187,7 +187,7 @@ func TestRouteChainDropsCrossProtocolDuplicates(t *testing.T) {
 		{ChannelID: 21, ChannelType: store.ChannelTypeAnthropicMessages},
 	}
 
-	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
+	routes := RouteChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
 	assertChainIDs(t, routes, []uint64{11, 21})
 }
 
@@ -200,7 +200,7 @@ func TestRouteChainSkipsUnknownChannelType(t *testing.T) {
 		{ChannelID: 33, ChannelType: store.ChannelTypeOpenAIResponses},
 	}
 
-	routes := routeChain(domain.ProtocolOpenAIChat, nil, cross, seqIntN(0, 0))
+	routes := RouteChain(domain.ProtocolOpenAIChat, nil, cross, seqIntN(0, 0))
 	assertChainIDs(t, routes, []uint64{33})
 }
 
@@ -217,13 +217,13 @@ func TestRouteChainOrderCandidatesWithinSegments(t *testing.T) {
 	}
 
 	// 两个段各消耗一次随机取值：同协议段 [1,5] 取 roll=1 命中 12，跨协议段 [1,7] 取 roll=0 命中 21。
-	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(1, 0))
+	routes := RouteChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(1, 0))
 	assertChainIDs(t, routes, []uint64{12, 11, 21, 22})
 }
 
 // TestRouteChainEmpty 守护两级都无候选时返回空链，由流水线统一回「没有可用渠道」。
 func TestRouteChainEmpty(t *testing.T) {
-	if routes := routeChain(domain.ProtocolOpenAIChat, nil, nil, seqIntN(0)); len(routes) != 0 {
+	if routes := RouteChain(domain.ProtocolOpenAIChat, nil, nil, seqIntN(0)); len(routes) != 0 {
 		t.Fatalf("无候选时应返回空链，实际 %#v", routes)
 	}
 }

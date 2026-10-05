@@ -1,4 +1,4 @@
-package main
+package observability
 
 import (
 	"context"
@@ -22,8 +22,8 @@ type attemptObserver struct {
 // 编译期断言：本实现满足流水线的观测端口。
 var _ domain.Observer = (*attemptObserver)(nil)
 
-// newAttemptObserver 构造尝试级日志实现；logger 为 nil 时等价于不记录。
-func newAttemptObserver(logger *slog.Logger) *attemptObserver {
+// NewAttemptObserver 构造尝试级日志实现；logger 为 nil 时等价于不记录。
+func NewAttemptObserver(logger *slog.Logger) *attemptObserver {
 	return &attemptObserver{logger: logger}
 }
 

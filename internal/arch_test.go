@@ -471,3 +471,125 @@ func TestDomainHasNoProtocolOnlyLiterals(t *testing.T) {
 	}
 	t.Logf("已检查 internal/domain 下 %d 个生产代码文件", checked)
 }
+
+// assemblyPackagePath 是网关装配包：组装各能力包并把 HTTP 入口交给命令包。
+const assemblyPackagePath = internalPrefix + "gateway"
+
+// TestCapabilityPackagesHaveNoAssemblyImports 守护依赖方向：能力包不得导入装配层。
+//
+// 装配方向只能是「internal/gateway 组装能力包」；能力包反向导入 gateway 会让具体能力
+// 依赖整体装配，既无法单独测试，也无法在替换装配时复用。扫描 internal/ 下除 gateway
+// 自身以外的全部生产代码。
+func TestCapabilityPackagesHaveNoAssemblyImports(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fset := token.NewFileSet()
+	checked := 0
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "gateway" {
+			continue
+		}
+		err := filepath.WalkDir(entry.Name(), func(path string, walkEntry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if walkEntry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			checked++
+
+			file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+			if err != nil {
+				return fmt.Errorf("解析 %s 失败: %w", path, err)
+			}
+			for _, spec := range file.Imports {
+				importPath, err := strconv.Unquote(spec.Path.Value)
+				if err != nil {
+					continue
+				}
+				if importPath == assemblyPackagePath {
+					t.Errorf("%s 导入了 %s：能力包不得依赖装配层，依赖方向只能是装配层组装能力包",
+						path, importPath)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("internal/ 下没有生产代码文件，扫描失去意义")
+	}
+	t.Logf("已检查 internal/ 下 %d 个生产代码文件", checked)
+}
+
+// cmdForwardingForbiddenImports 是命令包生产代码不得直接导入的转发能力实现。
+//
+// 这些实现由 internal/gateway 组装后注入，命令包只经装配入口调用；直接导入会把
+// 业务规则重新搬回命令包，并绕过装配层的依赖方向。
+// 允许命令包导入的是装配入口（gateway、access、observability）、存储与配置、
+// 管理面服务，以及 admin 校验用到的 billing/quota 白名单——后者是取值白名单而非
+// 转发实现，属人工可接受范围。
+var cmdForwardingForbiddenImports = []string{
+	internalPrefix + "adapters",
+	internalPrefix + "upstream",
+	internalPrefix + "credential",
+	internalPrefix + "ratelimit",
+	internalPrefix + "circuit",
+	internalPrefix + "pipeline",
+	internalPrefix + "transport",
+	internalPrefix + "route",
+	internalPrefix + "settlement",
+	internalPrefix + "usage",
+	internalPrefix + "access",
+}
+
+// TestCmdHasNoForwardingImplementationImports 守护「cmd 只做解析、装配调用与输出」：
+// cmd/tokenmp 的生产代码不得直接导入转发能力实现。测试运行目录在 internal/ 下，
+// 因此命令包路径相对于该目录取 ../cmd/tokenmp。
+func TestCmdHasNoForwardingImplementationImports(t *testing.T) {
+	const cmdDir = "../cmd/tokenmp"
+
+	fset := token.NewFileSet()
+	checked := 0
+
+	err := filepath.WalkDir(cmdDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		checked++
+
+		file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return fmt.Errorf("解析 %s 失败: %w", path, err)
+		}
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				continue
+			}
+			for _, forbidden := range cmdForwardingForbiddenImports {
+				if importPath == forbidden || strings.HasPrefix(importPath, forbidden+"/") {
+					t.Errorf("%s 导入了 %s：转发能力由 internal/gateway 组装，命令包只经装配入口调用",
+						path, importPath)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked == 0 {
+		t.Fatal("cmd/tokenmp 下没有生产代码文件，扫描失去意义")
+	}
+	t.Logf("已检查 cmd/tokenmp 下 %d 个生产代码文件", checked)
+}
