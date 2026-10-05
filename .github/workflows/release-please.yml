@@ -1,0 +1,38 @@
+name: release-please
+
+# 推送到 main 后，release-please 解析 Conventional Commits：
+# 累积 CHANGELOG、开或更新 release PR。合并该 PR 时它负责打 tag 并建 GitHub Release。
+# 打出的 tag 再触发 release.yml 里的 GoReleaser 去挂载产物。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # 必须用 GitHub App token，不能用默认的 GITHUB_TOKEN。
+      #
+      # 原因：用默认 GITHUB_TOKEN 创建的事件**不会产生新的 workflow run**。
+      # 也就是说 GITHUB_TOKEN 打出的 tag 不会触发 release.yml，GoReleaser 永不运行，
+      # 而且没有任何报错 —— Release 建出来了，里面永远没有二进制。
+      # 这类失败静默、无告警，只有「下载页什么都没有」这一个外部症状。
+      #
+      # 需要配置两个仓库 secret：
+      #   RELEASE_BOT_APP_ID             GitHub App 的 App ID
+      #   RELEASE_BOT_APP_PRIVATE_KEY    GitHub App 的私钥（PEM 全文）
+      # App 需要 contents:write 与 pull_requests:write 权限。
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

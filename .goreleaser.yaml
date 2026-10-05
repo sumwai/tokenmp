@@ -1,0 +1,64 @@
+# GoReleaser v2 配置。首行 version: 2 是 v2 schema 的标识，不可省。
+version: 2
+
+project_name: tokenmp
+
+before:
+  hooks:
+    # 发布前先过一遍单测。CI 已经跑过，但这里是最后一道闸：
+    # tag 一旦打出来就是对外承诺，带着红的测试发出去无法收回。
+    - go test ./...
+
+builds:
+  - id: tokenmp
+    main: ./cmd/tokenmp
+    binary: tokenmp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      # 用 {{.CommitDate}} 而不是 {{.Date}}：前者取提交时间，同一提交重复构建产出相同；
+      # 后者是墙上时钟，每次构建都不同，破坏构建可复现性。
+      - -X main.date={{.CommitDate}}
+      - -X main.builtBy=goreleaser
+
+archives:
+  - id: tokenmp
+    # v2 里 format 已改成复数形式的 formats（列表）。
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CONTRIBUTING.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+# changelog 交给 release-please 生成，GoReleaser 这边关掉，
+# 避免同一份 Release 出现两套口径不同的变更记录。
+changelog:
+  disable: true
+
+release:
+  # keep-existing 是默认值，显式写出来是为了防止有人误改成 replace ——
+  # release-please 已经把 CHANGELOG 写进 Release body，replace 会把它覆盖掉。
+  # 本配置下 GoReleaser 只做一件事：把产物挂到这个既有 Release 上。
+  mode: keep-existing
+  draft: false
+  prerelease: auto
+
+# 本机快速验证配置：goreleaser check
+# 不推送、只在本地产出快照：goreleaser release --snapshot --clean

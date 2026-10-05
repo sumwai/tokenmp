@@ -1,0 +1,34 @@
+# 版本控制与本地状态
+.git
+.gitignore
+.github
+
+# 构建产物
+bin/
+dist/
+tokenmp
+
+# 前端依赖与产物：镜像里用不到，且 node_modules 体积巨大
+node_modules
+web/node_modules
+web/dist
+web/.vite
+
+# 本地环境与密钥（绝不能进镜像层）
+.env
+.env.*
+*.env
+secrets/
+*.key
+*.pem
+*.crt
+
+# 本地运行产物
+logs/
+
+# 文档与编辑器
+*.md
+!README.md
+.idea
+.vscode
+.DS_Store

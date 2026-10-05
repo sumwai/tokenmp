@@ -1,0 +1,18 @@
+# 所有文本文件在版本库里一律用 LF。
+# Windows 检出时由 git 按需转换，避免 CRLF 混进 diff 与 shell 脚本。
+* text=auto eol=lf
+
+# 二进制文件不做行尾与编码转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+
+# 生成物与锁文件在 diff 与语言统计里折叠，避免淹没真实改动
+*.sum linguist-generated
+package-lock.json linguist-generated
+dist/** linguist-generated

@@ -1,0 +1,41 @@
+# 构建产物
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.txt
+
+# 手工构建的二进制：make build 只做 go build ./...，不产出根目录二进制；
+# 但使用者常直接 go build -o tokenmp ./cmd/tokenmp，这类产物不得进入版本库。
+/tokenmp
+
+# 环境与密钥（严禁提交真实密钥）
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+*.key
+*.pem
+*.crt
+
+# 本地运行产物：启停日志与进程号只在本机产生
+/logs/
+
+# 前端依赖与构建产物（web/ 独立发布，产物不入库）
+node_modules/
+web/dist/
+web/.vite/
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+
+# 本地临时草稿
+/tmp/
+*.local
+
+# 本地 agent 任务工件
+.pi/

@@ -1,0 +1,37 @@
+name: release
+
+# 由 release-please 打出的 tag 触发。
+# 注意：只有用 GitHub App token 或 PAT 打的 tag 才会触发本工作流 ——
+# 默认 GITHUB_TOKEN 创建的事件不产生 workflow run，见 release-please.yml 的说明。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 是必需的，不能省。
+      # GoReleaser 要读完整 tag 历史才能定位当前 tag 的提交、算 changelog、取提交时间；
+      # 默认的浅克隆（depth 1）会让它拿不到这些信息。
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - run: mise install go
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: '~> v2'
+          # v2 里 --rm-dist 已改名为 --clean。
+          args: release --clean
+        env:
+          # 本处用默认 GITHUB_TOKEN 是安全的：GITHUB_TOKEN 的限制是「不能触发下游工作流」，
+          # 而本工作流是链路终点，它只需要写 Release 与上传产物。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
