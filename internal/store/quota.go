@@ -103,12 +103,17 @@ const quotaUsageSQL = "SELECT COALESCE(SUM(CAST(JSON_EXTRACT(`usage`, ?) AS DECI
 
 // quotaScopeColumn 返回 scope 在 billing_usage 上的维度列。
 //
-// account / channel 有对应列；api_key / plan 在流水上没有维度，无法聚合，直接报错
+// account / api_key / channel 有对应列；plan 在流水上没有维度，无法聚合，直接报错
 // 而不是按全账户口径静默放大或缩小用量。
+//
+// channel 列只服务于管理面的已用量展示：判定入口不执行 channel 限额 —— 鉴权阶段
+// 尚未选路，按渠道的速率保护已由限流承担。
 func quotaScopeColumn(scope billing.Scope) (string, error) {
 	switch scope {
 	case billing.ScopeAccount:
 		return "account_id", nil
+	case billing.ScopeAPIKey:
+		return "api_key_id", nil
 	case billing.ScopeChannel:
 		return "channel_id", nil
 	default:

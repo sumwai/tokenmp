@@ -104,21 +104,56 @@ func New(repo Repo, logf func(msg string, args ...any)) *Service {
 	return &Service{repo: repo, logf: logf}
 }
 
-// Check 判定账户维度的限额，未超限或无法判定时返回 nil。
+// scopeRef 是一个限额判定维度与其实体 id。
+type scopeRef struct {
+	scope billing.Scope
+	id    uint64
+}
+
+// Check 判定账户与 API key 两个维度的限额，未超限或无法判定时返回 nil。
 //
-// 判定点是账户：鉴权通过时渠道尚未选出，account_api_key 在 billing_usage 上也没有
-// 对应列，因此本层只判定 account 维度的限额行。存放其它 scope 的行保留在表里，由
-// 后续具备相应上下文的消费者判定。
+// 两个维度共用同一套窗口计算与聚合查询，只是把维度列换成 account_id / api_key_id，
+// 没有第二套实现。
+//
+// 不做 channel 与 plan 维度：鉴权阶段尚未选路，渠道限额没有可判定的对象（按渠道的
+// 速率保护由限流承担）；plan 在流水上没有维度列。存放这两类 scope 的行保留在表里，
+// 由具备相应上下文的消费者处理。
+//
+// apiKeyID 为 0 时跳过 key 维度：0 表示本次调用没有可归属的 key，流水里
+// api_key_id = 0 的行（历史或内部写入）因此不计入任何 key 限额。
 //
 // 多个限额同时超限时优先返回 reject：它是更强的处置，用 throttle 盖住 reject 会让
 // 已被明确拒绝的用量照样通过。
 //
-// 本 issue 不做缓存，每次请求按「单账户 × 单限额」聚合一次。后续如需缓存，入口就在
+// 本 issue 不做缓存，每次请求按「单维度 × 单限额」聚合一次。后续如需缓存，入口就在
 // 这里：按 (QuotaID, 窗口起点) 缓存 Used 的结果，失效时刻取窗口起点加周期。
-func (s *Service) Check(ctx context.Context, accountID uint64, now time.Time) *Violation {
-	limits, err := s.repo.Quotas(ctx, billing.ScopeAccount, accountID)
+func (s *Service) Check(ctx context.Context, accountID, apiKeyID uint64, now time.Time) *Violation {
+	refs := []scopeRef{{scope: billing.ScopeAccount, id: accountID}}
+	if apiKeyID != 0 {
+		refs = append(refs, scopeRef{scope: billing.ScopeAPIKey, id: apiKeyID})
+	}
+	var throttle *Violation
+	for _, ref := range refs {
+		violation := s.checkScope(ctx, ref, now)
+		if violation == nil {
+			continue
+		}
+		if violation.Limit.Action == billing.ActionReject {
+			return violation
+		}
+		if throttle == nil {
+			throttle = violation
+		}
+	}
+	return throttle
+}
+
+// checkScope 判定单个维度下的全部限额，未超限或无法判定时返回 nil。
+func (s *Service) checkScope(ctx context.Context, ref scopeRef, now time.Time) *Violation {
+	limits, err := s.repo.Quotas(ctx, ref.scope, ref.id)
 	if err != nil {
-		s.logf("限额定义读取失败，放行本次请求", "account_id", accountID, "error", err)
+		s.logf("限额定义读取失败，放行本次请求",
+			"scope", string(ref.scope), "scope_id", ref.id, "error", err)
 		return nil
 	}
 	var throttle *Violation
@@ -130,7 +165,8 @@ func (s *Service) Check(ctx context.Context, accountID uint64, now time.Time) *V
 			continue
 		}
 		if err != nil {
-			s.logf("限额聚合失败，放行本次请求", "quota_id", limit.ID, "account_id", accountID, "error", err)
+			s.logf("限额聚合失败，放行本次请求",
+				"quota_id", limit.ID, "scope", string(ref.scope), "scope_id", ref.id, "error", err)
 			continue
 		}
 		if !limit.Exceeded(used) {

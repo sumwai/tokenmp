@@ -92,6 +92,37 @@ func TestQuotaUsageIntegration(t *testing.T) {
 		}
 	}
 
+	// api_key 维度的流水：key 7 用 100，key 8 用 50，另有一条 api_key_id=0 的
+	// 「无 key 维度」行。后者的用量不得计入任何 key 限额，聚合 7 / 8 时被排除。
+	const (
+		keyAQuotaID = 7
+		keyBID      = 8
+		keylessUse  = 999
+	)
+	keyQuotaID, err := s.InsertQuota(ctx, store.Quota{
+		Scope: billing.ScopeAPIKey, ScopeID: keyAQuotaID, Metric: billing.MetricInputToken,
+		WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+		LimitAmount: "1000", Action: billing.ActionReject,
+	})
+	if err != nil {
+		t.Fatalf("写入 api_key 限额失败：%v", err)
+	}
+	keyAccountID := uint64(accountID + 1)
+	// 用另一条渠道：channel 维度的既有断言按 channel_id 聚合，混入新行会让那条断言偏离。
+	keyChannelID := uint64(channelID + 1)
+	for _, row := range []store.UsageRow{
+		{MerchantID: 1, AccountID: keyAccountID, ChannelID: keyChannelID, APIKeyID: keyAQuotaID, Model: "up-model",
+			Usage: map[billing.Metric]int{billing.MetricInputToken: 100}},
+		{MerchantID: 1, AccountID: keyAccountID, ChannelID: keyChannelID, APIKeyID: keyBID, Model: "up-model",
+			Usage: map[billing.Metric]int{billing.MetricInputToken: 50}},
+		{MerchantID: 1, AccountID: keyAccountID, ChannelID: keyChannelID, APIKeyID: 0, Model: "up-model",
+			Usage: map[billing.Metric]int{billing.MetricInputToken: keylessUse}},
+	} {
+		if _, err := s.InsertUsage(ctx, row); err != nil {
+			t.Fatalf("写入 api_key 维度用量失败：%v", err)
+		}
+	}
+
 	// metric 聚合键：只累加 input_token，输出 token 不计入。
 	assertUsage(ctx, t, s, quota.UsageQuery{
 		Scope: billing.ScopeAccount, ScopeID: accountID, QuotaID: quotaID,
@@ -116,6 +147,16 @@ func TestQuotaUsageIntegration(t *testing.T) {
 		Metric: billing.MetricReasoningToken, Since: farPast,
 	}, "0")
 
+	// api_key 维度聚合：只累加该 key 的流水，api_key_id=0 的行不计入。
+	assertUsage(ctx, t, s, quota.UsageQuery{
+		Scope: billing.ScopeAPIKey, ScopeID: keyAQuotaID, QuotaID: keyQuotaID,
+		Metric: billing.MetricInputToken, Since: farPast,
+	}, "100")
+	assertUsage(ctx, t, s, quota.UsageQuery{
+		Scope: billing.ScopeAPIKey, ScopeID: keyBID, QuotaID: keyQuotaID,
+		Metric: billing.MetricInputToken, Since: farPast,
+	}, "50")
+
 	// reset 基准截断：基准晚于全部流水时聚合为 0，即便窗口起点很早。
 	if _, err := s.InsertQuotaEvent(ctx, store.QuotaEvent{
 		QuotaID: quotaID, Event: billing.QuotaEventReset, BaselineAt: farFuture,
@@ -128,12 +169,12 @@ func TestQuotaUsageIntegration(t *testing.T) {
 		Metric: billing.MetricInputToken, Since: farPast,
 	}, "0")
 
-	// api_key / plan 在 billing_usage 上没有维度，聚合应明确报错。
+	// plan 在 billing_usage 上没有维度，聚合应明确报错而不是静默聚合。
 	if _, err := s.Usage(ctx, quota.UsageQuery{
-		Scope: billing.ScopeAPIKey, ScopeID: 1, QuotaID: quotaID,
+		Scope: billing.ScopePlan, ScopeID: 1, QuotaID: quotaID,
 		Metric: billing.MetricInputToken, Since: farPast,
 	}); err == nil {
-		t.Error("api_key 维度应报错而不是静默聚合")
+		t.Error("plan 维度应报错而不是静默聚合")
 	}
 }
 

@@ -143,7 +143,7 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 		}
 		// 窗口限额判定与 402 预检同层：都在鉴权通过、协议分派之前。
 		// 聚合失败与组合非法由判定器宽容放行，不阻断转发。
-		if violation := a.quotas.Check(r.Context(), auth.AccountID, now); violation != nil {
+		if violation := a.quotas.Check(r.Context(), auth.AccountID, auth.APIKeyID, now); violation != nil {
 			writeQuotaViolation(w, violation)
 			return
 		}
