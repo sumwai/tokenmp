@@ -1,4 +1,4 @@
-package main
+package gateway
 
 import (
 	"bytes"
@@ -282,7 +282,7 @@ func activeAuth() *store.APIKeyAuth {
 }
 
 // newTestGateway 装配网关；装配失败即让用例失败。
-func newTestGateway(t *testing.T, st gatewayStore) *gateway {
+func newTestGateway(t *testing.T, st gatewayStore) *Gateway {
 	t.Helper()
 	gw, err := newGateway(st, gatewayOptions{CompleteTimeout: 5 * time.Second})
 	if err != nil {

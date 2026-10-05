@@ -13,8 +13,9 @@
 //  6. 跨协议：客户端方言与渠道方言不一致时成功转换
 //  7. admin 回读：usage list 与 bucket list 数值与剧本断言一致
 //
-// 为什么放在 cmd/tokenmp 包内而不是独立包：serve 的装配函数（newGateway、runServer）
-// 未导出，独立包无法复用，复制一份装配又会让剧本验证的是复制件而非生产装配路径。
+// 为什么放在 cmd/tokenmp 包内：剧本是 make e2e 的入口，直接以二进制所在的包为运行单位；
+// serve 的装配与运行已下沉到 internal/gateway，本文件经导出入口 gateway.New/gateway.Run
+// 复用生产装配路径，不另写一份装配件。
 // 取舍是用构建标签隔离（//go:build e2e），因此不进 make check；需要真实 MySQL，
 // DSN 经 TOKENMP_TEST_MYSQL_DSN 传入，与 check-integration 同一口径，未设置时整体 SKIP。
 //
@@ -37,12 +38,14 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/sumwai/tokenmp/internal/access"
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
 	"github.com/sumwai/tokenmp/internal/admin"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/gateway"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -163,7 +166,7 @@ func (u *e2eUpstream) handle(w http.ResponseWriter, r *http.Request) {
 	u.record(u.keyHits, key)
 	u.record(u.pathHits, r.URL.Path)
 	if key == e2eRejectedKey {
-		w.Header().Set("Content-Type", jsonContentType)
+		w.Header().Set("Content-Type", access.JSONContentType)
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"error":{"type":"authentication_error","message":"上游拒绝本次凭据"}}`)
 		return
@@ -233,8 +236,8 @@ func e2eProtocolForPath(path string) (domain.Protocol, bool) {
 
 // e2eUpstreamKey 取上游请求里的凭据：OpenAI 系用 Authorization，Anthropic 用 x-api-key。
 func e2eUpstreamKey(header http.Header) string {
-	if auth := header.Get("Authorization"); strings.HasPrefix(auth, authSchemePrefix) {
-		return strings.TrimPrefix(auth, authSchemePrefix)
+	if auth := header.Get("Authorization"); strings.HasPrefix(auth, access.AuthSchemePrefix) {
+		return strings.TrimPrefix(auth, access.AuthSchemePrefix)
 	}
 	return header.Get("x-api-key")
 }
@@ -445,9 +448,9 @@ func e2ePost(t *testing.T, endpoint, key, body string) e2eHTTPResult {
 	if err != nil {
 		t.Fatalf("构造请求失败：%v", err)
 	}
-	req.Header.Set("Content-Type", jsonContentType)
+	req.Header.Set("Content-Type", access.JSONContentType)
 	if key != "" {
-		req.Header.Set(authorizationHeader, authSchemePrefix+key)
+		req.Header.Set(access.AuthorizationHeader, access.AuthSchemePrefix+key)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -464,7 +467,7 @@ func e2ePost(t *testing.T, endpoint, key, body string) e2eHTTPResult {
 // e2eErrorCode 解析统一错误体里的错误码。
 func e2eErrorCode(t *testing.T, body []byte) string {
 	t.Helper()
-	var envelope errorEnvelope
+	var envelope access.ErrorEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		t.Fatalf("响应体不是统一错误体：%v，原文 %s", err, body)
 	}
@@ -664,7 +667,7 @@ func e2eUpstreamKeyFor(protocol domain.Protocol) string {
 // 复用 cmdServe 内部的 newGateway 与 runServer，而不是另写一份装配：
 // 剧本要验证的是生产装配路径。端口取 127.0.0.1:0 由内核分配，不依赖固定端口。
 func (j *e2eJourney) step2StartServe(t *testing.T) {
-	gw, err := newGateway(j.st, gatewayOptions{CompleteTimeout: 10 * time.Second})
+	gw, err := gateway.New(j.st, gateway.Options{CompleteTimeout: 10 * time.Second})
 	e2eMust(t, err)
 
 	var listenConfig net.ListenConfig
@@ -673,10 +676,10 @@ func (j *e2eJourney) step2StartServe(t *testing.T) {
 		gw.Close()
 		t.Fatalf("监听临时端口失败：%v", err)
 	}
-	server := &http.Server{Handler: gw.handler, ReadHeaderTimeout: readHeaderTimeout}
+	server := &http.Server{Handler: gw.Handler(), ReadHeaderTimeout: gateway.ReadHeaderTimeout}
 	serveCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runServer(serveCtx, server, ln) }()
+	go func() { done <- gateway.Run(serveCtx, server, ln) }()
 
 	j.gatewayURL = "http://" + ln.Addr().String()
 	j.stopServe = func() {
@@ -686,7 +689,7 @@ func (j *e2eJourney) step2StartServe(t *testing.T) {
 		}
 		gw.Close()
 	}
-	e2eWaitForOK(t, j.gatewayURL+healthzPath)
+	e2eWaitForOK(t, j.gatewayURL+gateway.HealthzPath)
 }
 
 // e2eWaitForOK 轮询健康检查直到 200 或超时。
