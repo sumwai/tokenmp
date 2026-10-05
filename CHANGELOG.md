@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.5](https://github.com/sumwai/tokenmp/compare/v0.1.4...v0.1.5) (2026-10-05)
+
+
+### Features
+
+* admin 管理面子命令集 ([#34](https://github.com/sumwai/tokenmp/issues/34)) ([d2fac98](https://github.com/sumwai/tokenmp/commit/d2fac98b1d719063ca697f7db1ed7a30b2fed62c))
+* OpenAPI 规范与协议兼容性说明 ([#56](https://github.com/sumwai/tokenmp/issues/56)) ([999d3fa](https://github.com/sumwai/tokenmp/commit/999d3faf1525b448c1f10ada1d82eec4519d7f7c))
+* 上游渠道限流执行——QPS 与并发上限 ([#39](https://github.com/sumwai/tokenmp/issues/39)) ([8d51658](https://github.com/sumwai/tokenmp/commit/8d516582b94a1eb084dae5c882653901a2377501))
+* 上游熔断接线——连续失败隔离与半开探测 ([#45](https://github.com/sumwai/tokenmp/issues/45)) ([18af94a](https://github.com/sumwai/tokenmp/commit/18af94a3563d6b0a7e85a793b3ae4715b21f78a8))
+* 端到端运营剧本——从入驻到对账的可重复验证 ([#53](https://github.com/sumwai/tokenmp/issues/53)) ([1d03216](https://github.com/sumwai/tokenmp/commit/1d03216124cbeeeebfedd63c12dbbdaa6819eada))
+* 结算执行——定价解析、倍率链与账本扣减 ([#30](https://github.com/sumwai/tokenmp/issues/30)) ([c0319b6](https://github.com/sumwai/tokenmp/commit/c0319b639d9a1ec57f923b133b0430d19afe95f3))
+* 账户限额执行——窗口聚合判定与管理动作 ([#38](https://github.com/sumwai/tokenmp/issues/38)) ([a597fc3](https://github.com/sumwai/tokenmp/commit/a597fc320060162f6eccf7077021c1a3d32137b1))
+* 跨协议路由降级——同协议缺位时的重建转发 ([#43](https://github.com/sumwai/tokenmp/issues/43)) ([387fcaf](https://github.com/sumwai/tokenmp/commit/387fcaffebb8559c01673326f31173bd6e23bda1))
+* 限额判定扩展到 api_key 维度 ([#52](https://github.com/sumwai/tokenmp/issues/52)) ([1467650](https://github.com/sumwai/tokenmp/commit/1467650ec685d36aff928edb4e055312a6861c1e))
+* 非货币包的跨单位折算率与 fallback 转换 ([#35](https://github.com/sumwai/tokenmp/issues/35)) ([b6423df](https://github.com/sumwai/tokenmp/commit/b6423dffc3ea5dc6b6c3604895277671d6d1f71c))
+
+
+### Bug Fixes
+
+* request 次数限额永不触发——usage 未写入 request 分量 ([#55](https://github.com/sumwai/tokenmp/issues/55)) ([0724121](https://github.com/sumwai/tokenmp/commit/0724121336bde22a6c59c9083e8578b50d0e66b0))
+* 跨协议降级在尝试预算耗尽前不可达 ([#47](https://github.com/sumwai/tokenmp/issues/47)) ([c24dc8c](https://github.com/sumwai/tokenmp/commit/c24dc8c609013453432faa162b964d604bd7ab70))
+
+
+### Code Refactoring
+
+* 过程式代码下沉——cmd 只剩解析、装配与输出 ([#59](https://github.com/sumwai/tokenmp/issues/59)) ([e070bed](https://github.com/sumwai/tokenmp/commit/e070bed7498d724d4376c87f5fc06be16d42b138))
+
+
+### Documentation
+
+* 使用与部署文档——运营剧本与环境变量手册 ([#57](https://github.com/sumwai/tokenmp/issues/57)) ([ea43154](https://github.com/sumwai/tokenmp/commit/ea431541fc878fece2c2ad60bd0ee534ca474c90))
+
 ## [0.1.4](https://github.com/sumwai/tokenmp/compare/v0.1.3...v0.1.4) (2026-10-05)
 
 
