@@ -19,9 +19,15 @@ import "fmt"
 //	input_token        输入 token 数
 //	output_token       输出 token 数
 //	cache_read_token   缓存读取 token 数
+//	cache_write_token  缓存写入 token 数（上游只报单一数量的形态）
 //	cache_write_5m     TTL 5 分钟的缓存写入 token 数
 //	cache_write_1h     TTL 1 小时的缓存写入 token 数
+//	reasoning_token    推理 token 数，是 output_token 的子项
 //	request            请求次数
+//
+// 子项口径：cache_read_token / cache_write_* 是 input_token 的子项，reasoning_token
+// 是 output_token 的子项。它们各自独立计价：定价表里没写某个子项的分量时不重复计价，
+// 写了也不叠加到主计数上（主计数已包含子项，叠加会重复收费）。
 //
 // 新增指标：本 const 块加一个取值，并在计费代码里识别该 metric。
 // metric 是字符串列，不加数据库枚举，不发迁移。
@@ -34,22 +40,32 @@ const (
 	MetricOutputToken Metric = "output_token"
 	// MetricCacheReadToken 是缓存读取 token。
 	MetricCacheReadToken Metric = "cache_read_token"
+	// MetricCacheWriteToken 是上游只报单一数量时的缓存写入 token。
+	// 上游能区分 5 分钟与 1 小时分档时用 MetricCacheWrite5m / MetricCacheWrite1h。
+	//
+	//nolint:gosec // G101：这是计量指标名，不是凭据；启发式命中只因常量值里含 token。
+	MetricCacheWriteToken Metric = "cache_write_token"
 	// MetricCacheWrite5m 是 TTL 5 分钟的缓存写入 token。
 	MetricCacheWrite5m Metric = "cache_write_5m"
 	// MetricCacheWrite1h 是 TTL 1 小时的缓存写入 token。
 	MetricCacheWrite1h Metric = "cache_write_1h"
+	// MetricReasoningToken 是 output_token 的推理子项。
+	// 它只作事实记录：定价分量里没写该 metric 时不计价，写了也不与 output_token 叠加。
+	MetricReasoningToken Metric = "reasoning_token"
 	// MetricRequest 是请求次数。
 	MetricRequest Metric = "request"
 )
 
 // knownMetrics 是写入白名单，也是列举取值的唯一出处。
 var knownMetrics = map[Metric]struct{}{
-	MetricInputToken:     {},
-	MetricOutputToken:    {},
-	MetricCacheReadToken: {},
-	MetricCacheWrite5m:   {},
-	MetricCacheWrite1h:   {},
-	MetricRequest:        {},
+	MetricInputToken:      {},
+	MetricOutputToken:     {},
+	MetricCacheReadToken:  {},
+	MetricCacheWriteToken: {},
+	MetricCacheWrite5m:    {},
+	MetricCacheWrite1h:    {},
+	MetricReasoningToken:  {},
+	MetricRequest:         {},
 }
 
 // Known 报告该指标是否在写入白名单内。
