@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,8 +21,8 @@ import (
 // envTestDSN 指向一个可丢弃的库：本测试会先删掉已知表再重建。
 const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 
-// knownTables 与 migrations/0001_init.sql、0002_billing.sql、0003_account_bucket_unit_rate.sql 对应，
-// 删除顺序无关紧要（全库无外键）。
+// knownTables 与 migrations/0001_init.sql、0002_billing.sql、0003_account_bucket_unit_rate.sql、
+// 0004_billing_usage_api_key.sql 对应，删除顺序无关紧要（全库无外键）。
 var knownTables = []string{
 	"billing_adjustment",
 	"account_quota_event",
@@ -83,15 +84,18 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 
 	assertPlatformMerchant(ctx, t, s.DB())
 	assertUnitRateColumn(ctx, t, s.DB())
+	assertAPIKeyColumn(ctx, t, s.DB())
 
 	// 重复启动的幂等性：第二次迁移不应因表已存在而失败，也不应重复插入种子行。
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 3)
+	assertMigrationVersionCount(ctx, t, s.DB(), 4)
 	assertPlatformMerchantCount(ctx, t, s.DB(), 1)
 	// 第二次迁移不应重复加列：列仍存在且可空。
 	assertUnitRateColumn(ctx, t, s.DB())
+	// 0004 的重复加列 / 加索引同样应当被跳过，重跑后列仍存在。
+	assertAPIKeyColumn(ctx, t, s.DB())
 }
 
 func dropKnownTables(ctx context.Context, t *testing.T, db *sql.DB) {
@@ -180,6 +184,38 @@ func assertUnitRateColumn(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 	if nullable != "YES" {
 		t.Errorf("account_bucket.unit_rate 应为可空列，得到 is_nullable=%q", nullable)
+	}
+}
+
+// assertAPIKeyColumn 断言 0004 加上的 api_key_id 列与 (api_key_id, created_at) 索引存在。
+func assertAPIKeyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var (
+		columnType string
+		nullable   string
+	)
+	err := db.QueryRowContext(ctx,
+		"SELECT column_type, is_nullable FROM information_schema.columns "+
+			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND column_name = 'api_key_id'")
+	if err != nil {
+		t.Fatalf("查询 billing_usage.api_key_id 列失败：%v", err)
+	}
+	if nullable != "NO" {
+		t.Errorf("billing_usage.api_key_id 应为非空列，得到 is_nullable=%q", nullable)
+	}
+	if !strings.HasPrefix(columnType, "bigint") {
+		t.Errorf("billing_usage.api_key_id 类型 = %q，期望 bigint 系", columnType)
+	}
+
+	var columns int
+	err = db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.statistics "+
+			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND index_name = 'idx_usage_api_key_time'")
+	if err != nil {
+		t.Fatalf("查询 billing_usage.idx_usage_api_key_time 索引失败：%v", err)
+	}
+	if columns != 2 {
+		t.Errorf("idx_usage_api_key_time 列数 = %d，期望 2", columns)
 	}
 }
 
@@ -382,5 +418,5 @@ func TestBillingStoreRoundTrip(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 3)
+	assertMigrationVersionCount(ctx, t, s.DB(), 4)
 }

@@ -243,6 +243,7 @@ type Adjustment struct {
 // UsageRow 是 billing_usage 的一行：一次转发的用量事实。
 //
 // Usage 的键必须是 billing 的白名单指标，写入前逐个校验，脏键不落库。
+// APIKeyID 为 0 表示这次转发没有可归属的 key，该行不计入 api_key 限额。
 // 本条路径只写占位结算字段：pricing_id / gross_amount / multiplier / settlement
 // 由 SQL 固定为 0 / 0 / 1 / NULL，不经调用方传入。带真实结算字段的写入见
 // settlement.go 的 Tx.InsertUsage。
@@ -250,6 +251,7 @@ type UsageRow struct {
 	MerchantID uint64
 	AccountID  uint64
 	ChannelID  uint64
+	APIKeyID   uint64
 	Model      string
 	Usage      map[billing.Metric]int
 }
@@ -259,8 +261,8 @@ type UsageRow struct {
 // 不把 pricing_id 等做成占位符：本条路径的口径是「只落用量、不结算」，允许调用方
 // 传值会给出「这里能结算」的假象。真实结算走 settlement.go 的显式参数语句。
 const insertUsageSQL = "INSERT INTO billing_usage " +
-	"(merchant_id, account_id, channel_id, model, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
-	"VALUES (?, ?, ?, ?, ?, 0, 0, 1, NULL)"
+	"(merchant_id, account_id, channel_id, api_key_id, model, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
+	"VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1, NULL)"
 
 // validateUsageInput 校验一条用量流水的最小事实，占位与结算两条写入路径共用。
 func validateUsageInput(merchantID, accountID, channelID uint64, model string, usage map[billing.Metric]int) error {
@@ -312,7 +314,7 @@ func insertUsage(ctx context.Context, ex executor, row UsageRow) (uint64, error)
 		return 0, err
 	}
 	res, err := ex.ExecContext(ctx, insertUsageSQL,
-		row.MerchantID, row.AccountID, row.ChannelID, row.Model, payload)
+		row.MerchantID, row.AccountID, row.ChannelID, row.APIKeyID, row.Model, payload)
 	return insertID(res, err, "billing_usage")
 }
 

@@ -201,6 +201,42 @@ func TestUnitRateMigrationShape(t *testing.T) {
 	}
 }
 
+// TestAPIKeyMigrationShape 锁定 0004 的形状：给 billing_usage 只加一列与一个索引，
+// 列带 NOT NULL DEFAULT 0，且加列 / 加索引都先查 information_schema 再执行。
+// 与 0003 同理，若改成裸 ALTER，重跑会因对象已存在而中断。
+func TestAPIKeyMigrationShape(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0004_billing_usage_api_key.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	script := strings.Join(statements, "\n")
+
+	if len(statements) != 8 {
+		t.Errorf("0004 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
+			len(statements), statements)
+	}
+	for _, want := range []string{
+		"ALTER TABLE billing_usage ADD COLUMN api_key_id BIGINT UNSIGNED NOT NULL DEFAULT 0",
+		"ADD KEY idx_usage_api_key_time (api_key_id, created_at)",
+		"information_schema.COLUMNS",
+		"information_schema.STATISTICS",
+		"PREPARE",
+		"EXECUTE",
+		"DEALLOCATE PREPARE",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("0004 缺少可重跑所需的 %q", want)
+		}
+	}
+	// 只加列与索引、不改存量：不得出现 UPDATE / INSERT，也不建新表。
+	for _, forbidden := range []string{"UPDATE billing_usage", "INSERT INTO", "CREATE TABLE"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("0004 不应包含 %q", forbidden)
+		}
+	}
+}
+
 func TestParseMigrationName(t *testing.T) {
 	tests := []struct {
 		name        string

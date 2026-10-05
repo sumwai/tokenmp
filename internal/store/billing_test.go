@@ -493,6 +493,7 @@ func TestInsertUsageArgs(t *testing.T) {
 		MerchantID: 3,
 		AccountID:  4,
 		ChannelID:  5,
+		APIKeyID:   6,
 		Model:      "up-model",
 		Usage:      map[billing.Metric]int{billing.MetricInputToken: 7, billing.MetricReasoningToken: 2},
 	})
@@ -505,10 +506,10 @@ func TestInsertUsageArgs(t *testing.T) {
 	if fake.query != insertUsageSQL {
 		t.Errorf("SQL = %q，期望 %q", fake.query, insertUsageSQL)
 	}
-	if len(fake.args) != 5 {
-		t.Fatalf("参数个数 = %d，期望 5", len(fake.args))
+	if len(fake.args) != 6 {
+		t.Fatalf("参数个数 = %d，期望 6", len(fake.args))
 	}
-	want := []any{uint64(3), uint64(4), uint64(5), "up-model", []byte(`{"input_token":7,"reasoning_token":2}`)}
+	want := []any{uint64(3), uint64(4), uint64(5), uint64(6), "up-model", []byte(`{"input_token":7,"reasoning_token":2}`)}
 	if !reflect.DeepEqual(fake.args, want) {
 		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
 	}
@@ -523,9 +524,9 @@ func TestInsertUsageEmptyMetrics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("意外错误：%v", err)
 	}
-	got, ok := fake.args[4].([]byte)
+	got, ok := fake.args[5].([]byte)
 	if !ok {
-		t.Fatalf("usage 参数类型 = %T，期望 []byte", fake.args[4])
+		t.Fatalf("usage 参数类型 = %T，期望 []byte", fake.args[5])
 	}
 	if string(got) != "{}" {
 		t.Errorf("空用量应序列化为 {}，得到 %s", got)
