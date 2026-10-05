@@ -178,6 +178,51 @@ func FallbackFromDB(raw string) Fallback {
 	return Fallback(raw)
 }
 
+// Source 是账本来路，对应 account_bucket.source。
+//
+//	purchase  购买商品派生（purchase buy 生成）
+//	grant     运营发放
+//	recharge  充值
+//
+// 新增来路：本 const 块加一个取值，并在对应写入路径识别该来路。
+// 它只用于对账分组与来源展示，不参与扣减顺序。
+type Source string
+
+const (
+	// SourcePurchase 是购买派生。
+	SourcePurchase Source = "purchase"
+	// SourceGrant 是运营发放。
+	SourceGrant Source = "grant"
+	// SourceRecharge 是充值。
+	SourceRecharge Source = "recharge"
+)
+
+// knownSources 是写入白名单。
+var knownSources = map[Source]struct{}{
+	SourcePurchase: {},
+	SourceGrant:    {},
+	SourceRecharge: {},
+}
+
+// Known 报告该来路是否在写入白名单内。
+func (s Source) Known() bool {
+	_, ok := knownSources[s]
+	return ok
+}
+
+// ValidateSource 是写入口校验：未知来路直接拒绝。
+func ValidateSource(s Source) error {
+	if !s.Known() {
+		return fmt.Errorf("billing: 未知的账本来路 %q", string(s))
+	}
+	return nil
+}
+
+// SourceFromDB 把数据库列值转成 Source，未知值原样返回。
+func SourceFromDB(raw string) Source {
+	return Source(raw)
+}
+
 // WindowKind 是窗口型限额的窗口类型，对应 account_quota.window_kind。
 //
 // 窗口类型已决定重置语义，故 account_quota 没有 reset_policy 列：

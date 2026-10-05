@@ -123,12 +123,12 @@ func insertID(res sql.Result, err error, table string) (uint64, error) {
 
 // Pricing 是 billing_pricing 的一行：某商家对某模型的一个定价版本。
 type Pricing struct {
-	ID          uint64
-	MerchantID  uint64
-	Model       string
-	Version     int
-	EffectiveAt time.Time
-	RetiredAt   *time.Time
+	ID          uint64     `json:"id"`
+	MerchantID  uint64     `json:"merchant_id"`
+	Model       string     `json:"model"`
+	Version     int        `json:"version"`
+	EffectiveAt time.Time  `json:"effective_at"`
+	RetiredAt   *time.Time `json:"retired_at"`
 }
 
 // PriceComponent 是 billing_price_component 的一行。
@@ -152,48 +152,48 @@ type PriceComponent struct {
 // Metric 为空字符串即 NULL（全部指标）；TimeFrom / TimeTo 是 "HH:MM:SS"，
 // 空字符串即 NULL；WeekdayMask / DayKindMask 为 nil 即 NULL。
 type PriceRule struct {
-	ID          uint64
-	Scope       billing.Scope
-	ScopeID     uint64
-	Metric      billing.Metric
-	Multiplier  string
-	ValidFrom   *time.Time
-	ValidTo     *time.Time
-	TimeFrom    string
-	TimeTo      string
-	WeekdayMask *uint8
-	DayKindMask *uint16
-	Calendar    string
-	Priority    int
+	ID          uint64         `json:"id"`
+	Scope       billing.Scope  `json:"scope"`
+	ScopeID     uint64         `json:"scope_id"`
+	Metric      billing.Metric `json:"metric,omitempty"`
+	Multiplier  string         `json:"multiplier"`
+	ValidFrom   *time.Time     `json:"valid_from"`
+	ValidTo     *time.Time     `json:"valid_to"`
+	TimeFrom    string         `json:"time_from,omitempty"`
+	TimeTo      string         `json:"time_to,omitempty"`
+	WeekdayMask *uint8         `json:"weekday_mask"`
+	DayKindMask *uint16        `json:"day_kind_mask"`
+	Calendar    string         `json:"calendar,omitempty"`
+	Priority    int            `json:"priority"`
 }
 
 // CalendarDay 是 sys_calendar 的一行。
 type CalendarDay struct {
-	Date    string // "2006-01-02"
-	DayKind billing.DayKind
+	Date    string          `json:"date"` // "2006-01-02"
+	DayKind billing.DayKind `json:"day_kind"`
 }
 
 // Product 是 merchant_product 的一行：商品档位。
 type Product struct {
-	ID           uint64
-	MerchantID   uint64
-	Name         string
-	Unit         billing.UnitSettle
-	Qty          string
-	Price        string
-	ModelScope   []byte // JSON；nil 即 NULL
-	ValidityDays int
+	ID           uint64             `json:"id"`
+	MerchantID   uint64             `json:"merchant_id"`
+	Name         string             `json:"name"`
+	Unit         billing.UnitSettle `json:"unit"`
+	Qty          string             `json:"qty"`
+	Price        string             `json:"price"`
+	ModelScope   []byte             `json:"model_scope,omitempty"` // JSON；nil 即 NULL
+	ValidityDays int                `json:"validity_days"`
 }
 
 // Purchase 是 account_purchase 的一行。
 type Purchase struct {
-	ID          uint64
-	AccountID   uint64
-	MerchantID  uint64
-	ProductID   uint64
-	Qty         string
-	PricePaid   string
-	PurchasedAt time.Time
+	ID          uint64    `json:"id"`
+	AccountID   uint64    `json:"account_id"`
+	MerchantID  uint64    `json:"merchant_id"`
+	ProductID   uint64    `json:"product_id"`
+	Qty         string    `json:"qty"`
+	PricePaid   string    `json:"price_paid"`
+	PurchasedAt time.Time `json:"purchased_at"`
 }
 
 // Quota 是 account_quota 的一行：窗口型限额定义。
@@ -220,12 +220,12 @@ type QuotaEvent struct {
 
 // Adjustment 是 billing_adjustment 的一行：调账。
 type Adjustment struct {
-	ID          uint64
-	AccountID   uint64
-	DeltaAmount string
-	Reason      string
-	Operator    string
-	CreatedAt   time.Time
+	ID          uint64    `json:"id"`
+	AccountID   uint64    `json:"account_id"`
+	DeltaAmount string    `json:"delta_amount"`
+	Reason      string    `json:"reason"`
+	Operator    string    `json:"operator"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // UsageRow 是 billing_usage 的一行：一次转发的用量事实。

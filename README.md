@@ -26,6 +26,7 @@ $ ./bin/tokenmp help
 
 子命令：
   serve      启动网关 HTTP 服务
+  admin      管理面：商家、渠道、账户、定价与充值
   version    报出版本号、构建自哪个提交，以及运行时的 Go 版本
   help       打印本帮助
 ```
@@ -66,6 +67,44 @@ $ ./bin/tokenmp help
 上游状态码、耗时、是否重试与是否换渠道、错误码与已取得的用量分量。
 一次请求发生重试或换渠道时会留下多行，与请求日志按请求 id 关联。凭据与密钥不进入日志。
 
+## 管理面
+
+`tokenmp admin <组> <动作>` 直连数据库执行运营动作（本地运维工具，不经网络鉴权），
+数据库连接取自 `TOKENMP_MYSQL_DSN`。组与动作：
+
+| 组 | 动作 |
+|---|---|
+| `merchant` | `create` / `list` / `disable` |
+| `channel` | `create` / `list` / `enable` / `disable` |
+| `credential` | `add` / `list` / `disable` |
+| `model-map` | `set` / `list` / `disable` |
+| `account` | `create` / `list` / `disable` / `set-multiplier` / `set-merchant` |
+| `key` | `issue` / `list` / `revoke` |
+| `bucket` | `credit` / `list` |
+| `product` | `create` / `list` |
+| `purchase` | `buy` / `list` |
+| `price` | `publish` / `list` |
+| `rule` | `add` / `list` / `del` |
+| `calendar` | `import` / `list` |
+| `usage` | `list` |
+| `adjust` | `add` / `list` |
+
+```
+$ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
+$ ./bin/tokenmp admin account create --code acct-1 --name 账户
+$ ./bin/tokenmp admin key issue --account 1
+$ ./bin/tokenmp admin price publish --merchant 1 --model glm-5 \
+    --component input_token:0.27:currency:1000000
+$ ./bin/tokenmp admin usage list --account 1 --json
+```
+
+所有 `list` 动作输出对齐的纯文本表格，加 `--json` 输出机器可读格式。
+`key issue` 的明文只在签发那一次输出并标注「仅此一次」，库中只存哈希与前缀；
+凭据与密钥的明文不进入 `list` 输出。用法错误退出码为 2，运行失败为 1。
+
+`calendar import` 从标准输入或 `--file` 读 `日期,day_kind` 行；`price publish` 的
+`--component` 形如 `metric:price:unit_settle:qty`，可重复。
+
 ## 目录结构
 
 ```
@@ -77,6 +116,7 @@ internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
 internal/upstream/   调用上游渠道的 HTTP 客户端
 internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
 internal/store/      MySQL 连接、迁移与 schema 读写
+internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
 internal/billing/    计费指标与用量映射
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
