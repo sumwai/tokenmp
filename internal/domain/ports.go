@@ -450,6 +450,9 @@ type UsageRecord struct {
 	ChannelID uint64
 	// Model 是实际发往上游的模型名：计费按履约模型而不是客户端请求的别名。
 	Model string
+	// RequestedModel 是客户端请求的模型名（对外别名）。定价按履约模型解析，
+	// 渠道倍率（upstream_model_map.price_multiplier）按请求模型查，两者可能不同。
+	RequestedModel string
 	// Usage 是本次请求进入终态时的用量；未取得时是来源未知的零值。
 	Usage Usage
 }
