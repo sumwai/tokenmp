@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.1](https://github.com/sumwai/tokenmp/compare/v0.1.0...v0.1.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* 产物版本号与本地构建口径统一为带 v ([#12](https://github.com/sumwai/tokenmp/issues/12)) ([c6f6da3](https://github.com/sumwai/tokenmp/commit/c6f6da37f88e18babe3c62a9220c46ac9225a271))
+
+
+### Documentation
+
+* changelog 归属写入文档规则 ([#11](https://github.com/sumwai/tokenmp/issues/11)) ([95a7ee6](https://github.com/sumwai/tokenmp/commit/95a7ee64b481355e9393c0d68c1774eb698e5fec))
+* README 恢复 changelog 链接 ([#9](https://github.com/sumwai/tokenmp/issues/9)) ([7296ac3](https://github.com/sumwai/tokenmp/commit/7296ac31aae5b69241fffecd73486b0be2979077))
+
 ## 0.1.0 (2026-10-05)
 
 
