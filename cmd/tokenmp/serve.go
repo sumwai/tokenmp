@@ -104,6 +104,8 @@ type gatewayOptions struct {
 	UsageWriteTimeout time.Duration
 	// Logger 是结构化请求日志实现；nil 时不记录。
 	Logger transport.AccessLogger
+	// Observer 记录每次上游尝试；nil 时不记录尝试级日志。
+	Observer domain.Observer
 }
 
 // gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -181,6 +183,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Adapters:    lookupAdapter,
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
+		Observer:    opts.Observer,
 		Usage:       newUsageRecorder(st, opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
 		MaxAttempts: attempts,
@@ -396,6 +399,7 @@ func cmdServe(stderr io.Writer) int {
 		CredentialCooldown:          cfg.CredentialCooldown,
 		CredentialLogger:            newJSONLogger(os.Stdout),
 		Logger:                      newAccessLogger(os.Stdout),
+		Observer:                    newAttemptObserver(newJSONLogger(os.Stdout)),
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
