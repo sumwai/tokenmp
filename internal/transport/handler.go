@@ -74,6 +74,9 @@ type AccessRecord struct {
 	ChannelID uint64
 	// UpstreamStatus 是最后一次上游尝试的 HTTP 状态码；未取得（未选路、连接失败）时为 0。
 	UpstreamStatus int
+	// CrossProtocol 报告最后一次上游尝试的上游协议是否与客户端协议不同：
+	// 为真即表示本次转发走了跨协议重建（同协议缺位时的降级）。
+	CrossProtocol bool
 	// Stream 报告本次是否为流式请求。
 	Stream bool
 	// HTTPStatus 是返回给客户端的 HTTP 状态码。
@@ -245,6 +248,7 @@ func (h *Handler) observeRequest(rec *responseRecorder, start time.Time, state a
 		Model:          state.model,
 		ChannelID:      rec.channelID,
 		UpstreamStatus: rec.upstreamStatus,
+		CrossProtocol:  rec.crossProtocol,
 		Stream:         state.stream,
 		HTTPStatus:     rec.status,
 		DurationMS:     time.Since(start).Milliseconds(),
@@ -347,9 +351,11 @@ type responseRecorder struct {
 	bytes     int
 	errCode   string
 	committed bool
-	// channelID 与 upstreamStatus 由流水线经 domain.UpstreamAttemptSink 回流，供访问日志使用。
+	// channelID、upstreamStatus 与 crossProtocol 由流水线经 domain.UpstreamAttemptSink 回流，
+	// 供访问日志使用。
 	channelID      uint64
 	upstreamStatus int
+	crossProtocol  bool
 }
 
 // newResponseRecorder 包装响应写出目标；未显式调用 WriteHeader 时默认 200。
@@ -407,6 +413,9 @@ func (r *responseRecorder) SetAttemptChannel(channelID uint64) { r.channelID = c
 
 // SetUpstreamStatus 记录流水线本次尝试取得的上游 HTTP 状态码。
 func (r *responseRecorder) SetUpstreamStatus(status int) { r.upstreamStatus = status }
+
+// SetCrossProtocol 记录流水线本次尝试的上游协议是否与客户端协议不同。
+func (r *responseRecorder) SetCrossProtocol(cross bool) { r.crossProtocol = cross }
 
 // Unwrap 返回底层写出目标，供 http.ResponseController 向上查找写超时能力。
 func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
@@ -470,5 +479,13 @@ func (f *flushWriter) SetAttemptChannel(channelID uint64) {
 func (f *flushWriter) SetUpstreamStatus(status int) {
 	if sink, ok := f.writer.(domain.UpstreamAttemptSink); ok {
 		sink.SetUpstreamStatus(status)
+	}
+}
+
+// SetCrossProtocol 把「上游协议与客户端协议是否不同」回流透传给被包装的响应写出目标；
+// 目标不支持该能力时为空操作。
+func (f *flushWriter) SetCrossProtocol(cross bool) {
+	if sink, ok := f.writer.(domain.UpstreamAttemptSink); ok {
+		sink.SetCrossProtocol(cross)
 	}
 }

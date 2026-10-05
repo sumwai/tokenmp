@@ -323,9 +323,9 @@ func (p *Pipeline) forward(
 		for credentialAttempt := 0; ; credentialAttempt++ {
 			upstreamCalls++
 			attempt = p.limitedAttempt(attemptCtx, route, body, requestParts, doAttempt)
-			// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
+			// 在尝试结束后立即回流渠道 id、上游状态码与是否跨协议：重试时后一次覆盖前一次，
 			// 请求结束时保留的是最终履约（或最终失败）的那次。
-			p.recordAttemptInfo(out, route, attempt)
+			p.recordAttemptInfo(out, req, route, attempt)
 			attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
 			// 换渠道只发生在候选迭代的第一步：同一条候选内的后续尝试都是凭据轮换。
 			// attemptsMade 在进入本候选时已自增，故 attemptsMade > 1 即表示本次不是全请求的首条候选。
@@ -437,15 +437,16 @@ func (p *Pipeline) markRoutedModel(out io.Writer, route domain.Route) {
 	sink.SetRoutedModel(domain.UpstreamModelName("", domain.RewriteOptions{UpstreamModel: route.UpstreamModel}))
 }
 
-// recordAttemptInfo 把本次尝试命中的渠道 id 与上游状态码回流给入口层写出目标；
+// recordAttemptInfo 把本次尝试命中的渠道 id、上游状态码与是否跨协议回流给入口层写出目标；
 // 目标不支持该能力时为空操作。
-func (p *Pipeline) recordAttemptInfo(out io.Writer, route domain.Route, result attemptResult) {
+func (p *Pipeline) recordAttemptInfo(out io.Writer, req *domain.Request, route domain.Route, result attemptResult) {
 	sink, ok := out.(domain.UpstreamAttemptSink)
 	if !ok {
 		return
 	}
 	sink.SetAttemptChannel(route.ChannelID)
 	sink.SetUpstreamStatus(upstreamStatusOf(result.Err))
+	sink.SetCrossProtocol(route.Protocol != req.Protocol)
 }
 
 // upstreamStatusOf 从一次尝试的结果里取出上游 HTTP 状态码。
@@ -505,6 +506,7 @@ func (p *Pipeline) recordAttempt(
 		// 上游协议取自本次尝试实际使用的渠道：它与客户端协议不同即表示走了跨协议重建，
 		// 这是「响应为什么和客户端请求的形态不一样」的答案。
 		UpstreamProtocol: route.Protocol,
+		CrossProtocol:    route.Protocol != req.Protocol,
 		RequestedModel:   req.Model,
 		UpstreamID:       route.UpstreamID,
 		ChannelID:        route.ChannelID,

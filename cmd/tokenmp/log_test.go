@@ -21,6 +21,7 @@ var allowedLogKeys = map[string]struct{}{
 	"model":           {},
 	"channel_id":      {},
 	"upstream_status": {},
+	"cross_protocol":  {},
 	"http_status":     {},
 	"duration_ms":     {},
 }
@@ -53,6 +54,7 @@ func TestAccessLoggerWritesOneJSONLineWithExpectedFields(t *testing.T) {
 		"model":           `"glm-5"`,
 		"channel_id":      `42`,
 		"upstream_status": `200`,
+		"cross_protocol":  `false`,
 		"http_status":     `200`,
 		"duration_ms":     `12`,
 	}

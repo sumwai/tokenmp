@@ -53,7 +53,8 @@ func (o *attemptObserver) RecordAttempt(ctx context.Context, rec domain.AttemptR
 		"protocol", string(rec.ClientProtocol),
 		"upstream_protocol", string(rec.UpstreamProtocol),
 		// 两侧协议字段已蕴含结论，显式给出是为排障时不必要求读者做推导。
-		"protocol_switched", rec.ClientProtocol != rec.UpstreamProtocol,
+		// 取值由生产端写入 AttemptRecord.CrossProtocol，与访问日志同名同义。
+		"cross_protocol", rec.CrossProtocol,
 		// 两个模型名都按原文回显：模型名是客户端可见标识，从不被当作地址处理，
 		// 因此这里不过抹除出口。
 		"requested_model", rec.RequestedModel,
