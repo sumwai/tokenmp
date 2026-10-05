@@ -33,6 +33,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/transport"
 	"github.com/sumwai/tokenmp/internal/upstream"
+	"github.com/sumwai/tokenmp/internal/usage"
 )
 
 // 本文件是 serve 子命令：装配网关、启动监听并在信号到达时优雅退出。
@@ -211,7 +212,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
 		Observer:    opts.Observer,
-		Usage:       newUsageRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
+		Usage:       usage.NewRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
 		// 限流器按渠道 id 缓存：同一渠道的所有请求共享一个令牌桶与一个并发信号量。
 		Limiter: ratelimit.NewManager(ratelimit.Options{MaxWait: opts.RateLimitWait}),
