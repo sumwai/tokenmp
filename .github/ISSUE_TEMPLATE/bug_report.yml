@@ -1,0 +1,48 @@
+name: 缺陷报告
+description: 报告可复现的行为偏差
+title: "fix: "
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 现象
+      description: 实际观察到的行为，以及期望的行为
+      placeholder: |
+        实际：执行 xxx 后返回 yyy
+        期望：应当返回 zzz
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 执行 ...
+        2. 执行 ...
+        3. 观察 ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: "`tokenmp version` 的完整输出"
+      placeholder: tokenmp v0.1.0 (go go1.27.1)
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统与架构、Go 版本、部署方式（本机 / 容器 / 二进制）
+      placeholder: Linux amd64，go1.27.1，二进制直接运行
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 相关输出，可整段粘贴
+      render: shell

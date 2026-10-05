@@ -30,6 +30,13 @@ make check          # 编译、单测（-race）、静态检查、格式检查
 `type` 前缀必须是 ASCII 英文（release-please 靠它归类与定版号），描述不限语言。
 合并 release PR 后，条目会进入 [CHANGELOG.md](CHANGELOG.md) 的对应分区。
 
+## 协作
+
+- 缺陷与需求用 Issue 承载，模板位于 `.github/ISSUE_TEMPLATE/`。
+- PR 模板位于 `.github/PULL_REQUEST_TEMPLATE.md`，门禁清单需勾选。
+- PR 标题同样使用 Conventional Commits 格式，`pr-title` 工作流会校验：
+  采用 squash 合并时 PR 标题即进入 `main` 的提交信息，直接决定版本号与 changelog 分区。
+
 ## 发布
 
 发布链路、所需 secret 与本地验证见 [RELEASE.md](RELEASE.md)。
