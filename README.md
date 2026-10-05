@@ -121,19 +121,25 @@ $ ./bin/tokenmp admin usage list --account 1 --json
 ## 目录结构
 
 ```
-cmd/tokenmp/         单一入口二进制，子命令按文件拆分
+cmd/tokenmp/         单一入口二进制：子命令分发、参数解析、调用与输出
+internal/gateway/    网关装配与运行：把各能力包接成 HTTP 入口并在信号下优雅退出
 internal/domain/     协议无关的内部统一请求/响应与端口定义
 internal/adapters/   三种线协议与内部统一格式的双向转换
 internal/pipeline/   核心转发流水线：选路、请求定稿、上游调用与候选回退
 internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
 internal/upstream/   调用上游渠道的 HTTP 客户端
 internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
+internal/access/     客户端鉴权、402 预检与 429 限额处置
+internal/route/      选路候选链：加权随机、分层与跨协议去重
+internal/observability/ 访问日志与尝试日志的字段拼装
+internal/usage/      用量落库编排：归属补全、request 分量与结算接入
 internal/ratelimit/  渠道级进程内限流：令牌桶与并发位
 internal/circuit/    渠道级进程内熔断：连续失败隔离与半开探测
 internal/store/      MySQL 连接、迁移与 schema 读写
 internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
 internal/billing/    计费指标与用量映射
 internal/quota/      窗口限额判定：窗口计算与超限比较
+internal/settlement/ 用量结算：定价解析、倍率链与账本扣减
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
 .github/workflows/   CI 与发布链路
