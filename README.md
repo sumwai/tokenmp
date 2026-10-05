@@ -43,28 +43,9 @@ $ ./bin/tokenmp help
 判定：无可用额度回 402；账户或 API key 维度的窗口用量达到限额时按限额处置回 429，
 `reject` 的错误码为 `quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
 
-| 环境变量 | 语义 | 默认值 |
-|---|---|---|
-| `TOKENMP_MYSQL_DSN` | 必填，MySQL 连接串 | 无 |
-| `TOKENMP_LISTEN` | 监听地址 | `:8080` |
-| `TOKENMP_MYSQL_MAX_OPEN_CONNS` | 数据库连接池上限 | `25` |
-| `TOKENMP_MYSQL_MAX_IDLE_CONNS` | 数据库空闲连接数 | `5` |
-| `TOKENMP_MYSQL_CONN_MAX_LIFETIME` | 数据库连接最长存活时长 | `5m` |
-| `TOKENMP_UPSTREAM_COMPLETE_TIMEOUT` | 非流式请求整体超时 | `120s` |
-| `TOKENMP_UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT` | 流式等待上游首字节 | `30s` |
-| `TOKENMP_UPSTREAM_STREAM_IDLE_TIMEOUT` | 流式两帧之间的最大间隔 | `60s` |
-| `TOKENMP_UPSTREAM_MAX_IDLE_CONNS` | 上游连接池空闲连接总数 | `100` |
-| `TOKENMP_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | 上游连接池每主机空闲连接数 | `32` |
-| `TOKENMP_UPSTREAM_IDLE_CONN_TIMEOUT` | 上游空闲连接回收时长 | `90s` |
-| `TOKENMP_USAGE_WRITE_TIMEOUT` | 写用量流水超时 | `5s` |
-| `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 上游凭据类失败后的冷却时长 | `60s` |
-| `TOKENMP_UPSTREAM_RATE_LIMIT_WAIT` | 渠道限流下等待令牌的最长时间 | `2s` |
-| `TOKENMP_UPSTREAM_BREAKER_THRESHOLD` | 渠道连续失败多少次后熔断打开 | `5` |
-| `TOKENMP_UPSTREAM_BREAKER_COOLDOWN` | 渠道熔断打开后多久允许一笔探测 | `30s` |
-| `TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY` | 半开态同时放行的探测条数 | `1` |
-
-超时与连接池取值必须为正数或合法时长，非法取值在启动前报错并以 1 退出。
-流式转发不设整体超时，只受首字节与空闲读两级约束。
+运行配置全部来自环境变量，必填项、默认值、单位与取值规则见
+[docs/deploy.md](docs/deploy.md) 的环境变量全表。流式转发不设整体超时，
+只受首字节与空闲读两级约束。
 
 同一分组下的多条启用上游凭据按轮换顺序取用；上游拒绝凭据（401 / 403 等）时，
 在同一条渠道内换下一条凭据重试，失败的那条进入冷却（内存态，重启即重置）。
@@ -164,6 +145,8 @@ pkg/                 可被外部导入的包
 |---|---|
 | [docs/openapi.yaml](docs/openapi.yaml) | 数据面 OpenAPI 3.1 规范：端点、请求/响应 schema、SSE、错误体与状态码 |
 | [docs/compatibility.md](docs/compatibility.md) | 三方言参数处理、模型名替换、跨协议降级、流式用量帧与用量计费口径 |
+| [docs/deploy.md](docs/deploy.md) | 部署形态、环境变量全表、启动与迁移、优雅关闭、systemd 单元示例 |
+| [docs/operations.md](docs/operations.md) | 运营剧本：入驻到对账的命令序列，步骤编号与端到端剧本互引 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发门禁与提交规范 |
 | [RELEASE.md](RELEASE.md) | 发布链路与本地验证 |
 | [CHANGELOG.md](CHANGELOG.md) | 由 release-please 维护的变更记录 |
