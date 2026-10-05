@@ -89,6 +89,30 @@ func TestUsageFromDomainUnknownYieldsEmpty(t *testing.T) {
 	}
 }
 
+// TestWithRequestAddsCountWithoutMutatingInput 验证落库前补写的 request 分量为 1，
+// 且不修改入参：入参还用于结算折算与规则匹配，就地追加会让两处共享可变状态。
+func TestWithRequestAddsCountWithoutMutatingInput(t *testing.T) {
+	input := map[Metric]int{MetricInputToken: 5}
+	got := WithRequest(input)
+	want := map[Metric]int{MetricInputToken: 5, MetricRequest: 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("分量 = %#v，期望 %#v", got, want)
+	}
+	if _, ok := input[MetricRequest]; ok {
+		t.Errorf("不应修改入参，得到 %#v", input)
+	}
+}
+
+// TestWithRequestOnEmptyUsage 验证未取得 token 用量时仍得到只含 request 的集合：
+// 空用量的一次请求同样是请求次数，序列化后是 {request:1} 而不是 {}。
+func TestWithRequestOnEmptyUsage(t *testing.T) {
+	got := WithRequest(nil)
+	want := map[Metric]int{MetricRequest: 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("分量 = %#v，期望 %#v", got, want)
+	}
+}
+
 // TestUsageFromDomainPrefersTieredCacheWrite 验证分档口径优先：
 // 分档非零时只落两档分量，不分档分量不落。
 func TestUsageFromDomainPrefersTieredCacheWrite(t *testing.T) {
