@@ -59,8 +59,11 @@ make tools          # 按 .mise.toml 装齐工具链
 
 `gh` CLI 操作 Issue 与 PR，不经网页手工编辑：
 
+- **不直接推送 `main`**：分支保护已开启 —— 禁止 force push、禁止删除、强制经 PR 合并，
+  管理员同样受限。一切改动走分支。
 - 取任务：`gh issue list` / `gh issue view <n>`；新建：`gh issue create -t "<type>: <标题>" -b "<现象、期望、验收条件>"`
-- 实现走分支与 PR：`git checkout -b <type>/<短描述>`，`gh pr create`，标题符合 Conventional Commits，正文写 `Closes #<n>`
+- 实现走分支：`git checkout -b <type>/<短描述>`，完成后 `gh pr create`，
+  标题符合 Conventional Commits，正文写 `Closes #<n>`
 - 合并用 squash：`gh pr merge --squash --delete-branch`；squash 后 PR 标题即 `main` 上的提交信息，决定版本号与 changelog 分区
 - 合并前置：`make check` 全绿，`CI` 与 `PR 标题` 检查通过，评审无未解决意见
 - 结论回写：`gh issue comment` / `gh pr comment`；关闭用 `gh issue close` 并附理由
