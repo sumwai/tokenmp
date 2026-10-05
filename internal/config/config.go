@@ -39,6 +39,11 @@ const (
 
 	// 渠道限流：等待令牌的最长时间。
 	envRateLimitWait = "TOKENMP_UPSTREAM_RATE_LIMIT_WAIT"
+
+	// 渠道熔断：连续失败阈值、冷却期与半开探测并发。
+	envBreakerThreshold = "TOKENMP_UPSTREAM_BREAKER_THRESHOLD"
+	envBreakerCooldown  = "TOKENMP_UPSTREAM_BREAKER_COOLDOWN"
+	envBreakerProbes    = "TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -62,6 +67,12 @@ const (
 	// defaultCredentialCooldown 与 internal/credential 的兜底值一致：
 	// 配置层不导入那个包（它依赖 domain 与存储事实），故两处各写一份常量。
 	defaultCredentialCooldown = 60 * time.Second
+	// 熔断的默认阈值与冷却期与 internal/circuit 的兜底值一致：
+	// 配置层不导入那个包，故两处各写一份常量，取值必须一致。
+	defaultBreakerThreshold = 5
+	defaultBreakerCooldown  = 30 * time.Second
+	// defaultBreakerProbes 是半开态同时放行的探测条数默认值，与 internal/circuit 一致。
+	defaultBreakerProbes = 1
 )
 
 // Serve 是 serve 子命令的运行配置。
@@ -91,6 +102,12 @@ type Serve struct {
 	CredentialCooldown time.Duration
 	// RateLimitWait 是渠道限流下等待令牌的最长时间；超时按可重试的上游失败换下一条候选。
 	RateLimitWait time.Duration
+	// BreakerThreshold 是渠道连续失败多少次后熔断打开。
+	BreakerThreshold int
+	// BreakerCooldown 是渠道熔断打开后多久允许一笔探测。
+	BreakerCooldown time.Duration
+	// BreakerProbes 是半开态同时放行的探测条数。
+	BreakerProbes int
 }
 
 // Load 从进程环境读出存储层配置。
@@ -149,6 +166,18 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	breakerThreshold, err := lookupPositiveInt(lookup, envBreakerThreshold, defaultBreakerThreshold)
+	if err != nil {
+		return Serve{}, err
+	}
+	breakerCooldown, err := lookupPositiveDuration(lookup, envBreakerCooldown, defaultBreakerCooldown)
+	if err != nil {
+		return Serve{}, err
+	}
+	breakerProbes, err := lookupPositiveInt(lookup, envBreakerProbes, defaultBreakerProbes)
+	if err != nil {
+		return Serve{}, err
+	}
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -161,6 +190,9 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		UsageWriteTimeout:           usageWrite,
 		CredentialCooldown:          credentialCooldown,
 		RateLimitWait:               rateLimitWait,
+		BreakerThreshold:            breakerThreshold,
+		BreakerCooldown:             breakerCooldown,
+		BreakerProbes:               breakerProbes,
 	}, nil
 }
 
