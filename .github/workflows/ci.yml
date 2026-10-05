@@ -32,3 +32,32 @@ jobs:
       # mise 与 .mise.toml 是版本唯一真相：本地与 CI 用同一份锁定，
       # 不会出现「本地能过、CI 报另一个 lint 规则」这类版本漂移。
       - run: make check
+
+  # 真实 MySQL 上的迁移与事务验证。check 的契约是无外部依赖，
+  # 所以结算事务、FOR UPDATE 锁、JSON 聚合这些只能在数据库上验的路径
+  # 放在独立 job：CI 强制跑，本机仍可不装 MySQL。
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: tokenmp-ci
+          MYSQL_DATABASE: tokenmp_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptokenmp-ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - run: mise install go golangci-lint
+      - run: make check-integration
+        env:
+          # 指向 service 起的可丢弃库：测试会先删表再重建。
+          TOKENMP_TEST_MYSQL_DSN: root:tokenmp-ci@tcp(127.0.0.1:3306)/tokenmp_test?parseTime=true
