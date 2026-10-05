@@ -347,3 +347,66 @@ func TestServiceSettleSerializesSameAccount(t *testing.T) {
 		t.Errorf("总欠额 = %s，期望 6", totalShortfall)
 	}
 }
+
+// TestServiceSettleConvertsTokenOverflowToCurrency 覆盖一次结算的端到端链路：
+// 购买 10 元 100M token 包（折算率 price / qty = 1e-7），用量超包后差额按折算率
+// 转成 currency 挂到后付钱包，余额被扣成负数，流水明细出现两行且转换行带折算率。
+func TestServiceSettleConvertsTokenOverflowToCurrency(t *testing.T) {
+	repo := newFakeRepo()
+	repo.pricing = &Pricing{ID: 7, Version: 1, Components: []Component{{
+		ID: 11, Metric: billing.MetricInputToken, UnitSettle: billing.UnitSettleToken,
+		UnitPrice: dec(t, "1"), BasisQty: dec(t, "1"),
+	}}}
+	repo.buckets = []Bucket{
+		// 购买生成的包：100M token 售价 10 元 → 折算率 1e-7。
+		{ID: 5, Unit: billing.UnitSettleToken, Remaining: dec(t, "100000000"),
+			Fallback: billing.FallbackChargeBalance, UnitRate: dec(t, "0.0000001")},
+		// 后付货币钱包，允许透支。
+		{ID: 6, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance},
+	}
+	service := New(repo, nil)
+	if err := service.Settle(context.Background(), input(map[billing.Metric]int{billing.MetricInputToken: 300_000_000})); err != nil {
+		t.Fatalf("结算失败：%v", err)
+	}
+
+	row := repo.snapshotInserted()[0]
+	var payload settlementJSON
+	if err := json.Unmarshal(row.Settlement, &payload); err != nil {
+		t.Fatalf("解析明细失败：%v", err)
+	}
+	if len(payload.Lines) != 2 {
+		t.Fatalf("明细行数 = %d，期望 2：%#v", len(payload.Lines), payload.Lines)
+	}
+	if payload.Lines[0].Unit != string(billing.UnitSettleToken) || payload.Lines[0].Qty != "100000000" {
+		t.Errorf("第 1 行应为 token 扣净：%#v", payload.Lines[0])
+	}
+	if payload.Lines[1].Unit != string(billing.UnitSettleCurrency) ||
+		payload.Lines[1].Qty != "20" || payload.Lines[1].Rate != "0.0000001" {
+		t.Errorf("第 2 行应为 200M × 1e-7 = 20 currency 且带折算率：%#v", payload.Lines[1])
+	}
+	if got := repo.buckets[1].Remaining.String(); got != "-20" {
+		t.Errorf("currency 余额 = %s，期望 -20（后付透支）", got)
+	}
+	if repo.buckets[0].Remaining.String() != "0" {
+		t.Errorf("token 余量 = %s，期望 0", repo.buckets[0].Remaining)
+	}
+
+	// 快照复算：转换行数量 = 原单位差额 × 明细里的折算率，且该折算率等于
+	// 购买账本锁定的 unit_rate。历史流水据此可在定价与折算率变更后复算。
+	converted, err := decimal.NewFromString(payload.Lines[1].Qty)
+	if err != nil {
+		t.Fatalf("解析转换数量失败：%v", err)
+	}
+	rate, err := decimal.NewFromString(payload.Lines[1].Rate)
+	if err != nil {
+		t.Fatalf("解析折算率失败：%v", err)
+	}
+	overflow := decimal.NewFromInt(200_000_000)
+	if !converted.Equal(overflow.Mul(rate)) {
+		t.Errorf("复算不符：%s ≠ %s × %s", converted, overflow, rate)
+	}
+	if !rate.Equal(dec(t, "0.0000001")) {
+		t.Errorf("折算率 = %s，期望购买锁定的 0.0000001", rate)
+	}
+}
