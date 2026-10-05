@@ -114,7 +114,8 @@ func usageLogArgs(usage domain.Usage) []any {
 // attemptLogLevel 按尝试结果决定日志级别。
 func attemptLogLevel(outcome domain.AttemptOutcome) slog.Level {
 	switch outcome {
-	case domain.AttemptOK:
+	case domain.AttemptOK, domain.AttemptSkipped:
+		// 熔断跳过是网关主动不再打该渠道，属预期行为，按 info 记。
 		return slog.LevelInfo
 	case domain.AttemptCancelled:
 		return slog.LevelDebug
