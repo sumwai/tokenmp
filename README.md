@@ -37,8 +37,8 @@ $ ./bin/tokenmp help
 `GET /healthz`（200）与三个转发端点 `POST /v1/chat/completions`、
 `POST /v1/responses`、`POST /v1/messages`，收到退出信号后优雅关闭。
 转发端点要求 `Authorization: Bearer <key>`。鉴权通过后先做额度预检与窗口限额
-判定：无可用额度回 402；窗口用量达到限额时按限额处置回 429，`reject` 的错误码为
-`quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
+判定：无可用额度回 402；账户或 API key 维度的窗口用量达到限额时按限额处置回 429，
+`reject` 的错误码为 `quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
 
 | 环境变量 | 语义 | 默认值 |
 |---|---|---|
@@ -130,7 +130,8 @@ $ ./bin/tokenmp admin usage list --account 1 --json
 
 `quota add` 的 `--scope` 取规则范围、`--metric` 取计费指标、`--window` 取
 `rolling` / `calendar`、`--period` 取 `5h` / `day` / `week` / `month` / `total`、
-`--action` 取 `reject` / `throttle`；`quota list` 附当前窗口已用量与剩余额度；
+`--action` 取 `reject` / `throttle`；`quota list` 附当前窗口已用量与剩余额度，
+可按 `--scope` 与 `--scope-id` 过滤或按 `--account` 列出某账户的限额，不填列出全部；
 `quota reset` 在指定限额上追加一条重置基准，`--reason` 与 `--operator` 必填。
 
 ## 目录结构
