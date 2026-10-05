@@ -99,6 +99,8 @@ func streamUsageCases() []streamUsageCase {
 		billing.MetricCacheReadToken:  2,
 		billing.MetricCacheWriteToken: 1,
 		billing.MetricReasoningToken:  1,
+		// request 由落库路径补写，不来自适配器上报（见 billing.WithRequest）。
+		billing.MetricRequest: 1,
 	}
 	anthropicMetrics := map[billing.Metric]int{
 		// Anthropic 的 input_tokens 不含缓存，内部口径把缓存并进主计数：5 + 2 + 1。
@@ -106,6 +108,7 @@ func streamUsageCases() []streamUsageCase {
 		billing.MetricOutputToken:     3,
 		billing.MetricCacheReadToken:  2,
 		billing.MetricCacheWriteToken: 1,
+		billing.MetricRequest:         1,
 	}
 	return []streamUsageCase{
 		{
@@ -153,6 +156,7 @@ func streamUsageCases() []streamUsageCase {
 				billing.MetricCacheReadToken: 2,
 				billing.MetricCacheWrite5m:   6,
 				billing.MetricCacheWrite1h:   3,
+				billing.MetricRequest:        1,
 			},
 		},
 	}
@@ -293,12 +297,14 @@ func TestNonStreamingUsagePersistedThreeDialects(t *testing.T) {
 		billing.MetricCacheReadToken:  2,
 		billing.MetricCacheWriteToken: 1,
 		billing.MetricReasoningToken:  1,
+		billing.MetricRequest:         1,
 	}
 	anthropicMetrics := map[billing.Metric]int{
 		billing.MetricInputToken:      8,
 		billing.MetricOutputToken:     3,
 		billing.MetricCacheReadToken:  2,
 		billing.MetricCacheWriteToken: 1,
+		billing.MetricRequest:         1,
 	}
 	tests := []struct {
 		name         string
@@ -345,6 +351,7 @@ func TestNonStreamingUsagePersistedThreeDialects(t *testing.T) {
 				billing.MetricCacheReadToken: 2,
 				billing.MetricCacheWrite5m:   6,
 				billing.MetricCacheWrite1h:   3,
+				billing.MetricRequest:        1,
 			},
 		},
 	}
@@ -457,8 +464,8 @@ func TestStreamingUsageExtractionFailureDoesNotBlock(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("流水行数 = %d，期望 1（一次请求一行）", len(rows))
 	}
-	if len(rows[0].Usage) != 0 {
-		t.Errorf("未取得用量时分量应为空，得到 %#v", rows[0].Usage)
+	if len(rows[0].Usage) != 1 || rows[0].Usage[billing.MetricRequest] != 1 {
+		t.Errorf("未取得 token 用量时分量应只剩落库生成的 request=1，得到 %#v", rows[0].Usage)
 	}
 }
 

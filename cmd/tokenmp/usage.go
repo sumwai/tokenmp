@@ -66,8 +66,10 @@ func newUsageRecorder(st gatewayStore, settler usageSettler, writeTimeout time.D
 //
 // 没有对应 Metric 的分量（当前只有服务端工具调用次数）记日志后丢弃：丢一个没有计价
 // 口径的分量，代价远小于丢掉一整行已经发生的转发流水。
-// 计算流程：先把内部统一用量映射为计费分量，再交给结算器在事务里落库并扣账本；
-// 结算失败退回占位口径只落用量，并记结构化错误日志——流水丢失比结算失败更糟。
+// 计算流程：先把内部统一用量映射为计费分量，再补上落库路径生成的 request=1，
+// 然后交给结算器在事务里落库并扣账本；结算失败退回占位口径只落用量，并记结构化
+// 错误日志——流水丢失比结算失败更糟。request 在这一层补写，结算与无定价占位两条
+// 落库路径共用同一份分量，不会一条有 request、另一条没有。
 // 落库失败返回错误，同时记日志；流水线忽略返回值，不影响已写给客户端的响应。
 func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRecord) error {
 	id, ok := identityFromContext(ctx)
@@ -76,6 +78,9 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 		return domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法归属用量")
 	}
 	metrics, dropped, conflicts := billing.UsageFromDomain(rec.Usage)
+	// request 分量由落库路径生成，不来自适配器：一次请求一行流水，行数与该分量一致。
+	// 在此处补写而非各写入路径自行处理，保证结算与占位两条路径的分量形状一致。
+	metrics = billing.WithRequest(metrics)
 	for _, name := range dropped {
 		r.logf("用量分量没有对应的计费指标，已丢弃",
 			"component", name, "request_id", rec.RequestID)

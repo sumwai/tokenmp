@@ -50,6 +50,26 @@ func UsageFromDomain(u domain.Usage) (metrics map[Metric]int, unmapped []string,
 	return metrics, unmapped, conflicts
 }
 
+// WithRequest 在落库前把 request 分量补进用量集合，返回新集合。
+//
+// request 由落库路径生成，不来自适配器上报：billing_usage 一行即一次请求，
+// 该分量的值与窗口内行数恒等。适配器只报 token 分量，把「发生了一次请求」交给
+// 各适配器分别上报，漏一个就少一份限额依据；集中在落库入口补写，落库路径成为唯一出处。
+//
+// 补写只发生在调用方，UsageFromDomain 保持「适配器报了什么就映射什么」的语义不变。
+// 返回新集合而不是就地修改：入参同时用于结算折算与规则匹配，共享一份可变 map
+// 会让计数与计价两件事互相污染。
+//
+// 历史流水没有该键，聚合侧按 0 计（见 store 的聚合口径注释），不回填。
+func WithRequest(metrics map[Metric]int) map[Metric]int {
+	out := make(map[Metric]int, len(metrics)+1)
+	for metric, qty := range metrics {
+		out[metric] = qty
+	}
+	out[MetricRequest] = 1
+	return out
+}
+
 // addCacheWrite 按互斥规则写入缓存写分量，并把异常并存的情况追加到 conflicts。
 //
 // 分档字段任一非零即为分档口径：两档各按非零写入，不分档字段即使非零也不落并记一条冲突。
