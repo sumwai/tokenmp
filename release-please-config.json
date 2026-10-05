@@ -23,7 +23,8 @@
   "packages": {
     ".": {
       "component": "backend",
-      "package-name": "tokenmp"
+      "package-name": "tokenmp",
+      "initial-version": "0.1.0"
     }
   }
 }
