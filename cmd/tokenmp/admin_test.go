@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sumwai/tokenmp/internal/billing"
 )
 
 // 本文件覆盖管理面命令层的输出格式与退出码，不连数据库：
@@ -87,6 +90,45 @@ func TestAdminUsageExitCodes(t *testing.T) {
 			got := cmdAdmin(tt.args, strings.NewReader(""), &stdout, &stderr)
 			if got != tt.wantCode {
 				t.Errorf("退出码 = %d，期望 %d", got, tt.wantCode)
+			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("stderr 未包含 %q，实际：%s", tt.wantErr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestAdminQuotaListScopeFlags 覆盖 quota list 的维度过滤参数校验：
+// --scope 与 --scope-id 必须成对，未知 scope 在连库前被拒绝。
+func TestAdminQuotaListScopeFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantErr  string
+	}{
+		{
+			name:     "scope 缺 scope-id",
+			args:     []string{"quota", actionList, "--scope", string(billing.ScopeAPIKey)},
+			wantCode: exitUsage, wantErr: "--scope 与 --scope-id 必须成对给出",
+		},
+		{
+			name:     "scope-id 缺 scope",
+			args:     []string{"quota", actionList, "--scope-id", "7"},
+			wantCode: exitUsage, wantErr: "--scope 与 --scope-id 必须成对给出",
+		},
+		{
+			name:     "未知 scope",
+			args:     []string{"quota", actionList, "--scope", "tenant", "--scope-id", "7"},
+			wantCode: exitUsage, wantErr: "未知的规则范围",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			code := dispatchAdmin(context.Background(), tt.args, &adminEnv{stdout: &stdout, stderr: &stderr})
+			if code != tt.wantCode {
+				t.Errorf("退出码 = %d，期望 %d", code, tt.wantCode)
 			}
 			if !strings.Contains(stderr.String(), tt.wantErr) {
 				t.Errorf("stderr 未包含 %q，实际：%s", tt.wantErr, stderr.String())
