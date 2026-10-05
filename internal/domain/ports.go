@@ -189,6 +189,13 @@ type Route struct {
 	// OutputLimit 是该渠道 × 该上游模型的有效输出上限；nil 表示未配置，
 	// 形状与 RewriteOptions.MaxOutputTokens 一致。
 	OutputLimit *int
+	// RateLimitQPS 是调用本渠道的令牌桶速率（每秒允许开始的尝试数）；0 表示不限。
+	// 限流状态由装配层按渠道 id 缓存，进程内生效；多实例部署时各实例独立计数，
+	// 同一渠道的总放行量可达实例数 × 本取值。
+	RateLimitQPS int
+	// RateLimitConcurrency 是本渠道并发尝试上限；0 表示不限。
+	// 流式尝试占位到流终态（成功、截断或客户端断开）才释放。
+	RateLimitConcurrency int
 	// CredentialHeaderStyle 是调用本渠道上游时凭据请求头的注入形态，由渠道配置给出；
 	// 零值 CredentialHeaderAuto 表示未配置，按协议现状注入。
 	CredentialHeaderStyle CredentialHeaderStyle
@@ -247,6 +254,26 @@ type CredentialRotation interface {
 	// 返回 false 表示该失败不属凭据类，或组内已无未试过的可用凭据；
 	// 两种情形调用方都按「本次渠道尝试失败」处理，不得原地重试。
 	Advance(ctx context.Context, route Route, failure error) (context.Context, bool)
+}
+
+// ChannelLimiter 在进入渠道尝试前获取该渠道的令牌与并发位。
+//
+// 限流状态是进程内的：多实例部署时每个实例各自按配置放行，同一渠道的实际放行量
+// 可达实例数 × 配置上限。需要全局一致时必须在实现侧引入外部存储，本端口不承担该职责。
+//
+// 实现按渠道缓存，流水线只消费「这次尝试能不能开始」这一个结果，
+// 不感知令牌桶与信号量的实现。
+type ChannelLimiter interface {
+	// Acquire 获取 route 对应渠道的令牌与并发位。
+	//
+	// 返回的 release 必须在本次渠道尝试（含流式全程）结束后调用且只调用一次：
+	// 流式请求要一直占着并发位到流终态。err 非 nil 时 release 为 nil，调用方不得调用。
+	//
+	// 令牌不足时在 ctx 与实现自身的等待上限内短暂等待；等待超时返回可重试错误，
+	// 调用方据此换下一条候选，而不是把失败直接回给客户端。
+	//
+	// waited 是本次在限流器上等待的时长，供尝试日志记录是否命中限流；未等待时为 0。
+	Acquire(ctx context.Context, route Route) (release func(), waited time.Duration, err error)
 }
 
 // UpstreamRequestBuilder 把内部统一请求转换为上游协议请求体。
@@ -429,6 +456,10 @@ type AttemptRecord struct {
 	ErrorDetail string
 	StartedAt   time.Time
 	EndedAt     time.Time
+	// RateLimitWait 是本次尝试在渠道限流器上等待令牌与并发位的时长；0 表示未等待
+	// （令牌即时可用、渠道未配置限流或本次尝试未进入限流器）。
+	// 等待超时的失败尝试另在 ErrorCode 上体现为 upstream_rate_limited。
+	RateLimitWait time.Duration
 	// RewrittenParts 列出本次尝试中被网关改写过的报文部分；为空表示未改动任何部分。
 	// 用于让「网关动过哪些部分」在尝试记录与日志中可审计。
 	RewrittenParts RewriteParts
