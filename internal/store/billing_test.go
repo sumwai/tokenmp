@@ -54,6 +54,13 @@ func TestNullArgAndTimeArg(t *testing.T) {
 	if got := timeArg(&at); got != at {
 		t.Errorf("非空时间应原样，得到 %#v", got)
 	}
+	if got := optionalStringArg(nil); got != nil {
+		t.Errorf("nil 折算率应转成 nil，得到 %#v", got)
+	}
+	rate := "0.00000010"
+	if got := optionalStringArg(&rate); got != rate {
+		t.Errorf("非空折算率应原样，得到 %#v", got)
+	}
 }
 
 func TestInsertPricingArgs(t *testing.T) {

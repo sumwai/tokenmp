@@ -184,4 +184,23 @@ func TestAdminFullChainIntegration(t *testing.T) {
 	if len(buckets) != 2 {
 		t.Fatalf("账户应有充值 + 购买两份账本，得到 %d", len(buckets))
 	}
+	// 购买生成的账本写入折算率 price / qty = 10 / 1000000；充值账本为 NULL。
+	var purchaseBucket, grantBucket *store.BucketRow
+	for i := range buckets {
+		switch buckets[i].Source {
+		case billing.SourcePurchase:
+			purchaseBucket = &buckets[i]
+		case billing.SourceRecharge:
+			grantBucket = &buckets[i]
+		}
+	}
+	if purchaseBucket == nil || grantBucket == nil {
+		t.Fatalf("应分别存在购买与充值账本：%+v", buckets)
+	}
+	if purchaseBucket.UnitRate == nil || !decimalEqual(*purchaseBucket.UnitRate, "0.00001") {
+		t.Errorf("购买账本折算率 = %v，期望 0.00001", purchaseBucket.UnitRate)
+	}
+	if grantBucket.UnitRate != nil {
+		t.Errorf("充值账本不应带折算率，得到 %q", *grantBucket.UnitRate)
+	}
 }

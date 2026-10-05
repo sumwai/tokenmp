@@ -18,6 +18,10 @@ import (
 // defaultBucketPriority 是账本扣减顺序的默认优先级，与列的 DEFAULT 100 一致。
 const defaultBucketPriority = 100
 
+// unitRateScale 是购买派生折算率的十进制小数位，与 account_bucket.unit_rate
+// 列定义 DECIMAL(24,8) 的标度一致。
+const unitRateScale int32 = 8
+
 // CreditBucketInput 是发放账本的输入。
 type CreditBucketInput struct {
 	AccountID  uint64
@@ -136,9 +140,6 @@ type BuyInput struct {
 }
 
 // BuyResult 是一次购买的产物。
-//
-// 刻意没有 unit_rate 字段：account_bucket.unit_rate 依赖 issue #32 落地，
-// 本 issue 不建列、不写该值，购买锁定的折算率因此暂缺，输出只给总量与有效期。
 type BuyResult struct {
 	PurchaseID uint64             `json:"purchase_id"`
 	BucketID   uint64             `json:"bucket_id"`
@@ -150,6 +151,8 @@ type BuyResult struct {
 	Unit       billing.UnitSettle `json:"unit"`
 	Total      string             `json:"total"`
 	ExpiresAt  *time.Time         `json:"expires_at"`
+	// UnitRate 是购买时刻锁定的折算率 = 商品单价 / 商品每份数量，随账本落库。
+	UnitRate string `json:"unit_rate"`
 }
 
 // Buy 按商品档位生成购买记录与派生的账本。
@@ -157,8 +160,10 @@ type BuyResult struct {
 // 派生口径：total = 商品每份数量 × 购买份数，price_paid = 商品单价 × 购买份数，
 // 有效期 = 购买时刻 + 商品有效天数（0 表示不过期）。
 //
-// 折算率（unit_rate）锁定依赖 issue #32 的 account_bucket 新列；在 #32 落地前
-// 购买生成的账本不带折算率，跨单位折算按 token 存量直接扣减。
+// 折算率 unit_rate = 商品单价 / 商品每份数量，在购买时刻锁定并随账本落库，
+// 供扣减时把非货币差额折成 currency。除法用 DivRound 保留 unitRateScale 位，
+// 舍入为四舍五入：多份购买与单份购买的折算率相同（pricePaid / total 约简后
+// 等于 price / 每份数量），所以折算率与购买份数无关，只与商品档位相关。
 func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 	if err := requireID("购买 account", in.AccountID); err != nil {
 		return nil, err
@@ -198,6 +203,8 @@ func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 	}
 	total := productQty.Mul(qty)
 	pricePaid := productPrice.Mul(qty)
+	// 折算率在单份口径上计算，与购买份数无关。
+	unitRate := productPrice.DivRound(productQty, unitRateScale).String()
 
 	now := s.now()
 	var expiresAt *time.Time
@@ -225,6 +232,7 @@ func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 			Fallback:   fallback,
 			Source:     billing.SourcePurchase,
 			Priority:   defaultBucketPriority,
+			UnitRate:   &unitRate,
 		})
 	if err != nil {
 		return nil, err
@@ -240,6 +248,7 @@ func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 		Unit:       product.Unit,
 		Total:      total.String(),
 		ExpiresAt:  expiresAt,
+		UnitRate:   unitRate,
 	}, nil
 }
 

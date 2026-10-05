@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"strings"
@@ -155,6 +156,35 @@ func TestInsertBucketRejectsBadEnums(t *testing.T) {
 	}
 }
 
+func TestInsertBucketWritesUnitRate(t *testing.T) {
+	rate := "0.00000010"
+	fake := &recordedExec{id: 5}
+	if _, err := insertBucket(context.Background(), fake, BucketRow{
+		AccountID: 1, MerchantID: 1, Unit: billing.UnitSettleToken, Total: "100", Remaining: "100",
+		Fallback: billing.FallbackChargeBalance, Source: billing.SourcePurchase, UnitRate: &rate,
+	}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if !strings.Contains(fake.query, "unit_rate") {
+		t.Errorf("SQL 应包含 unit_rate 列：%s", fake.query)
+	}
+	if got := fake.args[len(fake.args)-1]; got != rate {
+		t.Errorf("末尾参数 = %#v，期望折算率 %q", got, rate)
+	}
+
+	// 无折算率写 NULL。
+	nullRate := &recordedExec{}
+	if _, err := insertBucket(context.Background(), nullRate, BucketRow{
+		AccountID: 1, MerchantID: 1, Unit: billing.UnitSettleCurrency, Total: "100", Remaining: "100",
+		Fallback: billing.FallbackReject, Source: billing.SourceGrant,
+	}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if got := nullRate.args[len(nullRate.args)-1]; got != nil {
+		t.Errorf("无折算率应写 NULL，得到 %#v", got)
+	}
+}
+
 func TestInsertAPIKeyArgs(t *testing.T) {
 	expires := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 	fake := &recordedExec{id: 4}
@@ -214,7 +244,8 @@ func TestListBucketsScan(t *testing.T) {
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	fake := &recordedQuery{rows: [][]any{
 		{uint64(1), uint64(2), uint64(8), "token", "100", "40",
-			scanTime{Time: expires, Valid: true}, "reject", "purchase", 100},
+			scanTime{Time: expires, Valid: true}, "reject", "purchase", 100,
+			sql.NullString{String: "0.00000010", Valid: true}},
 	}}
 	got, err := listBuckets(context.Background(), fake, 2)
 	if err != nil {
@@ -227,6 +258,22 @@ func TestListBucketsScan(t *testing.T) {
 	if b.Unit != billing.UnitSettleToken || b.Fallback != billing.FallbackReject ||
 		b.Source != billing.SourcePurchase || b.Remaining != "40" || b.ExpiresAt == nil {
 		t.Errorf("结果不符：%+v", b)
+	}
+	if b.UnitRate == nil || *b.UnitRate != "0.00000010" {
+		t.Errorf("折算率回读不符：%+v", b.UnitRate)
+	}
+
+	// NULL 折算率（赠送 / 充值）回读为 nil，而不是空串。
+	nullRate := &recordedQuery{rows: [][]any{
+		{uint64(1), uint64(2), uint64(8), "currency", "100", "100",
+			nil, "reject", "grant", 100, nil},
+	}}
+	got, err = listBuckets(context.Background(), nullRate, 2)
+	if err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if got[0].UnitRate != nil {
+		t.Errorf("NULL 折算率应回读为 nil，得到 %q", *got[0].UnitRate)
 	}
 }
 

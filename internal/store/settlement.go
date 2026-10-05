@@ -221,7 +221,7 @@ type Bucket struct {
 	Priority  int
 }
 
-const bucketColumns = "id, unit, remaining, expires_at, fallback, priority"
+const bucketColumns = "id, unit, remaining, expires_at, fallback, priority, unit_rate"
 
 const lockBucketsSQL = "SELECT " + bucketColumns + " FROM account_bucket WHERE account_id = ? " +
 	"ORDER BY (expires_at IS NULL), expires_at, priority, id FOR UPDATE"
@@ -260,9 +260,10 @@ func toSettlementBuckets(rows *sql.Rows) ([]settlement.Bucket, error) {
 			fallback  string
 			remaining string
 			expiresAt scanTime
+			unitRate  sql.NullString
 		)
 		if err := rows.Scan(&bucket.ID, &unitRaw, &remaining, &expiresAt,
-			&fallback, &bucket.Priority); err != nil {
+			&fallback, &bucket.Priority, &unitRate); err != nil {
 			return nil, fmt.Errorf("store: 解析 account_bucket 行失败: %w", err)
 		}
 		value, err := parseDecimal(remaining)
@@ -274,6 +275,13 @@ func toSettlementBuckets(rows *sql.Rows) ([]settlement.Bucket, error) {
 		bucket.Remaining = value
 		if expiresAt.Valid {
 			bucket.ExpiresAt = &expiresAt.Time
+		}
+		if unitRate.Valid {
+			rate, err := parseDecimal(unitRate.String)
+			if err != nil {
+				return nil, err
+			}
+			bucket.UnitRate = rate
 		}
 		buckets = append(buckets, bucket)
 	}
