@@ -51,6 +51,9 @@ type Options struct {
 	// 非 nil 时，凭据类失败不消耗尝试预算，改为在同一次渠道尝试内换下一条凭据；
 	// 组内试遍后本次渠道尝试才算失败，再按 MaxAttempts 走渠道回退。
 	Credentials domain.CredentialRotation
+	// Limiter 在进入渠道尝试前获取该渠道的令牌与并发位；可为 nil（不限流）。
+	// 未装配时与「渠道未配置上限」同义，流水线不引入任何等待。
+	Limiter domain.ChannelLimiter
 	// MaxAttempts 是单请求最多发起的上游尝试次数；<= 0 时取 maxAttemptsDefault。
 	MaxAttempts int
 	// Backoff 是换下一候选前的退避策略；零值字段取对应默认值。
@@ -66,6 +69,7 @@ type Pipeline struct {
 	usage       domain.UsageRecorder
 	breaker     Breaker
 	credentials domain.CredentialRotation
+	limiter     domain.ChannelLimiter
 	maxAttempts int
 	backoff     backoff
 }
@@ -87,6 +91,8 @@ type attemptResult struct {
 	// StartedAt 与 EndedAt 是本次上游调用的两个边界时刻，由 doAttempt 紧贴上游调用前后采集。
 	StartedAt time.Time
 	EndedAt   time.Time
+	// RateLimitWait 是本次尝试在渠道限流器上等待的时长，由 limitedAttempt 填入。
+	RateLimitWait time.Duration
 	// Err 是本次尝试的错误；nil 表示成功。
 	Err error
 }
@@ -113,6 +119,7 @@ func New(opts Options) (*Pipeline, error) {
 		usage:       opts.Usage,
 		breaker:     opts.Breaker,
 		credentials: opts.Credentials,
+		limiter:     opts.Limiter,
 		maxAttempts: maxAttempts,
 		backoff:     newBackoff(opts.Backoff),
 	}, nil
@@ -315,7 +322,7 @@ func (p *Pipeline) forward(
 		var attempt attemptResult
 		for credentialAttempt := 0; ; credentialAttempt++ {
 			upstreamCalls++
-			attempt = doAttempt(attemptCtx, route, body, requestParts)
+			attempt = p.limitedAttempt(attemptCtx, route, body, requestParts, doAttempt)
 			// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
 			// 请求结束时保留的是最终履约（或最终失败）的那次。
 			p.recordAttemptInfo(out, route, attempt)
@@ -369,6 +376,38 @@ func (p *Pipeline) forward(
 	// 候选耗尽或退避等待被取消：最后一次尝试已是终态，流式在此落库。
 	p.recordStreamUsage(ctx, req, lastRoute, lastResult)
 	return lastErr
+}
+
+// limitedAttempt 在渠道限流器下执行一次上游调用，保证并发位与令牌在本次调用结束后释放。
+//
+// release 交由 defer 执行：doAttempt 的流式分支在流读完、非流式分支在响应写出后才返回，
+// 两条路径都只有在本次上游调用彻底结束后才会释放并发位，不会提前。
+//
+// 限流等待超时按一次失败的上游尝试返回：错误可重试，由调用方换下一条候选，
+// 不把网关自身的节制直接变成对客户端的拒绝。
+func (p *Pipeline) limitedAttempt(
+	ctx context.Context,
+	route domain.Route,
+	body []byte,
+	requestParts domain.RewriteParts,
+	doAttempt func(context.Context, domain.Route, []byte, domain.RewriteParts) attemptResult,
+) attemptResult {
+	if p.limiter == nil {
+		return doAttempt(ctx, route, body, requestParts)
+	}
+	release, waited, err := p.limiter.Acquire(ctx, route)
+	if err != nil {
+		endedAt := time.Now()
+		return attemptResult{
+			Err: err, StartedAt: endedAt.Add(-waited), EndedAt: endedAt, RateLimitWait: waited,
+		}
+	}
+	if release != nil {
+		defer release()
+	}
+	result := doAttempt(ctx, route, body, requestParts)
+	result.RateLimitWait = waited
+	return result
 }
 
 // retryableFailure 报告一次渠道尝试失败能不能换下一条候选。
@@ -478,6 +517,7 @@ func (p *Pipeline) recordAttempt(
 		ErrorDetail:      errorDetail(result.Err),
 		StartedAt:        result.StartedAt,
 		EndedAt:          result.EndedAt,
+		RateLimitWait:    result.RateLimitWait,
 		RewrittenParts:   result.ResponseParts,
 	}
 	_ = p.observer.RecordAttempt(ctx, rec)

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -116,6 +118,14 @@ func chatRoute() domain.Route {
 		UpstreamModel: "up-model",
 		BaseURL:       "http://upstream.test",
 	}
+}
+
+// chatRouteWithID 返回指定渠道 id 的同协议候选。
+func chatRouteWithID(id uint64) domain.Route {
+	route := chatRoute()
+	route.ChannelID = id
+	route.UpstreamID = strconv.FormatUint(id, 10)
+	return route
 }
 
 // TestForwardRecordsUsageBeforeClientWrite 断言非流式路径「先落 billing_usage、再回写客户端」。
@@ -533,5 +543,181 @@ func TestForwardWithoutRecorder(t *testing.T) {
 	events := []string{}
 	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &events}); err != nil {
 		t.Fatalf("转发失败：%v", err)
+	}
+}
+
+// recordingObserver 记录每次尝试，供限流相关的断言读取。
+type recordingObserver struct {
+	mu      sync.Mutex
+	records []domain.AttemptRecord
+}
+
+func (o *recordingObserver) RecordAttempt(_ context.Context, rec domain.AttemptRecord) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.records = append(o.records, rec)
+	return nil
+}
+
+func (o *recordingObserver) snapshot() []domain.AttemptRecord {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]domain.AttemptRecord(nil), o.records...)
+}
+
+// fakeLimiter 是 domain.ChannelLimiter 的测试替身：按渠道 id 给出固定结果。
+type fakeLimiter struct {
+	mu      sync.Mutex
+	replies map[uint64]limiterReply
+	// acquired 与 released 按调用顺序记录渠道 id，用于断言取用与释放。
+	acquired []uint64
+	released []uint64
+}
+
+// limiterReply 是一条渠道的限流结果：等待时长与获取错误。
+type limiterReply struct {
+	waited time.Duration
+	err    error
+}
+
+func (l *fakeLimiter) Acquire(_ context.Context, route domain.Route) (func(), time.Duration, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	reply := l.replies[route.ChannelID]
+	if reply.err != nil {
+		return nil, reply.waited, reply.err
+	}
+	l.acquired = append(l.acquired, route.ChannelID)
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.released = append(l.released, route.ChannelID)
+	}, reply.waited, nil
+}
+
+func (l *fakeLimiter) releasedCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.released)
+}
+
+// fastBackoff 返回一套不做真实等待的退避参数，使回退断言不受实时退避影响。
+func fastBackoff() BackoffOptions {
+	return BackoffOptions{
+		Base:   time.Nanosecond,
+		Max:    time.Second,
+		Jitter: func(int64) int64 { return 0 },
+		Wait:   func(context.Context, time.Duration) error { return nil },
+	}
+}
+
+// TestForwardRateLimitTimeoutFallsBackToNextChannel 断言限流等待超时按可重试失败处理，
+// 换下一条候选而不是直接把失败回给客户端。
+func TestForwardRateLimitTimeoutFallsBackToNextChannel(t *testing.T) {
+	timeoutErr := domain.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时")
+	limiter := &fakeLimiter{replies: map[uint64]limiterReply{
+		7: {waited: 300 * time.Millisecond, err: timeoutErr},
+		8: {},
+	}}
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		return &domain.UpstreamResult{Raw: []byte(`{"ok":true}`), Response: &domain.Response{}}, nil
+	}}
+	observer := &recordingObserver{}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRouteWithID(7), chatRouteWithID(8)}},
+		Limiter:     limiter,
+		Observer:    observer,
+		MaxAttempts: 2,
+		Backoff:     fastBackoff(),
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("回退后应成功：%v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("上游调用次数 = %d，期望 1（首次限流超时未发上游调用）", calls)
+	}
+	records := observer.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("尝试记录数 = %d，期望 2", len(records))
+	}
+	if records[0].ErrorCode != string(domain.CodeUpstreamRateLimited) {
+		t.Errorf("首条错误码 = %q，期望 %q", records[0].ErrorCode, domain.CodeUpstreamRateLimited)
+	}
+	if records[0].RateLimitWait != 300*time.Millisecond {
+		t.Errorf("首条等待 = %s，期望 300ms", records[0].RateLimitWait)
+	}
+	if !records[1].ChannelSwitched || records[1].ChannelID != 8 {
+		t.Errorf("第二条应为渠道回退：%+v", records[1])
+	}
+}
+
+// TestForwardRecordsRateLimitWait 断言命中限流并等到令牌时，等待时长写进尝试记录。
+func TestForwardRecordsRateLimitWait(t *testing.T) {
+	limiter := &fakeLimiter{replies: map[uint64]limiterReply{7: {waited: 250 * time.Millisecond}}}
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		return &domain.UpstreamResult{Raw: []byte(`{"ok":true}`), Response: &domain.Response{}}, nil
+	}}
+	observer := &recordingObserver{}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters: chatAdapterLookup(adapter),
+		Upstream: caller,
+		Routes:   fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+		Limiter:  limiter,
+		Observer: observer,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("转发失败：%v", err)
+	}
+	records := observer.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("尝试记录数 = %d，期望 1", len(records))
+	}
+	if records[0].RateLimitWait != 250*time.Millisecond {
+		t.Errorf("等待 = %s，期望 250ms", records[0].RateLimitWait)
+	}
+}
+
+// TestForwardStreamHoldsLimiterUntilStreamEnds 断言流式请求在整个流期间占着并发位，
+// 流结束后才释放，不在开始流式写出时就释放。
+func TestForwardStreamHoldsLimiterUntilStreamEnds(t *testing.T) {
+	limiter := &fakeLimiter{replies: map[uint64]limiterReply{7: {}}}
+	releasedDuringStream := false
+	caller := fakeCaller{stream: func(ctx context.Context, _ domain.Route, _ *domain.Request, _ []byte, sink domain.ChunkSink) error {
+		releasedDuringStream = limiter.releasedCount() > 0
+		return sink.Send(ctx, domain.Chunk{Kind: domain.ChunkStreamEnd})
+	}}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters: chatAdapterLookup(adapter),
+		Upstream: caller,
+		Routes:   fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+		Limiter:  limiter,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(true), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("转发失败：%v", err)
+	}
+	if releasedDuringStream {
+		t.Error("流未结束时并发位已被释放")
+	}
+	if limiter.releasedCount() != 1 {
+		t.Errorf("流结束后释放次数 = %d，期望 1", limiter.releasedCount())
 	}
 }

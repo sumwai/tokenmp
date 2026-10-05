@@ -174,12 +174,14 @@ var protocolFieldLiterals = []string{
 //
 // 具体的实现由 cmd 装配层负责注入。
 // 清单列本仓库真实存在的实现包：适配器、上游客户端、仓储（store）、计费（billing）、
-// 配置（config）与应用装配（cmd）都在共享转发层之上，一旦被导入，就说明依赖方向被反转，必须拦下。
+// 渠道限流（ratelimit）、配置（config）与应用装配（cmd）都在共享转发层之上，
+// 一旦被导入，就说明依赖方向被反转，必须拦下。
 var forwardingForbiddenImports = []string{
 	internalPrefix + "upstream",
 	internalPrefix + "adapters",
 	internalPrefix + "store",
 	internalPrefix + "billing",
+	internalPrefix + "ratelimit",
 	internalPrefix + "config",
 	"github.com/sumwai/tokenmp/cmd",
 }
@@ -196,6 +198,9 @@ var forwardingForbiddenImports = []string{
 // - 应用装配（cmd）
 //
 // 使「共享转发层只依赖 internal/domain」成为可被测试发现的约束。
+//
+// 渠道限流同样列入：限流逻辑全仓库唯一实现在 internal/ratelimit，
+// 共享转发层只消费 domain.ChannelLimiter 端口。
 func TestForwardingLayersHaveNoImplementationImports(t *testing.T) {
 	fset := token.NewFileSet()
 	checked := 0

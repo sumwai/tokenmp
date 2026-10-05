@@ -85,6 +85,9 @@ func TestLoadServeDefaults(t *testing.T) {
 	if got.CredentialCooldown != defaultCredentialCooldown {
 		t.Errorf("CredentialCooldown = %s，期望 %s", got.CredentialCooldown, defaultCredentialCooldown)
 	}
+	if got.RateLimitWait != defaultRateLimitWait {
+		t.Errorf("RateLimitWait = %s，期望 %s", got.RateLimitWait, defaultRateLimitWait)
+	}
 }
 
 // TestLoadServeExplicitTimeoutsAndPool 断言显式给出的超时与连接池取值原样生效。
@@ -99,6 +102,7 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 		envUpstreamIdleConnTimeout:     "45s",
 		envUsageWriteTimeout:           "3s",
 		envCredentialCooldown:          "45s",
+		envRateLimitWait:               "750ms",
 	}))
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
@@ -124,6 +128,9 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 	if got.CredentialCooldown != 45*time.Second {
 		t.Errorf("CredentialCooldown = %s，期望 45s", got.CredentialCooldown)
 	}
+	if got.RateLimitWait != 750*time.Millisecond {
+		t.Errorf("RateLimitWait = %s，期望 750ms", got.RateLimitWait)
+	}
 }
 
 // TestLoadServeRejectsInvalidTimeoutsAndPool 断言非正数与非法时长在启动前报错。
@@ -144,6 +151,9 @@ func TestLoadServeRejectsInvalidTimeoutsAndPool(t *testing.T) {
 		{name: "落库超时格式错", key: envUsageWriteTimeout, val: "5"},
 		{name: "凭据冷却为零", key: envCredentialCooldown, val: "0s"},
 		{name: "凭据冷却格式错", key: envCredentialCooldown, val: "1 minute"},
+		{name: "限流等待为零", key: envRateLimitWait, val: "0s"},
+		{name: "限流等待为负", key: envRateLimitWait, val: "-1s"},
+		{name: "限流等待格式错", key: envRateLimitWait, val: "2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

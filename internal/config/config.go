@@ -36,6 +36,9 @@ const (
 
 	// 流水落库。
 	envUsageWriteTimeout = "TOKENMP_USAGE_WRITE_TIMEOUT"
+
+	// 渠道限流：等待令牌的最长时间。
+	envRateLimitWait = "TOKENMP_UPSTREAM_RATE_LIMIT_WAIT"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -53,6 +56,9 @@ const (
 	defaultUpstreamMaxIdleConnsPerHost = 32
 	defaultUpstreamIdleConnTimeout     = 90 * time.Second
 	defaultUsageWriteTimeout           = 5 * time.Second
+	// defaultRateLimitWait 是进入渠道前等待令牌的最长时间；
+	// 与 internal/ratelimit 的兜底值一致，配置层不导入那个包。
+	defaultRateLimitWait = 2 * time.Second
 	// defaultCredentialCooldown 与 internal/credential 的兜底值一致：
 	// 配置层不导入那个包（它依赖 domain 与存储事实），故两处各写一份常量。
 	defaultCredentialCooldown = 60 * time.Second
@@ -83,6 +89,8 @@ type Serve struct {
 	UsageWriteTimeout time.Duration
 	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；冷却期内该凭据被跳过。
 	CredentialCooldown time.Duration
+	// RateLimitWait 是渠道限流下等待令牌的最长时间；超时按可重试的上游失败换下一条候选。
+	RateLimitWait time.Duration
 }
 
 // Load 从进程环境读出存储层配置。
@@ -137,6 +145,10 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	rateLimitWait, err := lookupPositiveDuration(lookup, envRateLimitWait, defaultRateLimitWait)
+	if err != nil {
+		return Serve{}, err
+	}
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -148,6 +160,7 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		UpstreamIdleConnTimeout:     idleConnTimeout,
 		UsageWriteTimeout:           usageWrite,
 		CredentialCooldown:          credentialCooldown,
+		RateLimitWait:               rateLimitWait,
 	}, nil
 }
 
