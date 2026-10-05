@@ -53,7 +53,7 @@ tokenmp v0.1.0 (go go1.27.1)
 - **提交行**：来自二进制内嵌的 VCS 信息，取不到时整行省略
 - **构建日期**：GoReleaser 注入，本机构建没有这一行
 
-版本号随 tag 发布，产物挂在 GitHub Release 页面。
+版本号随 tag 发布，产物挂在 GitHub Release 页面，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 贡献
 
