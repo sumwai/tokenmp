@@ -25,11 +25,18 @@ $ ./bin/tokenmp help
 用法：tokenmp <子命令>
 
 子命令：
+  serve      启动网关 HTTP 服务
   version    报出版本号、构建自哪个提交，以及运行时的 Go 版本
   help       打印本帮助
 ```
 
 未知子命令或缺参数时退出码为 2，运行失败为 1。
+
+`tokenmp serve` 从环境变量读取运行配置：`TOKENMP_MYSQL_DSN` 必填，
+缺省时启动前报错并以 1 退出；`TOKENMP_LISTEN` 是监听地址，缺省为 `:8080`。
+它启动时执行数据库迁移，暴露 `GET /healthz`（200）与三个转发端点
+`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`，
+收到退出信号后优雅关闭。转发端点要求 `Authorization: Bearer <key>`。
 
 ## 目录结构
 

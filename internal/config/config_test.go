@@ -13,6 +13,48 @@ func fakeEnv(kv map[string]string) func(string) (string, bool) {
 	}
 }
 
+func TestLoadServe(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        map[string]string
+		wantErr    bool
+		wantListen string
+	}{
+		{
+			name:       "未配监听地址时用默认值",
+			env:        map[string]string{envDSN: "dsn"},
+			wantListen: defaultListen,
+		},
+		{
+			name:       "显式监听地址原样生效",
+			env:        map[string]string{envDSN: "dsn", envListen: " 127.0.0.1:9000 "},
+			wantListen: "127.0.0.1:9000",
+		},
+		{
+			name:    "缺 DSN 时连带报错",
+			env:     map[string]string{envListen: ":9000"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := loadServe(fakeEnv(tt.env))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("期望报错，实际通过，结果为 %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("意外错误：%v", err)
+			}
+			if got.Listen != tt.wantListen {
+				t.Errorf("Listen = %q，期望 %q", got.Listen, tt.wantListen)
+			}
+		})
+	}
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name             string

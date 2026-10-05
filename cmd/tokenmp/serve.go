@@ -1,0 +1,376 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
+	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
+	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
+	"github.com/sumwai/tokenmp/internal/config"
+	"github.com/sumwai/tokenmp/internal/credential"
+	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/pipeline"
+	"github.com/sumwai/tokenmp/internal/store"
+	"github.com/sumwai/tokenmp/internal/transport"
+	"github.com/sumwai/tokenmp/internal/upstream"
+)
+
+// 本文件是 serve 子命令：装配网关、启动监听并在信号到达时优雅退出。
+//
+// 装配顺序与依赖方向一致（适配器 → 凭据 → 上游 → 选路 → 流水线 → 入口 → 鉴权），
+// 任一步失败都在启动期报出，不把装配缺陷推到第一个请求。
+
+const (
+	// healthzPath 是健康检查的固定路径。
+	healthzPath = "/healthz"
+	// defaultUpstreamAttempts 是单请求最多发起的上游尝试次数（含首次）。
+	// 取值 2 对应本轮口径：首次失败后至多换下一条候选一次。
+	defaultUpstreamAttempts = 2
+	// defaultUpstreamTimeout 是渠道未配置超时时使用的兜底上游超时。
+	defaultUpstreamTimeout = 60 * time.Second
+	// readHeaderTimeout 是读取客户端请求头的最长等待时间，
+	// 用来拦住只发一半请求头的连接占住服务端连接（Slowloris）。
+	readHeaderTimeout = 30 * time.Second
+	// shutdownTimeout 是收到退出信号后等待在途请求完成的最长时间。
+	shutdownTimeout = 15 * time.Second
+)
+
+// supportedProtocols 是网关暴露的三种协议；顺序即端点的声明顺序。
+//
+// 端点路径只有 domain.Protocol.EndpointPath 一处来源，mux 注册与路径到适配器的映射
+// 共用它，两处不会分叉。
+var supportedProtocols = []domain.Protocol{
+	domain.ProtocolOpenAIChat,
+	domain.ProtocolOpenAIResponses,
+	domain.ProtocolAnthropicMessages,
+}
+
+// gatewayStore 是装配层需要的存储能力。
+//
+// 抽成接口而不是直接依赖 *store.Store：装配测试注入内存替身即可覆盖三方言端到端路径，
+// 不必连数据库。生产路径注入真实 Store。
+type gatewayStore interface {
+	LookupAPIKey(ctx context.Context, keyHash string, now time.Time) (*store.APIKeyAuth, error)
+	RouteCandidates(ctx context.Context, channelType store.ChannelType, model string, merchantID uint64) ([]store.RouteCandidate, error)
+	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
+}
+
+// 编译期断言：真实存储层满足装配层的依赖面。
+var _ gatewayStore = (*store.Store)(nil)
+
+// gatewayOptions 是装配的可调参数；零值字段取对应默认值。
+type gatewayOptions struct {
+	// UpstreamTimeout 是渠道未配置超时时使用的兜底上游超时。
+	UpstreamTimeout time.Duration
+	// MaxAttempts 是单请求最多发起的上游尝试次数（含首次）。
+	MaxAttempts int
+	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
+	Now func() time.Time
+}
+
+// gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
+type gateway struct {
+	handler  http.Handler
+	upstream *http.Client
+}
+
+// Close 释放装配持有的上游连接资源。
+func (g *gateway) Close() {
+	if g != nil && g.upstream != nil {
+		g.upstream.CloseIdleConnections()
+	}
+}
+
+// newGateway 完成一次装配。
+func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
+	if st == nil {
+		return nil, domain.NewError(domain.CodeInternal, "缺少存储层")
+	}
+	attempts := opts.MaxAttempts
+	if attempts <= 0 {
+		attempts = defaultUpstreamAttempts
+	}
+	timeout := opts.UpstreamTimeout
+	if timeout <= 0 {
+		timeout = defaultUpstreamTimeout
+	}
+
+	// 协议适配器做成单例：不持有跨请求业务状态（流式状态由 NewStream 派生），可按协议共享。
+	adapters := map[domain.Protocol]domain.Adapter{
+		domain.ProtocolOpenAIChat:        openaichat.New(),
+		domain.ProtocolOpenAIResponses:   openairesponses.New(),
+		domain.ProtocolAnthropicMessages: anthropic.New(),
+	}
+	lookupAdapter := func(protocol domain.Protocol) (domain.Adapter, error) {
+		adapter, ok := adapters[protocol]
+		if !ok {
+			return nil, domain.NewError(domain.CodeInternal, fmt.Sprintf("没有协议 %q 的适配器", string(protocol)))
+		}
+		return adapter, nil
+	}
+	resolveAdapter := func(path string) (domain.Adapter, bool) {
+		for _, protocol := range supportedProtocols {
+			if protocol.EndpointPath() == path {
+				adapter, ok := adapters[protocol]
+				return adapter, ok
+			}
+		}
+		return nil, false
+	}
+
+	headers := credential.NewWithResolver(storeCredentialResolver{store: st})
+	upstreamHTTP := &http.Client{}
+	upstreamClient, err := upstream.New(upstream.Options{
+		HTTPClient:     upstreamHTTP,
+		Headers:        headers,
+		Adapters:       lookupAdapter,
+		DefaultTimeout: timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	forwarder, err := pipeline.New(pipeline.Options{
+		Adapters:    lookupAdapter,
+		Upstream:    upstreamClient,
+		Routes:      storeRouteResolver{store: st},
+		MaxAttempts: attempts,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	handler, err := transport.New(transport.Options{
+		Forwarder: forwarder,
+		Adapters:  resolveAdapter,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	auth := newAuthenticator(st, opts.Now)
+	mux := http.NewServeMux()
+	// 健康检查独立于转发与鉴权：探活只关心进程是否在线，不应因密钥配置而失败。
+	mux.HandleFunc(healthzPath, healthz)
+	// 三个端点各自注册精确路径并套上鉴权；其余路径一律走下面的 JSON 404。
+	for _, protocol := range supportedProtocols {
+		mux.Handle(protocol.EndpointPath(), auth.middleware(handler))
+	}
+	mux.HandleFunc("/", notFoundJSON)
+
+	return &gateway{handler: mux, upstream: upstreamHTTP}, nil
+}
+
+// healthz 是健康检查处理器：固定返回 200 与纯文本 ok。
+//
+// 不在此处探活依赖（如上游连通性）：那会让探活随上游抖动而失败，
+// 进而在编排系统里反复重启一个本身健康的网关。
+func healthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok")
+}
+
+// notFoundJSON 是未注册路径的兜底处理器：回与鉴权失败同形的 JSON 404。
+//
+// 不走 transport 的原因是那里需要按协议编码错误体，而未注册路径没有可归的协议；
+// 这里只能给一个与协议无关的统一错误体。
+func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
+	writeJSONError(w, http.StatusNotFound, domain.CodeNotFound, "路径不存在")
+}
+
+// storeRouteResolver 是按数据库选路的 domain.RouteResolver。
+//
+// 商家来自鉴权上下文，不来自请求体：候选渠道必须与密钥所属商家一致，
+// 否则一个商家的密钥可以打到另一个商家的渠道。
+type storeRouteResolver struct {
+	store gatewayStore
+}
+
+// Candidates 返回本次请求在客户端协议与商家下的候选渠道，按 priority 降序。
+func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request) ([]domain.Route, error) {
+	if req == nil {
+		return nil, nil
+	}
+	id, ok := identityFromContext(ctx)
+	if !ok {
+		// 未鉴权不应走到这里；没有生效商家时按无候选处理，由流水线统一回「无可用渠道」。
+		return nil, nil
+	}
+	candidates, err := r.store.RouteCandidates(ctx, store.ChannelType(req.Protocol), req.Model, id.merchantID)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]domain.Route, 0, len(candidates))
+	for _, c := range candidates {
+		routes = append(routes, domain.Route{
+			ChannelID:        c.ChannelID,
+			UpstreamID:       strconv.FormatUint(c.ChannelID, 10),
+			Protocol:         req.Protocol,
+			UpstreamModel:    c.UpstreamModel,
+			BaseURL:          endpointURL(c.BaseURL, req.Protocol),
+			CredentialRef:    c.CredGroup,
+			RequestOverrides: c.RequestOverrides,
+		})
+	}
+	return routes, nil
+}
+
+// endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
+//
+// 库里只存到端点段之前（如 https://host/api/v3）：同一台主机上的不同协议端点因此共享一段根地址，
+// 端点段由本次协议决定。拼接去掉根地址末尾的斜杠，避免出现 //chat/completions 这样的双斜杠。
+func endpointURL(base string, protocol domain.Protocol) string {
+	root := strings.TrimRight(strings.TrimSpace(base), "/")
+	if root == "" {
+		return ""
+	}
+	return root + protocol.EndpointSegment()
+}
+
+// storeCredentialResolver 是按数据库读凭据的 credential.Resolver。
+//
+// 商家来自鉴权上下文：凭据分组只在商家内唯一，跨商家取用会把一个商家的密钥发给另一个商家的上游。
+type storeCredentialResolver struct {
+	store gatewayStore
+}
+
+// Resolve 取本次路由该用的凭据：同组多行时取 id 最小的那一行。
+//
+// 取第一行而不是轮换：本轮口径允许「取第一行」，轮换需要跨请求状态，
+// 放到后续按凭据健康度做选择时再引入。
+func (r storeCredentialResolver) Resolve(ctx context.Context, route domain.Route) (credential.Credential, error) {
+	id, ok := identityFromContext(ctx)
+	if !ok {
+		return credential.Credential{}, domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法读取上游凭据")
+	}
+	rows, err := r.store.CredentialsByGroup(ctx, route.CredentialRef, id.merchantID)
+	if err != nil {
+		return credential.Credential{}, err
+	}
+	if len(rows) == 0 {
+		return credential.Credential{}, domain.NewError(domain.CodeInternal,
+			fmt.Sprintf("凭据分组 %q 没有可用凭据", route.CredentialRef))
+	}
+	apiKey, err := credentialAPIKey(rows[0].Secret)
+	if err != nil {
+		return credential.Credential{}, err
+	}
+	return credential.Credential{APIKey: apiKey}, nil
+}
+
+// upstreamCredentialSecret 是 upstream_credential.secret 里本网关认识的字段。
+//
+// 其余的厂商专属字段本轮不消费；多出来的键照常忽略。
+type upstreamCredentialSecret struct {
+	APIKey string `json:"api_key"`
+}
+
+// credentialAPIKey 从凭据 JSON 里取出 api_key；解析失败或缺少密钥时返回错误。
+//
+// 不返回空密钥：空密钥会把「凭据行写坏了」推迟成上游的 401，
+// 排查从一个与配置无关的症状出发很难回到真正原因。
+func credentialAPIKey(raw []byte) (string, error) {
+	var secret upstreamCredentialSecret
+	if err := json.Unmarshal(raw, &secret); err != nil {
+		return "", domain.NewError(domain.CodeInternal, "上游凭据 JSON 无法解析").WithCause(err)
+	}
+	if strings.TrimSpace(secret.APIKey) == "" {
+		return "", domain.NewError(domain.CodeInternal, "上游凭据缺少 api_key")
+	}
+	return secret.APIKey, nil
+}
+
+// cmdServe 是 serve 子命令的入口：读配置、开存储、跑迁移、装配并在信号到达时退出。
+func cmdServe(stderr io.Writer) int {
+	cfg, err := config.LoadServe()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "配置错误：%v\n", err)
+		return exitFailure
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.Store)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
+		return exitFailure
+	}
+	defer func() { _ = st.Close() }()
+
+	// 迁移在启动时执行：表结构随二进制一同发布，启动即对齐，避免新版本对着旧表跑。
+	if migrateErr := st.Migrate(ctx); migrateErr != nil {
+		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", migrateErr)
+		return exitFailure
+	}
+
+	gw, err := newGateway(st, gatewayOptions{})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
+		return exitFailure
+	}
+	defer gw.Close()
+
+	// 用 ListenConfig 而不是裸 net.Listen：监听也接受 context，
+	// 使启动阶段的取消与超时有一条统一路径。
+	var listenConfig net.ListenConfig
+	ln, err := listenConfig.Listen(ctx, "tcp", cfg.Listen)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "启动失败：监听 %s 失败：%v\n", cfg.Listen, err)
+		return exitFailure
+	}
+
+	server := &http.Server{
+		Handler:           gw.handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
+	// 信号只决定「何时开始关」，退出码由 runServer 的返回值统一决定。
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runServer(sigCtx, server, ln); err != nil {
+		_, _ = fmt.Fprintf(stderr, "运行失败：%v\n", err)
+		return exitFailure
+	}
+	return exitOK
+}
+
+// runServer 在给定 listener 上提供服务，ctx 取消时优雅关闭并排空在途请求。
+//
+// 与 http.Server.ListenAndServe 的差别是 listener 由调用方提供：
+// 监听失败（端口被占等）因此在启动路径上同步报出，而不是藏在一个后台 goroutine 的返回值里；
+// 测试也能用临时端口走同一条启动与关闭路径。
+func runServer(ctx context.Context, server *http.Server, ln net.Listener) error {
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(ln) }()
+
+	select {
+	case err := <-serveErr:
+		// 自己关掉时会以 http.ErrServerClosed 退出，那不是故障。
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		// 关闭用的 context 从 ctx 派生但不继承取消：ctx 此刻已取消，
+		// 直接以它作父 context 会让 Shutdown 立即超时，在途请求得不到排空机会。
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		// 排空：Shutdown 返回后 Serve 必然已退出，收下它的结果避免 goroutine 悬空。
+		<-serveErr
+		return nil
+	}
+}

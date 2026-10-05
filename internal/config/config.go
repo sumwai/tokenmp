@@ -21,11 +21,46 @@ const (
 	envMaxOpenConns    = "TOKENMP_MYSQL_MAX_OPEN_CONNS"
 	envMaxIdleConns    = "TOKENMP_MYSQL_MAX_IDLE_CONNS"
 	envConnMaxLifetime = "TOKENMP_MYSQL_CONN_MAX_LIFETIME"
+	envListen          = "TOKENMP_LISTEN"
 )
+
+// defaultListen 是未配置监听地址时的默认值。
+//
+// 故意给一个具体取值而不是空串：空串在 net.Listen 里等价于绑全部接口的随机端口，
+// 那既不能作为服务地址被访问，也掩盖了「没配监听」这个事实。
+const defaultListen = ":8080"
+
+// Serve 是 serve 子命令的运行配置。
+//
+// 监听地址与存储连接放在一起：两者都是进程启动的必需事实，缺失或非法都应在启动前统一报出。
+type Serve struct {
+	// Listen 是网关监听地址，形如 host:port 或 :port。
+	Listen string
+	// Store 是存储层连接配置。
+	Store store.Config
+}
 
 // Load 从进程环境读出存储层配置。
 func Load() (store.Config, error) {
 	return load(os.LookupEnv)
+}
+
+// LoadServe 从进程环境读出 serve 子命令的运行配置。
+func LoadServe() (Serve, error) {
+	return loadServe(os.LookupEnv)
+}
+
+// loadServe 在存储配置之上补出监听地址；监听地址缺失时用默认值。
+func loadServe(lookup func(string) (string, bool)) (Serve, error) {
+	storeCfg, err := load(lookup)
+	if err != nil {
+		return Serve{}, err
+	}
+	listen := defaultListen
+	if raw, ok := lookup(envListen); ok && strings.TrimSpace(raw) != "" {
+		listen = strings.TrimSpace(raw)
+	}
+	return Serve{Listen: listen, Store: storeCfg}, nil
 }
 
 // load 接受一个查找函数而不是直接读 os，便于测试构造各种环境。

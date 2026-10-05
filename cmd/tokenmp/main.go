@@ -35,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "serve":
+		return cmdServe(stderr)
 	case "version":
 		return cmdVersion(stdout, stderr)
 	case "help", "-h", "--help":
@@ -61,6 +63,7 @@ func usageText() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "用法：%s <子命令>\n\n", programName)
 	b.WriteString("子命令：\n")
+	b.WriteString("  serve      启动网关 HTTP 服务\n")
 	b.WriteString("  version    报出版本号、构建自哪个提交，以及运行时的 Go 版本\n")
 	b.WriteString("  help       打印本帮助\n")
 	return b.String()
