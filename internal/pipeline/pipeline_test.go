@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
 )
@@ -205,6 +206,7 @@ type attemptInfoWriter struct {
 	events         *[]string
 	channelID      uint64
 	upstreamStatus int
+	crossProtocol  bool
 }
 
 func (w *attemptInfoWriter) Write([]byte) (int, error) {
@@ -215,6 +217,8 @@ func (w *attemptInfoWriter) Write([]byte) (int, error) {
 func (w *attemptInfoWriter) SetAttemptChannel(channelID uint64) { w.channelID = channelID }
 
 func (w *attemptInfoWriter) SetUpstreamStatus(status int) { w.upstreamStatus = status }
+
+func (w *attemptInfoWriter) SetCrossProtocol(cross bool) { w.crossProtocol = cross }
 
 // statusCarrierError 是携带上游 HTTP 状态码的测试错误，模拟上游客户端包在错误上的能力。
 type statusCarrierError struct {
@@ -250,6 +254,64 @@ func TestForwardReportsAttemptInfoToSink(t *testing.T) {
 	}
 	if out.upstreamStatus != http.StatusOK {
 		t.Errorf("上游状态码 = %d，期望 200", out.upstreamStatus)
+	}
+	if out.crossProtocol {
+		t.Error("同协议尝试不应标记 cross_protocol")
+	}
+}
+
+// crossProtocolAdapterLookup 返回客户端与上游两类协议各自的适配器。
+func crossProtocolAdapterLookup() AdapterLookup {
+	return func(protocol domain.Protocol) (domain.Adapter, error) {
+		switch protocol {
+		case domain.ProtocolOpenAIChat:
+			return openaichat.New(), nil
+		case domain.ProtocolAnthropicMessages:
+			return anthropic.New(), nil
+		default:
+			return nil, domain.NewError(domain.CodeInternal, "测试未提供该协议的适配器")
+		}
+	}
+}
+
+// TestForwardReportsCrossProtocolToSink 断言跨协议尝试把 cross_protocol 回流到写出目标，
+// 并写进尝试记录：客户端说 chat、上游渠道说 anthropic，入口层据此在访问日志里标记降级。
+func TestForwardReportsCrossProtocolToSink(t *testing.T) {
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		return &domain.UpstreamResult{Raw: []byte(`{}`), Response: &domain.Response{}}, nil
+	}}
+	route := chatRoute()
+	route.Protocol = domain.ProtocolAnthropicMessages
+	observer := &recordingObserver{}
+	p, err := New(Options{
+		Adapters: crossProtocolAdapterLookup(),
+		Upstream: caller,
+		Routes:   fakeRouteResolver{routes: []domain.Route{route}},
+		Observer: observer,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+	events := []string{}
+	out := &attemptInfoWriter{events: &events}
+	if err := p.Forward(context.Background(), openaichat.New(), newChatRequest(false), out); err != nil {
+		t.Fatalf("转发失败：%v", err)
+	}
+	if !out.crossProtocol {
+		t.Error("跨协议尝试应标记 cross_protocol")
+	}
+	if out.channelID != 7 {
+		t.Errorf("渠道 id = %d，期望 7", out.channelID)
+	}
+	records := observer.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("尝试记录数 = %d，期望 1", len(records))
+	}
+	if !records[0].CrossProtocol || records[0].UpstreamProtocol != domain.ProtocolAnthropicMessages {
+		t.Errorf("尝试记录应标记跨协议与上游协议，得到 %+v", records[0])
+	}
+	if len(records[0].RewrittenParts) == 0 || !records[0].RewrittenParts.Has(domain.RewritePartResponseReencoded) {
+		t.Errorf("跨协议非流式响应应标注 response_reencoded，得到 %v", records[0].RewrittenParts)
 	}
 }
 

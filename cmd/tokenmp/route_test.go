@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -123,5 +124,106 @@ func TestOrderCandidatesByWeight(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// chainIDs 把回退链压成渠道 id 列表，供顺序整体比对。
+func chainIDs(routes []domain.Route) []uint64 {
+	ids := make([]uint64, 0, len(routes))
+	for _, route := range routes {
+		ids = append(ids, route.ChannelID)
+	}
+	return ids
+}
+
+// assertChainIDs 断言回退链的渠道 id 顺序与期望一致。
+func assertChainIDs(t *testing.T, routes []domain.Route, want []uint64) {
+	t.Helper()
+	got := chainIDs(routes)
+	if len(got) != len(want) {
+		t.Fatalf("链长度 = %d，期望 %d（实际 %v）", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("链顺序 = %v，期望 %v", got, want)
+		}
+	}
+}
+
+// TestRouteChainSameProtocolSegmentComesFirst 守护分层顺序：同协议候选整段在前，
+// 即使跨协议候选的 priority 更高也不得插到前面。
+func TestRouteChainSameProtocolSegmentComesFirst(t *testing.T) {
+	same := []store.RouteCandidate{
+		{ChannelID: 11, Priority: 10, Weight: 1, ChannelType: store.ChannelTypeOpenAIChat, BaseURL: "https://same.example.com"},
+		{ChannelID: 12, Priority: 5, Weight: 1, ChannelType: store.ChannelTypeOpenAIChat, BaseURL: "https://same.example.com"},
+	}
+	cross := []store.RouteCandidate{
+		{ChannelID: 21, Priority: 999, Weight: 1, ChannelType: store.ChannelTypeAnthropicMessages, BaseURL: "https://cross.example.com"},
+	}
+
+	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
+	assertChainIDs(t, routes, []uint64{11, 12, 21})
+	if routes[0].Protocol != domain.ProtocolOpenAIChat || routes[1].Protocol != domain.ProtocolOpenAIChat {
+		t.Errorf("同协议段的协议应为客户端协议，得到 %q、%q", string(routes[0].Protocol), string(routes[1].Protocol))
+	}
+	if routes[2].Protocol != domain.ProtocolAnthropicMessages {
+		t.Errorf("跨协议候选的协议应取渠道方言，得到 %q", string(routes[2].Protocol))
+	}
+	// 端点段跟着上游协议走：跨协议候选的地址不能拼成客户端方言的端点。
+	if routes[2].BaseURL != "https://cross.example.com/messages" {
+		t.Errorf("跨协议候选地址 = %q，期望按 anthropic 端点段拼接", routes[2].BaseURL)
+	}
+}
+
+// TestRouteChainDropsCrossProtocolDuplicates 守护去重：不限协议查询必然包含同协议行，
+// 同一条渠道不得在同协议段失败后又在跨协议段重试一次。
+func TestRouteChainDropsCrossProtocolDuplicates(t *testing.T) {
+	same := []store.RouteCandidate{
+		{ChannelID: 11, ChannelType: store.ChannelTypeOpenAIChat},
+	}
+	// 跨协议段同时含同一条同协议渠道与一条真正的跨协议渠道。
+	cross := []store.RouteCandidate{
+		{ChannelID: 11, ChannelType: store.ChannelTypeOpenAIChat},
+		{ChannelID: 21, ChannelType: store.ChannelTypeAnthropicMessages},
+	}
+
+	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(0, 0))
+	assertChainIDs(t, routes, []uint64{11, 21})
+}
+
+// TestRouteChainSkipsUnknownChannelType 守护读方向宽容：渠道方言不在可重建集合里时
+// 跳过该候选，而不是让它进链后由流水线报「没有适配器」。
+func TestRouteChainSkipsUnknownChannelType(t *testing.T) {
+	cross := []store.RouteCandidate{
+		{ChannelID: 31, ChannelType: store.ChannelType("gemini_generate")},
+		{ChannelID: 32},
+		{ChannelID: 33, ChannelType: store.ChannelTypeOpenAIResponses},
+	}
+
+	routes := routeChain(domain.ProtocolOpenAIChat, nil, cross, seqIntN(0, 0))
+	assertChainIDs(t, routes, []uint64{33})
+}
+
+// TestRouteChainOrderCandidatesWithinSegments 守护段内行为与同协议路径一致：
+// 同优先级组内按加权随机定首选，组与组之间按 priority 降序。
+func TestRouteChainOrderCandidatesWithinSegments(t *testing.T) {
+	same := []store.RouteCandidate{
+		{ChannelID: 11, Priority: 100, Weight: 0, ChannelType: store.ChannelTypeOpenAIChat},
+		{ChannelID: 12, Priority: 100, Weight: 5, ChannelType: store.ChannelTypeOpenAIChat},
+	}
+	cross := []store.RouteCandidate{
+		{ChannelID: 21, Priority: 100, Weight: 0, ChannelType: store.ChannelTypeAnthropicMessages},
+		{ChannelID: 22, Priority: 100, Weight: 7, ChannelType: store.ChannelTypeAnthropicMessages},
+	}
+
+	// 两个段各消耗一次随机取值：同协议段 [1,5] 取 roll=1 命中 12，跨协议段 [1,7] 取 roll=0 命中 21。
+	routes := routeChain(domain.ProtocolOpenAIChat, same, cross, seqIntN(1, 0))
+	assertChainIDs(t, routes, []uint64{12, 11, 21, 22})
+}
+
+// TestRouteChainEmpty 守护两级都无候选时返回空链，由流水线统一回「没有可用渠道」。
+func TestRouteChainEmpty(t *testing.T) {
+	if routes := routeChain(domain.ProtocolOpenAIChat, nil, nil, seqIntN(0)); len(routes) != 0 {
+		t.Fatalf("无候选时应返回空链，实际 %#v", routes)
 	}
 }

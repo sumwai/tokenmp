@@ -41,6 +41,9 @@ func (l *accessLogger) LogAccess(record transport.AccessRecord) {
 		"model", record.Model,
 		"channel_id", record.ChannelID,
 		"upstream_status", record.UpstreamStatus,
+		// 标记本次请求最终是否走了跨协议重建：同协议缺位时的降级是可用性行为，
+		// 在请求级日志里明示，不必从渠道 id 反查渠道方言。
+		"cross_protocol", record.CrossProtocol,
 		"http_status", record.HTTPStatus,
 		"duration_ms", record.DurationMS,
 	)

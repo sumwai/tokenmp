@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math/rand"
+	"strconv"
 
+	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
-// 本文件实现同优先级候选的加权随机首选。
+// 本文件实现选路的两件事：同优先级候选的加权随机首选，以及同协议段与跨协议段的拼链。
 //
 // 随机源以 intN 注入：默认为 math/rand，测试注入确定性序列后即可断言「选中了哪一条」，
 // 而不必对分布做统计性断言。
@@ -107,5 +109,67 @@ func orderCandidatesByWeight(candidates []store.RouteCandidate, intN func(int) i
 			}
 		}
 		start = end
+	}
+}
+
+// routeChain 把两级候选拼成本次请求的唯一回退链：同协议候选成段在前，跨协议候选补段在后。
+//
+// 分层与降级顺序只有本函数一处实现：
+//
+//  1. 各段内部按优先级组加权随机定首选；段与段之间的先后不参与随机；
+//  2. 跨协议段去掉已出现在同协议段的渠道 —— 不限协议查询必然包含同协议行，
+//     不去重会让同一条渠道在同一请求里被重试两次；
+//  3. 跨协议段只保留两侧协议都能经统一内部格式重建的候选：渠道方言来自库表，
+//     可能是本版本不认识的取值，跳过该行而不是让整批候选在流水线里报错。
+//
+// 同协议候选始终排在跨协议候选之前：同协议透传的保真度与延迟优于重建，
+// 低优先级的同协议候选也先于高优先级的跨协议候选，只在同协议缺位或耗尽时才降到跨协议。
+// 空表入参合法：两段都为空时返回空链，由流水线回「没有可用渠道」。
+func routeChain(client domain.Protocol, sameProtocol, crossProtocol []store.RouteCandidate, intN func(int) int) []domain.Route {
+	sameSegment := append([]store.RouteCandidate(nil), sameProtocol...)
+	orderCandidatesByWeight(sameSegment, intN)
+	crossSegment := append([]store.RouteCandidate(nil), crossProtocol...)
+	orderCandidatesByWeight(crossSegment, intN)
+	routes := make([]domain.Route, 0, len(sameSegment)+len(crossSegment))
+	served := make(map[uint64]struct{}, len(sameSegment))
+	for _, candidate := range sameSegment {
+		served[candidate.ChannelID] = struct{}{}
+		routes = append(routes, routeOf(candidate, client))
+	}
+	for _, candidate := range crossSegment {
+		if _, duplicated := served[candidate.ChannelID]; duplicated {
+			continue
+		}
+		upstream := domain.Protocol(candidate.ChannelType)
+		if !crossProtocolRebuildable(client, upstream) {
+			continue
+		}
+		routes = append(routes, routeOf(candidate, upstream))
+	}
+	return routes
+}
+
+// crossProtocolRebuildable 报告客户端协议与上游协议能否经统一内部格式互相重建。
+//
+// 两侧都要可重建：只有一侧支持时，重建所需的字段在一侧缺位，转换会产出残缺请求或响应。
+func crossProtocolRebuildable(client, upstream domain.Protocol) bool {
+	return client.CrossProtocolRebuildable() && upstream.CrossProtocolRebuildable()
+}
+
+// routeOf 把一条候选渠道映射为选路结果；protocol 是本次转发实际使用的上游协议。
+//
+// 端点地址按本次的上游协议拼接（而非客户端协议）：跨协议补段时上游说的是另一种方言，
+// 端点段必须跟着上游协议走。
+func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Route {
+	return domain.Route{
+		ChannelID:            candidate.ChannelID,
+		UpstreamID:           strconv.FormatUint(candidate.ChannelID, 10),
+		Protocol:             protocol,
+		UpstreamModel:        candidate.UpstreamModel,
+		BaseURL:              endpointURL(candidate.BaseURL, protocol),
+		CredentialRef:        candidate.CredGroup,
+		RequestOverrides:     sanitizeRequestOverrides(candidate),
+		RateLimitQPS:         candidate.RateLimitQPS,
+		RateLimitConcurrency: candidate.RateLimitConcurrency,
 	}
 }

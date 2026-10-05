@@ -404,6 +404,10 @@ type UpstreamAttemptSink interface {
 	SetAttemptChannel(channelID uint64)
 	// SetUpstreamStatus 记录本次尝试的上游 HTTP 状态码；0 表示未取得（例如连接失败）。
 	SetUpstreamStatus(status int)
+	// SetCrossProtocol 记录本次尝试的上游协议是否与客户端协议不同：
+	// 为真即表示本次转发走了跨协议重建。两侧协议名与其他归属事实同属尝试级事实，
+	// 由流水线在同一时机回流，访问日志据此标记本次请求是否被跨协议降级。
+	SetCrossProtocol(cross bool)
 }
 
 // AttemptOutcome 是一次上游尝试的结果分类。
@@ -429,6 +433,10 @@ type AttemptRecord struct {
 	// 两者不同即表示网关做了跨协议重建，使用方据此判定「这次转发转换过协议」。
 	ClientProtocol   Protocol
 	UpstreamProtocol Protocol
+	// CrossProtocol 是上述两个协议是否不同的显式结论，由生产端在两者都能拿到的地方计算
+	// （否则消费方必须自己再比一次）。为真表示本次尝试的上游渠道说的是另一种方言，
+	// 请求与响应都由适配器按统一内部格式重建；消费方据此标记跨协议降级而不必重复推导。
+	CrossProtocol bool
 	// RequestedModel 是客户端请求里的模型名，UpstreamModel 是实际写入上游请求体的模型名。
 	// 两者不同即表示网关改写过模型名。
 	RequestedModel string

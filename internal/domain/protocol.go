@@ -101,52 +101,6 @@ func (p Protocol) CrossProtocolRebuildable() bool {
 	}
 }
 
-// FilterRoutesForProtocol 返回本次请求协议下可用的候选渠道。
-//
-// 请求协议与渠道协议一致时一律保留；不一致时只有两侧协议都可跨协议重建才保留。
-// 返回的切片是新分配的结果，不修改入参，调用方可以安全地继续使用原切片。
-//
-// 本函数会丢掉跨协议的候选，丢掉它们就等于关掉跨协议重建这条路；只想改变尝试顺序、
-// 保留跨协议候选作为后备时用 PreferRoutesForProtocol。
-func FilterRoutesForProtocol(protocol Protocol, routes []Route) []Route {
-	filtered := make([]Route, 0, len(routes))
-	for _, route := range routes {
-		if route.Protocol == protocol {
-			filtered = append(filtered, route)
-			continue
-		}
-		if protocol.CrossProtocolRebuildable() && route.Protocol.CrossProtocolRebuildable() {
-			filtered = append(filtered, route)
-		}
-	}
-	return filtered
-}
-
-// PreferRoutesForProtocol 把与本次请求协议一致的候选排到前面，其余候选按原顺序留在后面。
-//
-// 它只调顺序，一条候选都不丢：同协议的候选排在前面，请求因此按原协议的字段原样上发，
-// 省掉跨协议重建；跨协议的候选仍留在链尾，前面那些都失败且可重试时才轮到它们。
-// 这正是它与 FilterRoutesForProtocol 的差别——后者按协议过滤掉跨协议的候选，
-// 客户端发 anthropic_messages 而配置里只有 openai_chat 端点时就会一条候选都不剩。
-//
-// 排序是稳定划分：同协议的那一组与其余的那一组各自保持原有的相对顺序，
-// 因此候选表里写下的回退顺序（谁先谁后）不被搅乱，被打乱的只是「谁在最前」。
-// 返回的切片是新分配的结果，不修改也不共享入参的底层数组；空表、单条候选、
-// 全部同协议三种输入都原样保持顺序。
-func PreferRoutesForProtocol(protocol Protocol, routes []Route) []Route {
-	preferred := make([]Route, 0, len(routes))
-	fallback := make([]Route, 0, len(routes))
-	for _, route := range routes {
-		if route.Protocol == protocol {
-			preferred = append(preferred, route)
-			continue
-		}
-		fallback = append(fallback, route)
-	}
-	// preferred 是本次调用新分配的切片，这里把回退候选接在它的空位上不会碰到入参。
-	return append(preferred, fallback...)
-}
-
 // Role 是消息角色，已归一化到三种协议的交集。
 type Role string
 

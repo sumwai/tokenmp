@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,9 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
+	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
+	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/quota"
@@ -53,8 +57,13 @@ type scopeKey struct {
 // wantMerchantID 非零时只在该商家下返回候选与凭据：鉴权没把商家带进上下文时，
 // 端到端用例会因无候选而失败，这比另建一处断言的覆盖更直接。
 type fakeGatewayStore struct {
-	auth           *store.APIKeyAuth
-	routes         []store.RouteCandidate
+	auth *store.APIKeyAuth
+	// routes 是同协议候选，RouteCandidates 返回它。
+	routes []store.RouteCandidate
+	// crossRoutes 是仅由不限协议查询返回的候选，供跨协议降级用例注入。
+	// 真实存储层的不限协议查询也包含 routes（它不限定 type），替身这里分开列出，
+	// 由 resolver 的 routeChain 按渠道 id 去重，与生产路径同形。
+	crossRoutes    []store.RouteCandidate
 	credentials    []store.Credential
 	wantMerchantID uint64
 
@@ -91,6 +100,17 @@ func (f *fakeGatewayStore) RouteCandidates(_ context.Context, _ store.ChannelTyp
 		return nil, nil
 	}
 	return f.routes, nil
+}
+
+// RouteCandidatesAnyType 返回同协议候选与跨协议候选的并集，模拟不限协议查询。
+func (f *fakeGatewayStore) RouteCandidatesAnyType(_ context.Context, _ string, merchantID uint64) ([]store.RouteCandidate, error) {
+	if f.wantMerchantID != 0 && merchantID != f.wantMerchantID {
+		return nil, nil
+	}
+	combined := make([]store.RouteCandidate, 0, len(f.routes)+len(f.crossRoutes))
+	combined = append(combined, f.routes...)
+	combined = append(combined, f.crossRoutes...)
+	return combined, nil
 }
 
 func (f *fakeGatewayStore) CredentialsByGroup(_ context.Context, _ string, merchantID uint64) ([]store.Credential, error) {
@@ -1248,5 +1268,407 @@ func TestGatewayConcurrencyLimitSerializesRequests(t *testing.T) {
 	// 并发位已全部归还：第三个请求不得因残留占用而超时。
 	if third := doPost(t, endpoint, authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`); third.status != http.StatusOK {
 		t.Errorf("第三个请求状态码 = %d，期望 200，响应体 %s", third.status, third.body)
+	}
+}
+
+// e2eDialect 是一种线协议在路由矩阵里的固定样本：
+// 客户端请求体、上游响应体与调用上游时的凭据形态。
+//
+// 矩阵只换「客户端方言」与「上游渠道方言」两个维度，请求与响应样本固定在一处。
+type e2eDialect struct {
+	protocol domain.Protocol
+	adapter  domain.Adapter
+	// requestBody 与 streamRequestBody 分别是本方言的非流式与流式客户端请求体。
+	requestBody       string
+	streamRequestBody string
+	// upstreamResponse 与 upstreamStream 分别是本方言上游返回的非流式与流式响应体。
+	// 流式样本复用 usage_test.go 里的三方言 SSE 常量。
+	upstreamResponse string
+	upstreamStream   string
+	// upstreamHeader 与 upstreamHeaderValue 是本方言调用上游时凭据请求头的注入形态。
+	upstreamHeader      string
+	upstreamHeaderValue string
+	// streamTextMarker 与 streamTerminator 用于断言重建后的流属于客户端方言。
+	streamTextMarker string
+	streamTerminator string
+}
+
+// e2eDialects 返回矩阵里的三种方言，顺序即子用例顺序。
+func e2eDialects() []e2eDialect {
+	return []e2eDialect{
+		{
+			protocol:            domain.ProtocolOpenAIChat,
+			adapter:             openaichat.New(),
+			requestBody:         `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`,
+			streamRequestBody:   `{"model":"alias","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamResponse:    `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+			upstreamStream:      chatSSE,
+			upstreamHeader:      "Authorization",
+			upstreamHeaderValue: "Bearer sk-upstream",
+			streamTextMarker:    `"content":"hello"`,
+			streamTerminator:    "data: [DONE]",
+		},
+		{
+			protocol:            domain.ProtocolOpenAIResponses,
+			adapter:             openairesponses.New(),
+			requestBody:         `{"model":"alias","input":"hi"}`,
+			streamRequestBody:   `{"model":"alias","input":"hi","stream":true}`,
+			upstreamResponse:    `{"id":"resp_1","model":"up-model","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":5,"output_tokens":3}}`,
+			upstreamStream:      responsesSSE,
+			upstreamHeader:      "Authorization",
+			upstreamHeaderValue: "Bearer sk-upstream",
+			streamTextMarker:    `"delta":"hello"`,
+			streamTerminator:    "event: response.completed",
+		},
+		{
+			protocol:            domain.ProtocolAnthropicMessages,
+			adapter:             anthropic.New(),
+			requestBody:         `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			streamRequestBody:   `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamResponse:    `{"id":"msg_1","type":"message","role":"assistant","model":"up-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`,
+			upstreamStream:      anthropicSSE,
+			upstreamHeader:      "x-api-key",
+			upstreamHeaderValue: "sk-upstream",
+			streamTextMarker:    `"text":"hello"`,
+			streamTerminator:    "event: message_stop",
+		},
+	}
+}
+
+// dialectFor 按协议取出矩阵样本；未登记即让用例失败。
+func dialectFor(t *testing.T, protocol domain.Protocol) e2eDialect {
+	t.Helper()
+	for _, dialect := range e2eDialects() {
+		if dialect.protocol == protocol {
+			return dialect
+		}
+	}
+	t.Fatalf("没有协议 %q 的样本", string(protocol))
+	return e2eDialect{}
+}
+
+// dialectUpstream 记录最后一次上游调用的事实，供矩阵断言读取。
+type dialectUpstream struct {
+	mu         sync.Mutex
+	lastPath   string
+	lastHeader http.Header
+	lastModel  string
+	lastStream bool
+	calls      int
+}
+
+// snapshot 返回最后一次调用的事实与累计调用次数。
+func (u *dialectUpstream) snapshot() (string, http.Header, string, bool, int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.lastPath, u.lastHeader.Clone(), u.lastModel, u.lastStream, u.calls
+}
+
+// newDialectUpstream 起一个按端点段回响应的上游：网关按候选渠道的协议拼接地址，
+// 命中的路径因此直接反映本次尝试使用的是哪种上游方言。
+func newDialectUpstream(t *testing.T) (*httptest.Server, *dialectUpstream) {
+	t.Helper()
+	dialects := e2eDialects()
+	recorder := &dialectUpstream{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var fields map[string]any
+		_ = json.Unmarshal(raw, &fields)
+		model, _ := fields["model"].(string)
+		stream, _ := fields["stream"].(bool)
+		recorder.mu.Lock()
+		recorder.lastPath = r.URL.Path
+		recorder.lastHeader = r.Header.Clone()
+		recorder.lastModel = model
+		recorder.lastStream = stream
+		recorder.calls++
+		recorder.mu.Unlock()
+
+		for _, dialect := range dialects {
+			if r.URL.Path != dialect.protocol.EndpointSegment() {
+				continue
+			}
+			if stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, dialect.upstreamStream)
+				return
+			}
+			w.Header().Set("Content-Type", jsonContentType)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, dialect.upstreamResponse)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+	return server, recorder
+}
+
+// testGatewayWithLogs 装配一个带尝试日志与访问日志缓冲区的网关。
+func testGatewayWithLogs(t *testing.T, st gatewayStore) (http.Handler, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	attempts := &bytes.Buffer{}
+	access := &bytes.Buffer{}
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout: 5 * time.Second,
+		Observer:        newAttemptObserver(newJSONLogger(attempts)),
+		Logger:          newAccessLogger(access),
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	t.Cleanup(gw.Close)
+	return gw.handler, attempts, access
+}
+
+// assertAttemptLogCrossProtocol 断言尝试日志恰有一行，且跨协议标记与响应重建标注符合期望。
+func assertAttemptLogCrossProtocol(t *testing.T, buf *bytes.Buffer, cross bool) {
+	t.Helper()
+	lines := attemptLogLines(t, buf)
+	if len(lines) != 1 {
+		t.Fatalf("尝试日志行数 = %d，期望 1：%s", len(lines), buf.String())
+	}
+	if got, want := string(lines[0]["cross_protocol"]), strconv.FormatBool(cross); got != want {
+		t.Errorf("尝试日志 cross_protocol = %s，期望 %s", got, want)
+	}
+	parts := string(lines[0]["rewritten_parts"])
+	reencoded := strings.Contains(parts, string(domain.RewritePartResponseReencoded))
+	if cross && !reencoded {
+		t.Errorf("跨协议尝试应标注 response_reencoded，得到 %s", parts)
+	}
+	if !cross && reencoded {
+		t.Errorf("同协议尝试不应标注 response_reencoded，得到 %s", parts)
+	}
+}
+
+// assertAccessLogCrossProtocol 断言请求级访问日志里的跨协议标记。
+func assertAccessLogCrossProtocol(t *testing.T, buf *bytes.Buffer, cross bool) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &fields); err != nil {
+		t.Fatalf("访问日志不是 JSON：%v，原文 %s", err, buf.String())
+	}
+	if got, want := string(fields["cross_protocol"]), strconv.FormatBool(cross); got != want {
+		t.Errorf("访问日志 cross_protocol = %s，期望 %s", got, want)
+	}
+}
+
+// TestGatewayCrossProtocolRoutingMatrix 覆盖三方言 ×（同协议命中 / 跨协议命中）的非流式矩阵。
+//
+// 断言：上游收到的端点、模型名与凭据按上游方言；同协议命中原样透传；跨协议命中时客户端
+// 拿到的是本方言的合法响应体；尝试与访问日志都按是否跨协议标记 cross_protocol。
+func TestGatewayCrossProtocolRoutingMatrix(t *testing.T) {
+	dialects := e2eDialects()
+	for _, client := range dialects {
+		for _, upstream := range dialects {
+			sameProtocol := client.protocol == upstream.protocol
+			name := string(client.protocol) + "/"
+			if sameProtocol {
+				name += "same_protocol"
+			} else {
+				name += "cross_protocol_from_" + string(upstream.protocol)
+			}
+			t.Run(name, func(t *testing.T) {
+				upstreamServer, recorder := newDialectUpstream(t)
+				candidate := store.RouteCandidate{
+					ChannelID: 10, ChannelType: store.ChannelType(upstream.protocol),
+					BaseURL: upstreamServer.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+				}
+				st := &fakeGatewayStore{
+					auth:           activeAuth(),
+					credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+					wantMerchantID: 1,
+				}
+				if sameProtocol {
+					st.routes = []store.RouteCandidate{candidate}
+				} else {
+					st.crossRoutes = []store.RouteCandidate{candidate}
+				}
+				handler, attempts, access := testGatewayWithLogs(t, st)
+				server := httptest.NewServer(handler)
+				defer server.Close()
+
+				result := doPost(t, server.URL+client.protocol.EndpointPath(), authSchemePrefix+testAPIKey, client.requestBody)
+				if result.status != http.StatusOK {
+					t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+				}
+				if result.contentType != client.adapter.ContentType() {
+					t.Errorf("Content-Type = %q，期望 %q", result.contentType, client.adapter.ContentType())
+				}
+
+				path, header, model, _, calls := recorder.snapshot()
+				if calls != 1 {
+					t.Fatalf("上游调用次数 = %d，期望 1", calls)
+				}
+				if path != upstream.protocol.EndpointSegment() {
+					t.Errorf("上游路径 = %q，期望 %q", path, upstream.protocol.EndpointSegment())
+				}
+				if model != "up-model" {
+					t.Errorf("上游模型名 = %q，期望 up-model", model)
+				}
+				if got := header.Get(upstream.upstreamHeader); got != upstream.upstreamHeaderValue {
+					t.Errorf("%s = %q，期望 %q", upstream.upstreamHeader, got, upstream.upstreamHeaderValue)
+				}
+
+				if sameProtocol {
+					if string(result.body) != upstream.upstreamResponse {
+						t.Errorf("同协议命中应逐字节透传上游响应：\n实际 %s\n期望 %s", result.body, upstream.upstreamResponse)
+					}
+				} else {
+					assertClientDialectText(t, client, result.body)
+					if string(result.body) == upstream.upstreamResponse {
+						t.Error("跨协议响应不应与上游原始响应逐字节相同")
+					}
+				}
+				assertAttemptLogCrossProtocol(t, attempts, !sameProtocol)
+				assertAccessLogCrossProtocol(t, access, !sameProtocol)
+			})
+		}
+	}
+}
+
+// assertClientDialectText 断言响应体是客户端方言的合法结构且承载期望文本。
+func assertClientDialectText(t *testing.T, client e2eDialect, body []byte) {
+	t.Helper()
+	resp, err := client.adapter.DecodeResponse(body)
+	if err != nil {
+		t.Fatalf("响应不是客户端方言 %q 的合法结构：%v，原文 %s", string(client.protocol), err, body)
+	}
+	for _, part := range resp.Message.Parts {
+		if part.Kind == domain.PartText && part.Text == "hello" {
+			return
+		}
+	}
+	t.Errorf("响应缺少期望文本 hello，得到 %+v", resp.Message.Parts)
+}
+
+// TestGatewayCrossProtocolMissingIsJSON404 覆盖三级候选全缺位：保持既有 404 错误体不变。
+func TestGatewayCrossProtocolMissingIsJSON404(t *testing.T) {
+	for _, client := range e2eDialects() {
+		t.Run(string(client.protocol), func(t *testing.T) {
+			st := &fakeGatewayStore{auth: activeAuth(), wantMerchantID: 1}
+			server := httptest.NewServer(newTestGateway(t, st).handler)
+			defer server.Close()
+
+			result := doPost(t, server.URL+client.protocol.EndpointPath(), authSchemePrefix+testAPIKey, client.requestBody)
+			assertJSONError(t, result, http.StatusNotFound)
+		})
+	}
+}
+
+// TestGatewayFallsBackToCrossProtocolAfterSameProtocolFailure 覆盖同协议候选失败后继续降到跨协议候选，
+// 并守住去重：不限协议查询含同协议行，失败的同协议渠道不得在跨协议阶段再试一次。
+func TestGatewayFallsBackToCrossProtocolAfterSameProtocolFailure(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"boom"}}`)
+	}))
+	defer failUpstream.Close()
+	okUpstream, recorder := newDialectUpstream(t)
+
+	chatDialect := dialectFor(t, domain.ProtocolOpenAIChat)
+	degradedChannel := store.RouteCandidate{
+		ChannelID: 10, ChannelType: store.ChannelTypeOpenAIChat,
+		BaseURL: failUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+	}
+	st := &fakeGatewayStore{
+		auth:        activeAuth(),
+		credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		// 同协议段只有失败渠道；不限协议查询包含它自己与一条 anthropic 渠道。
+		routes: []store.RouteCandidate{degradedChannel},
+		crossRoutes: []store.RouteCandidate{
+			degradedChannel,
+			{
+				ChannelID: 20, ChannelType: store.ChannelTypeAnthropicMessages,
+				BaseURL: okUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+			},
+		},
+		wantMerchantID: 1,
+	}
+	handler, attempts, _ := testGatewayWithLogs(t, st)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(), authSchemePrefix+testAPIKey, chatDialect.requestBody)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+	assertClientDialectText(t, chatDialect, result.body)
+
+	_, _, model, _, calls := recorder.snapshot()
+	if calls != 1 {
+		t.Errorf("跨协议上游调用次数 = %d，期望 1（失败的同协议渠道不得在跨协议阶段重试）", calls)
+	}
+	if model != "up-model" {
+		t.Errorf("上游模型名 = %q，期望 up-model", model)
+	}
+	// 两次尝试：同协议失败一次，跨协议成功一次；第二行标记换渠道且跨协议。
+	lines := attemptLogLines(t, attempts)
+	if len(lines) != 2 {
+		t.Fatalf("尝试日志行数 = %d，期望 2：%s", len(lines), attempts.String())
+	}
+	if got := string(lines[1]["cross_protocol"]); got != "true" {
+		t.Errorf("第二条尝试 cross_protocol = %s，期望 true", got)
+	}
+	if got := string(lines[1]["channel_switched"]); got != "true" {
+		t.Errorf("第二条尝试 channel_switched = %s，期望 true", got)
+	}
+}
+
+// TestGatewayCrossProtocolStreamingRebuild 覆盖流式跨协议重建：上游方言的 SSE 帧被重建为
+// 客户端方言的帧，且转换事实在尝试与访问日志里标记。
+func TestGatewayCrossProtocolStreamingRebuild(t *testing.T) {
+	dialects := e2eDialects()
+	for _, client := range dialects {
+		for _, upstream := range dialects {
+			if client.protocol == upstream.protocol {
+				continue
+			}
+			t.Run(string(client.protocol)+"/from_"+string(upstream.protocol), func(t *testing.T) {
+				upstreamServer, recorder := newDialectUpstream(t)
+				st := &fakeGatewayStore{
+					auth:        activeAuth(),
+					credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+					crossRoutes: []store.RouteCandidate{{
+						ChannelID: 10, ChannelType: store.ChannelType(upstream.protocol),
+						BaseURL: upstreamServer.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+					}},
+					wantMerchantID: 1,
+				}
+				handler, attempts, access := testGatewayWithLogs(t, st)
+				server := httptest.NewServer(handler)
+				defer server.Close()
+
+				result := doPost(t, server.URL+client.protocol.EndpointPath(), authSchemePrefix+testAPIKey, client.streamRequestBody)
+				if result.status != http.StatusOK {
+					t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+				}
+				if result.contentType != client.adapter.StreamContentType() {
+					t.Errorf("Content-Type = %q，期望 %q", result.contentType, client.adapter.StreamContentType())
+				}
+				body := string(result.body)
+				if !strings.Contains(body, client.streamTextMarker) {
+					t.Errorf("重建后的流缺少客户端方言的文本增量 %q：%s", client.streamTextMarker, body)
+				}
+				if !strings.Contains(body, client.streamTerminator) {
+					t.Errorf("重建后的流缺少客户端方言的结束标记 %q：%s", client.streamTerminator, body)
+				}
+				if body == upstream.upstreamStream {
+					t.Error("跨协议流不应与上游原始帧逐字节相同")
+				}
+
+				_, _, model, stream, calls := recorder.snapshot()
+				if calls != 1 || !stream {
+					t.Fatalf("上游调用次数 = %d、stream = %v，期望 1 次流式调用", calls, stream)
+				}
+				if model != "up-model" {
+					t.Errorf("上游模型名 = %q，期望 up-model", model)
+				}
+				assertAttemptLogCrossProtocol(t, attempts, true)
+				assertAccessLogCrossProtocol(t, access, true)
+			})
+		}
 	}
 }

@@ -73,6 +73,8 @@ var supportedProtocols = []domain.Protocol{
 type gatewayStore interface {
 	LookupAPIKey(ctx context.Context, keyHash string, now time.Time) (*store.APIKeyAuth, error)
 	RouteCandidates(ctx context.Context, channelType store.ChannelType, model string, merchantID uint64) ([]store.RouteCandidate, error)
+	// RouteCandidatesAnyType 返回不限协议方言的候选渠道，供同协议缺位时的跨协议补段使用。
+	RouteCandidatesAnyType(ctx context.Context, model string, merchantID uint64) ([]store.RouteCandidate, error)
 	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
 	// InsertUsage 写一条 billing_usage 流水（占位口径，结算失败时使用），返回新行 id。
 	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
@@ -277,10 +279,10 @@ type storeRouteResolver struct {
 	intN func(int) int
 }
 
-// Candidates 返回本次请求在客户端协议与商家下的候选渠道。
+// Candidates 返回本次请求按降级顺序排列的候选渠道。
 //
-// 存储层按 priority 降序、同优先级按渠道 id 稳定排序返回；这里再在每组内部做加权随机，
-// 把选中项提到组首作为首选，其余候选保持原顺序供流水线回退。
+// 分两级取候选：同协议查询先成段，不限协议的跨协议查询补段，两段都交给 routeChain 拼成
+// 唯一回退链。两次查询都不做加权随机（那是选路策略，见 routeChain），只回答有哪些候选。
 func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request) ([]domain.Route, error) {
 	if req == nil {
 		return nil, nil
@@ -290,29 +292,15 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 		// 未鉴权不应走到这里；没有生效商家时按无候选处理，由流水线统一回「无可用渠道」。
 		return nil, nil
 	}
-	candidates, err := r.store.RouteCandidates(ctx, store.ChannelType(req.Protocol), req.Model, id.merchantID)
+	sameProtocol, err := r.store.RouteCandidates(ctx, store.ChannelType(req.Protocol), req.Model, id.merchantID)
 	if err != nil {
 		return nil, err
 	}
-	// 拷贝后再重排：存储替身可能返回共享切片，就地重排会污染下一次调用。
-	ordered := append([]store.RouteCandidate(nil), candidates...)
-	orderCandidatesByWeight(ordered, r.intN)
-	routes := make([]domain.Route, 0, len(ordered))
-	for _, c := range ordered {
-		routes = append(routes, domain.Route{
-			ChannelID:        c.ChannelID,
-			UpstreamID:       strconv.FormatUint(c.ChannelID, 10),
-			Protocol:         req.Protocol,
-			UpstreamModel:    c.UpstreamModel,
-			BaseURL:          endpointURL(c.BaseURL, req.Protocol),
-			CredentialRef:    c.CredGroup,
-			RequestOverrides: sanitizeRequestOverrides(c),
-			// 限流上限随候选一并带上：限流器按渠道 id 缓存，取值变化时重建。
-			RateLimitQPS:         c.RateLimitQPS,
-			RateLimitConcurrency: c.RateLimitConcurrency,
-		})
+	crossProtocol, err := r.store.RouteCandidatesAnyType(ctx, req.Model, id.merchantID)
+	if err != nil {
+		return nil, err
 	}
-	return routes, nil
+	return routeChain(req.Protocol, sameProtocol, crossProtocol, r.intN), nil
 }
 
 // endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
