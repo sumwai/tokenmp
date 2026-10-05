@@ -7,12 +7,14 @@
 需要 Go 1.27 及以上。
 
 ```
-make check          # 编译、单测（-race）、静态检查、格式检查
-make build-binary   # 产出 bin/tokenmp 并注入版本号
+make check              # 编译、单测（-race）、静态检查、格式检查
+make check-integration  # 对真实 MySQL 跑迁移验证（需 TOKENMP_TEST_MYSQL_DSN）
+make build-binary       # 产出 bin/tokenmp 并注入版本号
 ./bin/tokenmp version
 ```
 
 `make check` 只依赖 Go 与 golangci-lint，不需要 docker、数据库或 node。
+`make check-integration` 需要指向可丢弃库的 DSN，见目标注释。
 
 工具链版本由 `.mise.toml` 锁定，`make tools` 执行 `mise install` 装齐。
 
