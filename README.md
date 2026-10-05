@@ -36,7 +36,9 @@ $ ./bin/tokenmp help
 `tokenmp serve` 从环境变量读取运行配置，启动时执行数据库迁移，暴露
 `GET /healthz`（200）与三个转发端点 `POST /v1/chat/completions`、
 `POST /v1/responses`、`POST /v1/messages`，收到退出信号后优雅关闭。
-转发端点要求 `Authorization: Bearer <key>`。
+转发端点要求 `Authorization: Bearer <key>`。鉴权通过后先做额度预检与窗口限额
+判定：无可用额度回 402；窗口用量达到限额时按限额处置回 429，`reject` 的错误码为
+`quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
 
 | 环境变量 | 语义 | 默认值 |
 |---|---|---|
@@ -88,6 +90,7 @@ $ ./bin/tokenmp help
 | `calendar` | `import` / `list` |
 | `usage` | `list` |
 | `adjust` | `add` / `list` |
+| `quota` | `add` / `list` / `del` / `reset` |
 
 ```
 $ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
@@ -105,6 +108,11 @@ $ ./bin/tokenmp admin usage list --account 1 --json
 `calendar import` 从标准输入或 `--file` 读 `日期,day_kind` 行；`price publish` 的
 `--component` 形如 `metric:price:unit_settle:qty`，可重复。
 
+`quota add` 的 `--scope` 取规则范围、`--metric` 取计费指标、`--window` 取
+`rolling` / `calendar`、`--period` 取 `5h` / `day` / `week` / `month` / `total`、
+`--action` 取 `reject` / `throttle`；`quota list` 附当前窗口已用量与剩余额度；
+`quota reset` 在指定限额上追加一条重置基准，`--reason` 与 `--operator` 必填。
+
 ## 目录结构
 
 ```
@@ -118,6 +126,7 @@ internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
 internal/store/      MySQL 连接、迁移与 schema 读写
 internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
 internal/billing/    计费指标与用量映射
+internal/quota/      窗口限额判定：窗口计算与超限比较
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
 .github/workflows/   CI 与发布链路
