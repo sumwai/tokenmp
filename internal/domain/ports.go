@@ -406,8 +406,19 @@ type AttemptRecord struct {
 	// 两者不同即表示网关改写过模型名。
 	RequestedModel string
 	UpstreamID     string
-	UpstreamModel  string
-	Outcome        AttemptOutcome
+	// ChannelID 是本次尝试命中的渠道数字主键，与 Route.ChannelID、UsageRecord.ChannelID 同源；
+	// 0 表示未确定。它与 UpstreamID 分工不同：后者是给人看的可读标识，本字段供按渠道聚合
+	// 的观测与用量对账使用，两者不得互相替代。
+	ChannelID     uint64
+	UpstreamModel string
+	Outcome       AttemptOutcome
+	// UpstreamStatus 是本次尝试取得的上游 HTTP 状态码：成功为 200，连接类失败等未取得时为 0。
+	// 它与访问日志的 upstream_status 同源；上游返回的报文片段见 ErrorDetail。
+	UpstreamStatus int
+	// ChannelSwitched 报告本次尝试相对同一请求的上一条尝试是否换到了另一条候选渠道：
+	// 首次尝试与同一渠道内的凭据轮换均为 false。它与 Attempt 编号结合，使「渠道回退」
+	// 与「渠道内凭据轮换」在记录里可区分，而不必要求消费方自行跟踪上一条记录。
+	ChannelSwitched bool
 	// Usage 是上游本次尝试陈述的用量；未取得时为来源未知的零值（见 Usage.Known）。
 	Usage Usage
 	// ErrorCode 是本次失败尝试的错误码；成功时为空串。

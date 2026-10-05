@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -463,6 +464,149 @@ func TestGatewayUnregisteredPathIsJSON(t *testing.T) {
 
 	result := doPost(t, server.URL+"/v1/unknown", authSchemePrefix+testAPIKey, "{}")
 	assertJSONError(t, result, http.StatusNotFound)
+}
+
+// attemptLogLines 解析尝试日志缓冲区为若干条 JSON 字段映射。
+//
+// 只断言尝试日志时装配层不注入访问日志与凭据日志，因此缓冲区里应当只有尝试行。
+func attemptLogLines(t *testing.T, buf *bytes.Buffer) []map[string]json.RawMessage {
+	t.Helper()
+	var lines []map[string]json.RawMessage
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &fields); err != nil {
+			t.Fatalf("尝试日志不是 JSON：%v，原文 %s", err, line)
+		}
+		lines = append(lines, fields)
+	}
+	return lines
+}
+
+// TestGatewayLogsAttemptsAcrossChannelFallback 覆盖换渠道重试的尝试级观测。
+//
+// 第一条候选返回 503（可重试），流水线退避后换第二条候选成功。断言尝试日志恰好两行、
+// 共享同一 request id、渠道 id 分别为两条候选，且第二行标记为换渠道重试。
+func TestGatewayLogsAttemptsAcrossChannelFallback(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"boom"}}`)
+	}))
+	defer failUpstream.Close()
+
+	const successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer okUpstream.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		// 优先级不同即无需随机：高优先级的失败渠道先试，退避后换低优先级渠道。
+		routes: []store.RouteCandidate{
+			{ChannelID: 10, BaseURL: failUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 10},
+			{ChannelID: 5, BaseURL: okUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 5},
+		},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	var buf bytes.Buffer
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout: 5 * time.Second,
+		Observer:        newAttemptObserver(newJSONLogger(&buf)),
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+
+	lines := attemptLogLines(t, &buf)
+	if len(lines) != 2 {
+		t.Fatalf("尝试日志行数 = %d，期望 2：%s", len(lines), buf.String())
+	}
+	requestIDs := make([]string, len(lines))
+	for i, line := range lines {
+		if err := json.Unmarshal(line["request_id"], &requestIDs[i]); err != nil {
+			t.Fatalf("解析 request_id 失败：%v，原文 %s", err, line["request_id"])
+		}
+	}
+	if requestIDs[0] == "" || requestIDs[0] != requestIDs[1] {
+		t.Errorf("两次尝试应共享同一 request id，实际 %v", requestIDs)
+	}
+	wantPerLine := []map[string]string{
+		{
+			"channel_id":       `10`,
+			"retry":            `false`,
+			"channel_switched": `false`,
+			"upstream_status":  `503`,
+		},
+		{
+			"channel_id":       `5`,
+			"retry":            `true`,
+			"channel_switched": `true`,
+			"upstream_status":  `200`,
+		},
+	}
+	for i, want := range wantPerLine {
+		for key, value := range want {
+			if got := string(lines[i][key]); got != value {
+				t.Errorf("第 %d 行 %s = %s，期望 %s", i+1, key, got, value)
+			}
+		}
+	}
+}
+
+// TestGatewayAttemptObserverFailureDoesNotBreakForwarding 守护「观测失败不影响转发」：
+// 观测器返回错误时，客户端仍拿到正常响应。
+func TestGatewayAttemptObserverFailureDoesNotBreakForwarding(t *testing.T) {
+	const successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer upstream.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		routes: []store.RouteCandidate{{
+			ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		}},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout: 5 * time.Second,
+		Observer:        failingObserver{},
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+	if string(result.body) != successBody {
+		t.Errorf("观测失败不得改变对客户端的响应：\n实际 %s\n期望 %s", result.body, successBody)
+	}
 }
 
 // TestRunServerGracefulShutdown 覆盖 ctx 取消后 runServer 优雅关闭并返回。

@@ -313,14 +313,16 @@ func (p *Pipeline) forward(
 		// 内层按序试遍组内凭据：凭据类失败原地换下一条，不消耗换渠道的尝试预算。
 		// 上下文取消或已向客户端写出字节时不再切换，与「流式开写后不重试」同一判据。
 		var attempt attemptResult
-		for {
+		for credentialAttempt := 0; ; credentialAttempt++ {
 			upstreamCalls++
 			attempt = doAttempt(attemptCtx, route, body, requestParts)
 			// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
 			// 请求结束时保留的是最终履约（或最终失败）的那次。
 			p.recordAttemptInfo(out, route, attempt)
 			attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
-			p.recordAttempt(ctx, req, route, upstreamCalls, attempt)
+			// 换渠道只发生在候选迭代的第一步：同一条候选内的后续尝试都是凭据轮换。
+			// attemptsMade 在进入本候选时已自增，故 attemptsMade > 1 即表示本次不是全请求的首条候选。
+			p.recordAttempt(ctx, req, route, upstreamCalls, attemptsMade > 1 && credentialAttempt == 0, attempt)
 			if attempt.Err == nil || ctx.Err() != nil || attempt.WroteBytes {
 				break
 			}
@@ -444,6 +446,7 @@ func (p *Pipeline) recordAttempt(
 	req *domain.Request,
 	route domain.Route,
 	attempt int,
+	channelSwitched bool,
 	result attemptResult,
 ) {
 	if p.observer == nil {
@@ -465,8 +468,11 @@ func (p *Pipeline) recordAttempt(
 		UpstreamProtocol: route.Protocol,
 		RequestedModel:   req.Model,
 		UpstreamID:       route.UpstreamID,
+		ChannelID:        route.ChannelID,
 		UpstreamModel:    route.UpstreamModel,
 		Outcome:          outcome,
+		UpstreamStatus:   upstreamStatusOf(result.Err),
+		ChannelSwitched:  channelSwitched,
 		Usage:            result.Usage,
 		ErrorCode:        errorCode(result.Err),
 		ErrorDetail:      errorDetail(result.Err),
