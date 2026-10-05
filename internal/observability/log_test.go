@@ -1,4 +1,4 @@
-package main
+package observability
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ var allowedLogKeys = map[string]struct{}{
 // TestAccessLoggerWritesOneJSONLineWithExpectedFields 断言每请求一条 JSON 行，字段齐全。
 func TestAccessLoggerWritesOneJSONLineWithExpectedFields(t *testing.T) {
 	var buf bytes.Buffer
-	logger := newAccessLogger(&buf)
+	logger := NewAccessLogger(&buf)
 	logger.LogAccess(transport.AccessRecord{
 		RequestID:      "req-123",
 		Protocol:       domain.ProtocolOpenAIChat,
@@ -73,7 +73,7 @@ func TestAccessLoggerWritesOneJSONLineWithExpectedFields(t *testing.T) {
 // TestAccessLoggerOmitsSensitiveValues 断言日志正文不含凭据类字面量。
 func TestAccessLoggerOmitsSensitiveValues(t *testing.T) {
 	var buf bytes.Buffer
-	logger := newAccessLogger(&buf)
+	logger := NewAccessLogger(&buf)
 	logger.LogAccess(transport.AccessRecord{
 		RequestID:      "req-1",
 		Protocol:       domain.ProtocolAnthropicMessages,

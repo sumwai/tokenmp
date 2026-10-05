@@ -1,10 +1,9 @@
-package main
+package observability
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +90,7 @@ func TestAttemptObserverWritesFullFacts(t *testing.T) {
 			ServerToolUses:  2,
 		},
 	}
-	if err := newAttemptObserver(newJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
+	if err := NewAttemptObserver(NewJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
 		t.Fatalf("记录尝试日志不得返回错误：%v", err)
 	}
 
@@ -148,7 +147,7 @@ func TestAttemptObserverMarksCredentialSwitch(t *testing.T) {
 		Outcome:         domain.AttemptFailed,
 		ChannelSwitched: false,
 	}
-	if err := newAttemptObserver(newJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
+	if err := NewAttemptObserver(NewJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
 		t.Fatalf("记录尝试日志不得返回错误：%v", err)
 	}
 	fields := attemptLogFields(t, &buf)
@@ -165,7 +164,7 @@ func TestAttemptObserverMarksCredentialSwitch(t *testing.T) {
 func TestAttemptObserverUnknownUsageLogsOnlySource(t *testing.T) {
 	var buf bytes.Buffer
 	rec := domain.AttemptRecord{RequestID: "req-3", Attempt: 1, Outcome: domain.AttemptOK}
-	if err := newAttemptObserver(newJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
+	if err := NewAttemptObserver(NewJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
 		t.Fatalf("记录尝试日志不得返回错误：%v", err)
 	}
 	fields := attemptLogFields(t, &buf)
@@ -190,7 +189,7 @@ func TestAttemptObserverOmitsSensitiveValues(t *testing.T) {
 		UpstreamStatus: 401,
 		ErrorCode:      string(domain.CodeUpstreamRejected),
 	}
-	if err := newAttemptObserver(newJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
+	if err := NewAttemptObserver(NewJSONLogger(&buf)).RecordAttempt(context.Background(), rec); err != nil {
 		t.Fatalf("记录尝试日志不得返回错误：%v", err)
 	}
 	lower := strings.ToLower(buf.String())
@@ -204,18 +203,11 @@ func TestAttemptObserverOmitsSensitiveValues(t *testing.T) {
 // TestAttemptObserverNilLoggerIsSafe 守护未注入日志器时的空实现：
 // 装配层可能不配尝试日志，此时记录不得 panic。
 func TestAttemptObserverNilLoggerIsSafe(t *testing.T) {
-	if err := newAttemptObserver(nil).RecordAttempt(context.Background(), domain.AttemptRecord{}); err != nil {
+	if err := NewAttemptObserver(nil).RecordAttempt(context.Background(), domain.AttemptRecord{}); err != nil {
 		t.Errorf("未配置日志器时不得返回错误：%v", err)
 	}
 	var nilObserver *attemptObserver
 	if err := nilObserver.RecordAttempt(context.Background(), domain.AttemptRecord{}); err != nil {
 		t.Errorf("nil 接收者不得返回错误：%v", err)
 	}
-}
-
-// failingObserver 是一个恒返回错误的观测器，用于验证实现内部的失败不回传转发链。
-type failingObserver struct{}
-
-func (failingObserver) RecordAttempt(context.Context, domain.AttemptRecord) error {
-	return errors.New("观测后端不可用")
 }

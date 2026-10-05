@@ -23,6 +23,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/observability"
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
@@ -424,10 +425,10 @@ func cmdServe(stderr io.Writer) int {
 		BreakerThreshold:            cfg.BreakerThreshold,
 		BreakerCooldown:             cfg.BreakerCooldown,
 		BreakerProbes:               cfg.BreakerProbes,
-		CredentialLogger:            newJSONLogger(os.Stdout),
-		BreakerLogger:               newJSONLogger(os.Stdout),
-		Logger:                      newAccessLogger(os.Stdout),
-		Observer:                    newAttemptObserver(newJSONLogger(os.Stdout)),
+		CredentialLogger:            observability.NewJSONLogger(os.Stdout),
+		BreakerLogger:               observability.NewJSONLogger(os.Stdout),
+		Logger:                      observability.NewAccessLogger(os.Stdout),
+		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
