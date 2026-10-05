@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/sumwai/tokenmp/compare/v0.1.1...v0.1.2) (2026-10-05)
+
+
+### Features
+
+* 新增 MySQL 存储层与初版 schema ([#15](https://github.com/sumwai/tokenmp/issues/15)) ([c23c830](https://github.com/sumwai/tokenmp/commit/c23c83072528e2b9643524db2ecb1a87fb991679))
+* 新增计费 schema、枚举与 store 读写 ([#17](https://github.com/sumwai/tokenmp/issues/17)) ([351c398](https://github.com/sumwai/tokenmp/commit/351c398d978733f0a3c13a47f754083b01141049))
+
 ## [0.1.1](https://github.com/sumwai/tokenmp/compare/v0.1.0...v0.1.1) (2026-10-05)
 
 
