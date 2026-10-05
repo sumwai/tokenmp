@@ -51,9 +51,13 @@ $ ./bin/tokenmp help
 | `TOKENMP_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | 上游连接池每主机空闲连接数 | `32` |
 | `TOKENMP_UPSTREAM_IDLE_CONN_TIMEOUT` | 上游空闲连接回收时长 | `90s` |
 | `TOKENMP_USAGE_WRITE_TIMEOUT` | 写用量流水超时 | `5s` |
+| `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 上游凭据类失败后的冷却时长 | `60s` |
 
 超时与连接池取值必须为正数或合法时长，非法取值在启动前报错并以 1 退出。
 流式转发不设整体超时，只受首字节与空闲读两级约束。
+
+同一分组下的多条启用上游凭据按轮换顺序取用；上游拒绝凭据（401 / 403 等）时，
+在同一条渠道内换下一条凭据重试，失败的那条进入冷却（内存态，重启即重置）。
 
 每请求写一条 JSON 请求日志到标准输出：请求 id（客户端带 `X-Request-Id` 时沿用）、
 协议方言、请求模型名、命中的渠道 id、上游状态码与耗时。凭据与密钥不进入日志。
@@ -67,7 +71,7 @@ internal/adapters/   三种线协议与内部统一格式的双向转换
 internal/pipeline/   核心转发流水线：选路、请求定稿、上游调用与候选回退
 internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
 internal/upstream/   调用上游渠道的 HTTP 客户端
-internal/credential/ 按路由引用取凭据并拼装上游请求头
+internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
 internal/store/      MySQL 连接、迁移与 schema 读写
 internal/billing/    计费指标与用量映射
 internal/config/     环境变量到运行配置

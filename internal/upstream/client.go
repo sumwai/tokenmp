@@ -288,10 +288,45 @@ func mapTransportError(ctx context.Context, err error) *domain.Error {
 	}
 }
 
+// credentialFailureTokens 是上游响应体里明确表示「凭据或权限不被接受」的标记。
+//
+// 只登记认证与权限两类字面量，三种线协议的报文里这些取值都只出现在凭据失败上；
+// 请求参数类错误（invalid_request_error、not_found_error）刻意不在列，
+// 否则「拿不准的 4xx」会触发换凭据，把一次参数错误放大成对整组 key 的枚举。
+var credentialFailureTokens = []string{
+	"authentication_error",
+	"invalid_api_key",
+	"invalid_authentication",
+	"permission_error",
+	"insufficient_permissions",
+	"invalid api key",
+	"incorrect api key",
+}
+
+// isCredentialRejection 判定一次非 2xx 上游响应是否属于「凭据不被接受」。
+//
+// 401 与 403 直接命中；其余 4xx 只在响应体出现已知的认证失败字面量时命中。
+// 5xx 与 4xx 之外的错误一律不算：那些是上游侧故障或客户端参数问题，换凭据不会成功。
+func isCredentialRejection(status int, body []byte) bool {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return true
+	}
+	if status < http.StatusBadRequest || status >= http.StatusInternalServerError {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	for _, token := range credentialFailureTokens {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
 // classifyHTTPStatus 把上游非 2xx 状态码分级为统一错误。
 //
 // header 用于提取 Retry-After 提示：头缺失或取值非法时返回的错误不含该提示，
-// 调用方按自身退避策略处理。
+// 调用方按自身退避策略处理。body 只用于判定是否为凭据类失败，不写进错误之外的地方。
 func classifyHTTPStatus(status int, header http.Header, body []byte) error {
 	detail := fmt.Sprintf("上游 HTTP 状态码 %d", status)
 	if snippet := errorSnippet(body); snippet != "" {
@@ -308,7 +343,33 @@ func classifyHTTPStatus(status int, header http.Header, body []byte) error {
 	default:
 		err = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用").WithDetail(detail)
 	}
-	return withUpstreamStatus(withRetryAfter(err, header, time.Now()), status)
+	return withCredentialRejection(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status),
+		isCredentialRejection(status, body))
+}
+
+// credentialRejectionError 在已分级的错误之上标注「上游明确拒绝本次凭据」。
+//
+// 与 retryAfterError / upstreamStatusError 同一机制：用包装而不往 domain.Error 加字段，
+// domain.AsError 与 domain.Retryable 照常工作；该能力由 domain.CredentialRejected 读取。
+type credentialRejectionError struct {
+	err error
+}
+
+// Error 实现 error 接口，转发被包装错误的面向排障文案。
+func (e *credentialRejectionError) Error() string { return e.err.Error() }
+
+// CredentialRejected 报告本次失败属凭据类。
+func (e *credentialRejectionError) CredentialRejected() bool { return true }
+
+// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
+func (e *credentialRejectionError) Unwrap() error { return e.err }
+
+// withCredentialRejection 在 rejected 为真时给错误附上凭据类失败能力；否则原样返回。
+func withCredentialRejection(err error, rejected bool) error {
+	if !rejected {
+		return err
+	}
+	return &credentialRejectionError{err: err}
 }
 
 // retryAfterError 在统一错误之上附加上游通过 Retry-After 响应头给出的建议退避时长。

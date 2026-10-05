@@ -54,6 +54,59 @@ func TestCompleteExposesUpstreamStatus(t *testing.T) {
 	}
 }
 
+// TestIsCredentialRejection 覆盖「凭据类失败」的判定口径：宁窄勿宽。
+//
+// 401/403 直接命中；其余 4xx 只在响应体出现已知的认证失败字面量时命中；
+// 请求参数类、限流与 5xx 一律不命中，否则一次参数错误会被放大成对整组 key 的枚举。
+func TestIsCredentialRejection(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{name: "401 空体也命中", status: http.StatusUnauthorized, want: true},
+		{name: "403 直接命中", status: http.StatusForbidden, body: `{}`, want: true},
+		{name: "400 带 authentication_error", status: http.StatusBadRequest, body: `{"error":{"type":"authentication_error"}}`, want: true},
+		{name: "400 带 invalid_api_key", status: http.StatusBadRequest, body: `{"error":{"code":"invalid_api_key"}}`, want: true},
+		{name: "400 带权限不足", status: http.StatusBadRequest, body: `{"error":{"type":"permission_error"}}`, want: true},
+		{name: "400 消息形态的 Incorrect API key", status: http.StatusBadRequest, body: `{"error":{"message":"Incorrect API key provided"}}`, want: true},
+		{name: "400 参数错误不命中", status: http.StatusBadRequest, body: `{"error":{"type":"invalid_request_error"}}`, want: false},
+		{name: "404 资源不存在不命中", status: http.StatusNotFound, body: `{"error":{"type":"not_found_error"}}`, want: false},
+		{name: "429 不命中", status: http.StatusTooManyRequests, body: `{"error":{"type":"rate_limit_error"}}`, want: false},
+		{name: "500 响应体带认证字样也不命中", status: http.StatusInternalServerError, body: `{"error":{"type":"authentication_error"}}`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCredentialRejection(tt.status, []byte(tt.body)); got != tt.want {
+				t.Fatalf("isCredentialRejection(%d, %q) = %v，期望 %v", tt.status, tt.body, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyHTTPStatusMarksCredentialRejection 断言凭据类失败带有能力标注，
+// 且原有错误分级与状态码能力不受影响。
+func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
+	err := classifyHTTPStatus(http.StatusUnauthorized, http.Header{}, []byte(`{"error":"bad key"}`))
+	if !domain.CredentialRejected(err) {
+		t.Fatal("401 应被标注为凭据类失败")
+	}
+	if got := domain.AsError(err).Code; got != domain.CodeUpstreamRejected {
+		t.Errorf("错误码 = %q，期望 %q", got, domain.CodeUpstreamRejected)
+	}
+	var carrier interface{ UpstreamStatus() int }
+	if !errors.As(err, &carrier) {
+		t.Fatalf("错误应仍携带上游状态码能力，实际类型 %T", err)
+	}
+	if got := carrier.UpstreamStatus(); got != http.StatusUnauthorized {
+		t.Errorf("上游状态码 = %d，期望 401", got)
+	}
+	if domain.CredentialRejected(classifyHTTPStatus(http.StatusTooManyRequests, http.Header{}, nil)) {
+		t.Error("429 不应被标注为凭据类失败")
+	}
+}
+
 // TestNewFillsStreamTimeoutDefaults 断言未配置时流式两级超时取默认值，渠道配置优先。
 func TestNewFillsStreamTimeoutDefaults(t *testing.T) {
 	client, err := New(Options{Headers: stubHeaders{}, Adapters: openAIChatAdapters})

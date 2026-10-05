@@ -82,6 +82,9 @@ func TestLoadServeDefaults(t *testing.T) {
 	if got.UsageWriteTimeout != defaultUsageWriteTimeout {
 		t.Errorf("UsageWriteTimeout = %s，期望 %s", got.UsageWriteTimeout, defaultUsageWriteTimeout)
 	}
+	if got.CredentialCooldown != defaultCredentialCooldown {
+		t.Errorf("CredentialCooldown = %s，期望 %s", got.CredentialCooldown, defaultCredentialCooldown)
+	}
 }
 
 // TestLoadServeExplicitTimeoutsAndPool 断言显式给出的超时与连接池取值原样生效。
@@ -95,6 +98,7 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 		envUpstreamMaxIdleConnsPerHost: "7",
 		envUpstreamIdleConnTimeout:     "45s",
 		envUsageWriteTimeout:           "3s",
+		envCredentialCooldown:          "45s",
 	}))
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
@@ -117,6 +121,9 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 	if got.UsageWriteTimeout != 3*time.Second {
 		t.Errorf("UsageWriteTimeout = %s，期望 3s", got.UsageWriteTimeout)
 	}
+	if got.CredentialCooldown != 45*time.Second {
+		t.Errorf("CredentialCooldown = %s，期望 45s", got.CredentialCooldown)
+	}
 }
 
 // TestLoadServeRejectsInvalidTimeoutsAndPool 断言非正数与非法时长在启动前报错。
@@ -135,6 +142,8 @@ func TestLoadServeRejectsInvalidTimeoutsAndPool(t *testing.T) {
 		{name: "单主机空闲连接数为负", key: envUpstreamMaxIdleConnsPerHost, val: "-2"},
 		{name: "空闲回收时长为零", key: envUpstreamIdleConnTimeout, val: "0s"},
 		{name: "落库超时格式错", key: envUsageWriteTimeout, val: "5"},
+		{name: "凭据冷却为零", key: envCredentialCooldown, val: "0s"},
+		{name: "凭据冷却格式错", key: envCredentialCooldown, val: "1 minute"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

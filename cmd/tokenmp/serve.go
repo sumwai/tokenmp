@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -93,6 +94,10 @@ type gatewayOptions struct {
 	UpstreamIdleConnTimeout     time.Duration
 	// MaxAttempts 是单请求最多发起的上游尝试次数（含首次）。
 	MaxAttempts int
+	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；非正时取凭据包的默认值。
+	CredentialCooldown time.Duration
+	// CredentialLogger 记录凭据冷却与切换；nil 时不记录。
+	CredentialLogger *slog.Logger
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
 	Now func() time.Time
 	// UsageWriteTimeout 是写用量流水的耗时上限；非正时取默认值。
@@ -151,11 +156,18 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		return nil, false
 	}
 
-	headers := credential.NewWithResolver(storeCredentialResolver{store: st})
+	rotation, err := credential.NewRotator(credential.RotationOptions{
+		Loader:   storeCredentialGroupLoader{store: st},
+		Cooldown: opts.CredentialCooldown,
+		Logger:   opts.CredentialLogger,
+	})
+	if err != nil {
+		return nil, err
+	}
 	upstreamHTTP := &http.Client{Transport: newUpstreamTransport(opts)}
 	upstreamClient, err := upstream.New(upstream.Options{
 		HTTPClient:             upstreamHTTP,
-		Headers:                headers,
+		Headers:                credential.NewWithResolver(rotation),
 		Adapters:               lookupAdapter,
 		DefaultTimeout:         completeTimeout,
 		StreamFirstByteTimeout: opts.StreamFirstByteTimeout,
@@ -170,6 +182,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
 		Usage:       newUsageRecorder(st, opts.UsageWriteTimeout, nil),
+		Credentials: rotation,
 		MaxAttempts: attempts,
 	})
 	if err != nil {
@@ -296,35 +309,36 @@ func endpointURL(base string, protocol domain.Protocol) string {
 	return root + protocol.EndpointSegment()
 }
 
-// storeCredentialResolver 是按数据库读凭据的 credential.Resolver。
+// storeCredentialGroupLoader 是按数据库读凭据的 credential.GroupLoader。
 //
 // 商家来自鉴权上下文：凭据分组只在商家内唯一，跨商家取用会把一个商家的密钥发给另一个商家的上游。
-type storeCredentialResolver struct {
+type storeCredentialGroupLoader struct {
 	store gatewayStore
 }
 
-// Resolve 取本次路由该用的凭据：同组多行时取 id 最小的那一行。
+// LoadGroup 读本次路由对应分组的启用凭据，按 id 升序（存储层已定序）。
 //
-// 取第一行而不是轮换：本轮口径允许「取第一行」，轮换需要跨请求状态，
-// 放到后续按凭据健康度做选择时再引入。
-func (r storeCredentialResolver) Resolve(ctx context.Context, route domain.Route) (credential.Credential, error) {
+// 密钥字段写坏的行被跳过而不是让整个分组失败：一行配置错误不该把同组其它可用 key 一起废掉，
+// 而「双行轮换期间旧行格式变了」正是本功能要兼顾的场景。全部行都不可用时返回空组，
+// 由轮换器报出「分组没有可用凭据」。
+func (l storeCredentialGroupLoader) LoadGroup(ctx context.Context, route domain.Route) (credential.Group, error) {
 	id, ok := identityFromContext(ctx)
 	if !ok {
-		return credential.Credential{}, domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法读取上游凭据")
+		return credential.Group{}, domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法读取上游凭据")
 	}
-	rows, err := r.store.CredentialsByGroup(ctx, route.CredentialRef, id.merchantID)
+	rows, err := l.store.CredentialsByGroup(ctx, route.CredentialRef, id.merchantID)
 	if err != nil {
-		return credential.Credential{}, err
+		return credential.Group{}, err
 	}
-	if len(rows) == 0 {
-		return credential.Credential{}, domain.NewError(domain.CodeInternal,
-			fmt.Sprintf("凭据分组 %q 没有可用凭据", route.CredentialRef))
+	entries := make([]credential.NamedCredential, 0, len(rows))
+	for _, row := range rows {
+		apiKey, err := credentialAPIKey(row.Secret)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, credential.NamedCredential{Name: row.Name, APIKey: apiKey})
 	}
-	apiKey, err := credentialAPIKey(rows[0].Secret)
-	if err != nil {
-		return credential.Credential{}, err
-	}
-	return credential.Credential{APIKey: apiKey}, nil
+	return credential.Group{Scope: strconv.FormatUint(id.merchantID, 10), Entries: entries}, nil
 }
 
 // upstreamCredentialSecret 是 upstream_credential.secret 里本网关认识的字段。
@@ -379,6 +393,8 @@ func cmdServe(stderr io.Writer) int {
 		UpstreamMaxIdleConnsPerHost: cfg.UpstreamMaxIdleConnsPerHost,
 		UpstreamIdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
 		UsageWriteTimeout:           cfg.UsageWriteTimeout,
+		CredentialCooldown:          cfg.CredentialCooldown,
+		CredentialLogger:            newJSONLogger(os.Stdout),
 		Logger:                      newAccessLogger(os.Stdout),
 	})
 	if err != nil {

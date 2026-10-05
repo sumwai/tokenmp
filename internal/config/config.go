@@ -31,6 +31,9 @@ const (
 	envUpstreamMaxIdleConnsPerHost = "TOKENMP_UPSTREAM_MAX_IDLE_CONNS_PER_HOST"
 	envUpstreamIdleConnTimeout     = "TOKENMP_UPSTREAM_IDLE_CONN_TIMEOUT"
 
+	// 上游凭据轮换。命中 G101 是因为常量名里有 CREDENTIAL，取值只是环境变量名。
+	envCredentialCooldown = "TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN" //nolint:gosec // G101：环境变量名，不是凭据。
+
 	// 流水落库。
 	envUsageWriteTimeout = "TOKENMP_USAGE_WRITE_TIMEOUT"
 )
@@ -50,6 +53,9 @@ const (
 	defaultUpstreamMaxIdleConnsPerHost = 32
 	defaultUpstreamIdleConnTimeout     = 90 * time.Second
 	defaultUsageWriteTimeout           = 5 * time.Second
+	// defaultCredentialCooldown 与 internal/credential 的兜底值一致：
+	// 配置层不导入那个包（它依赖 domain 与存储事实），故两处各写一份常量。
+	defaultCredentialCooldown = 60 * time.Second
 )
 
 // Serve 是 serve 子命令的运行配置。
@@ -75,6 +81,8 @@ type Serve struct {
 	UpstreamIdleConnTimeout     time.Duration
 	// UsageWriteTimeout 是写用量流水的耗时上限。
 	UsageWriteTimeout time.Duration
+	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；冷却期内该凭据被跳过。
+	CredentialCooldown time.Duration
 }
 
 // Load 从进程环境读出存储层配置。
@@ -125,6 +133,10 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	credentialCooldown, err := lookupPositiveDuration(lookup, envCredentialCooldown, defaultCredentialCooldown)
+	if err != nil {
+		return Serve{}, err
+	}
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -135,6 +147,7 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		UpstreamMaxIdleConnsPerHost: maxIdlePerHost,
 		UpstreamIdleConnTimeout:     idleConnTimeout,
 		UsageWriteTimeout:           usageWrite,
+		CredentialCooldown:          credentialCooldown,
 	}, nil
 }
 

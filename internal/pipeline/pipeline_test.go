@@ -348,6 +348,174 @@ func TestForwardTruncatedStreamRecordsCollectedUsage(t *testing.T) {
 	}
 }
 
+// fakeRotation 是 domain.CredentialRotation 的测试替身。
+//
+// 只对凭据类失败切换，且切换次数由 remaining 限定：这样能同时断言
+// 「非凭据类失败不切换」与「组内用尽后本次渠道尝试失败」。
+type fakeRotation struct {
+	remaining int
+	begun     int
+	advanced  int
+}
+
+func (r *fakeRotation) Begin(ctx context.Context, _ domain.Route) context.Context {
+	r.begun++
+	return ctx
+}
+
+func (r *fakeRotation) Advance(ctx context.Context, _ domain.Route, failure error) (context.Context, bool) {
+	if r.remaining <= 0 || !domain.CredentialRejected(failure) {
+		return ctx, false
+	}
+	r.remaining--
+	r.advanced++
+	return ctx, true
+}
+
+// credentialRejectedError 模拟上游客户端标注「本次凭据不被接受」的错误。
+type credentialRejectedError struct{}
+
+func (credentialRejectedError) Error() string { return "凭据被拒绝" }
+
+func (credentialRejectedError) CredentialRejected() bool { return true }
+
+// TestForwardSwitchesCredentialWithinAttempt 断言凭据类失败在同一次渠道尝试内切换，
+// 且不消耗换渠道的尝试预算。
+//
+// MaxAttempts 固定为 1：若凭据切换消耗预算，第二次上游调用就发不出去，本用例会失败。
+func TestForwardSwitchesCredentialWithinAttempt(t *testing.T) {
+	usage := domain.Usage{Source: domain.UsageSourceUpstream, InputTokens: 7, OutputTokens: 2}
+	recorder := &recordingRecorder{}
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		if calls == 1 {
+			return nil, credentialRejectedError{}
+		}
+		return &domain.UpstreamResult{Raw: []byte(`{"ok":true}`), Response: &domain.Response{Usage: usage}}, nil
+	}}
+	rotation := &fakeRotation{remaining: 1}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+		Usage:       recorder,
+		Credentials: rotation,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("切换后应成功：%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("上游调用次数 = %d，期望 2", calls)
+	}
+	if rotation.begun != 1 || rotation.advanced != 1 {
+		t.Fatalf("轮换状态 = begin %d / advance %d，期望 1 / 1", rotation.begun, rotation.advanced)
+	}
+	if records := recorder.snapshot(); len(records) != 1 {
+		t.Fatalf("记账次数 = %d，期望 1（中间失败尝试不产生流水）", len(records))
+	}
+}
+
+// TestForwardCredentialExhaustedFallsBackToNextChannel 断言组内凭据试遍后
+// 本次渠道尝试失败，并走渠道回退。
+func TestForwardCredentialExhaustedFallsBackToNextChannel(t *testing.T) {
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		return nil, credentialRejectedError{}
+	}}
+	rotation := &fakeRotation{remaining: 0}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRoute(), chatRoute()}},
+		Credentials: rotation,
+		MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err == nil {
+		t.Fatal("组内凭据全部失败时应返回错误")
+	}
+	if calls != 2 {
+		t.Fatalf("上游调用次数 = %d，期望 2（每条渠道各一次）", calls)
+	}
+}
+
+// TestForwardNonCredentialFailureDoesNotSwitchCredential 断言非凭据类失败不触发切换。
+func TestForwardNonCredentialFailureDoesNotSwitchCredential(t *testing.T) {
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		return nil, errRetryable
+	}}
+	rotation := &fakeRotation{remaining: 3}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRoute(), chatRoute()}},
+		Credentials: rotation,
+		MaxAttempts: 2,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err == nil {
+		t.Fatal("可重试失败换渠道后仍失败，应返回错误")
+	}
+	if calls != 2 {
+		t.Fatalf("上游调用次数 = %d，期望 2（每渠道一次，不因非凭据类失败换凭据）", calls)
+	}
+	if rotation.advanced != 0 {
+		t.Fatalf("切换次数 = %d，期望 0", rotation.advanced)
+	}
+}
+
+// TestForwardStreamWroteBytesDoesNotSwitchCredential 断言流式已向客户端写出字节后不再切换凭据。
+func TestForwardStreamWroteBytesDoesNotSwitchCredential(t *testing.T) {
+	calls := 0
+	caller := fakeCaller{stream: func(ctx context.Context, _ domain.Route, _ *domain.Request, _ []byte, sink domain.ChunkSink) error {
+		calls++
+		if err := sink.Send(ctx, domain.Chunk{Kind: domain.ChunkTextDelta, TextDelta: "hello"}); err != nil {
+			return err
+		}
+		return credentialRejectedError{}
+	}}
+	rotation := &fakeRotation{remaining: 3}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+		Credentials: rotation,
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(true), &recordingWriter{events: &[]string{}}); err == nil {
+		t.Fatal("已写出字节后的失败应终止转发")
+	}
+	if calls != 1 {
+		t.Fatalf("上游调用次数 = %d，期望 1（开写后不切换）", calls)
+	}
+	if rotation.advanced != 0 {
+		t.Fatalf("切换次数 = %d，期望 0", rotation.advanced)
+	}
+}
+
 // TestForwardWithoutRecorder 断言未注入记账实现时转发照常完成（记账是旁路）。
 func TestForwardWithoutRecorder(t *testing.T) {
 	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
