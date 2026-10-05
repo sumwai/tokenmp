@@ -1,7 +1,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 
-.PHONY: build build-binary test lint fmt fmt-check check tools
+.PHONY: build build-binary test lint fmt fmt-check check check-integration tools
 
 # 编译检查。刻意把产物导到临时目录并在退出时删除，而不是裸跑 `go build ./...`：
 # 当模块里只有一个 main 包时（本仓库当前就是），`go build ./...` 会把可执行文件
@@ -86,6 +86,17 @@ fmt-check:
 
 # 快速门禁：不依赖 docker、数据库或 node，只需要 go 与 golangci-lint。
 check: build test lint fmt-check
+
+# 真实 MySQL 的迁移验证，刻意不加入 check。
+#
+# check 的契约是「无外部依赖」，把需要数据库的检查塞进去会让本机与 CI 都
+# 必须常备一个 MySQL，门禁变重后就会有人绕开它；因此分成独立目标，
+# 由需要验证迁移的人在具备数据库时显式执行。
+#
+# DSN 经 TOKENMP_TEST_MYSQL_DSN 传入，须指向可丢弃的库：测试会先删除
+# 迁移涉及的表再重建。未设置该变量时测试跳过而非失败。
+check-integration:
+	$(GO) test -tags=integration -race -count=1 ./internal/store/...
 
 # 按 .mise.toml 装齐本机工具链。
 tools:
