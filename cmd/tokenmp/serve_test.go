@@ -1764,6 +1764,76 @@ func TestGatewayFallsBackToCrossProtocolAfterSameProtocolFailure(t *testing.T) {
 	}
 }
 
+// TestGatewayFallsBackToCrossProtocolAfterSameProtocolSegmentExhausted 覆盖同协议段两条候选全失败后
+// 仍降到跨协议候选：尝试预算按段计量后，同协议段的失败不会挤掉跨协议降级的机会。
+func TestGatewayFallsBackToCrossProtocolAfterSameProtocolSegmentExhausted(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"boom"}}`)
+	}))
+	defer failUpstream.Close()
+	okUpstream, recorder := newDialectUpstream(t)
+
+	chatDialect := dialectFor(t, domain.ProtocolOpenAIChat)
+	// 同协议段两条渠道都失败；跨协议段提供一条健康的 anthropic 渠道。
+	failingChannels := []store.RouteCandidate{
+		{
+			ChannelID: 10, ChannelType: store.ChannelTypeOpenAIChat,
+			BaseURL: failUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		},
+		{
+			ChannelID: 11, ChannelType: store.ChannelTypeOpenAIChat,
+			BaseURL: failUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		},
+	}
+	st := &fakeGatewayStore{
+		auth:        activeAuth(),
+		credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		routes:      failingChannels,
+		crossRoutes: []store.RouteCandidate{{
+			ChannelID: 20, ChannelType: store.ChannelTypeAnthropicMessages,
+			BaseURL: okUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		}},
+		wantMerchantID: 1,
+	}
+	handler, attempts, _ := testGatewayWithLogs(t, st)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(), authSchemePrefix+testAPIKey, chatDialect.requestBody)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+	assertClientDialectText(t, chatDialect, result.body)
+
+	_, _, model, _, calls := recorder.snapshot()
+	if calls != 1 {
+		t.Errorf("跨协议上游调用次数 = %d，期望 1", calls)
+	}
+	if model != "up-model" {
+		t.Errorf("上游模型名 = %q，期望 up-model", model)
+	}
+	// 三次尝试：同协议两条各失败一次，第三条跨协议成功；末条同时标记换渠道与跨协议。
+	lines := attemptLogLines(t, attempts)
+	if len(lines) != 3 {
+		t.Fatalf("尝试日志行数 = %d，期望 3：%s", len(lines), attempts.String())
+	}
+	if got := string(lines[2]["cross_protocol"]); got != "true" {
+		t.Errorf("第三条尝试 cross_protocol = %s，期望 true", got)
+	}
+	if got := string(lines[2]["channel_switched"]); got != "true" {
+		t.Errorf("第三条尝试 channel_switched = %s，期望 true", got)
+	}
+	var outcome string
+	if err := json.Unmarshal(lines[2]["outcome"], &outcome); err != nil {
+		t.Fatalf("解析 outcome 失败：%v", err)
+	}
+	if outcome != string(domain.AttemptOK) {
+		t.Errorf("第三条尝试 outcome = %s，期望 %s", outcome, domain.AttemptOK)
+	}
+}
+
 // TestGatewayCrossProtocolStreamingRebuild 覆盖流式跨协议重建：上游方言的 SSE 帧被重建为
 // 客户端方言的帧，且转换事实在尝试与访问日志里标记。
 func TestGatewayCrossProtocolStreamingRebuild(t *testing.T) {
