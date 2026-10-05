@@ -63,13 +63,34 @@ func (c Credential) LogValue() slog.Value {
 	return slog.StringValue(redactedSecret)
 }
 
-// Provider 是凭据表的请求头提供者：按 route.CredentialRef 取出本次调用该用的那一份凭据。
+// Resolver 按本次路由与请求上下文取出该用的凭据。
 //
-// 表在装配期一次性建好，运行期只读，因此可并发使用。
-// 引用名在表里查不到时返回错误，不退化成空密钥：
-// 空密钥会把「装配漏了一个渠道的凭据」推迟成上游的 401，让使用者从一个与配置无关的症状出发排查。
+// 凭据来源由实现决定（内存表、数据库、密钥管理服务），本包只负责「按协议把密钥拼成请求头」。
+// 传入 ctx 是为了让实现能从请求上下文读出鉴权事实（例如生效商家）：凭据表通常要按商家过滤，
+// 而商家属于本次请求而非路由配置；本包自身不解析上下文。
+// 取不到凭据时必须返回错误，不得返回空凭据。
+type Resolver interface {
+	Resolve(ctx context.Context, route domain.Route) (Credential, error)
+}
+
+// Provider 是凭据表的请求头提供者：按 resolver 取出本次调用该用的那一份凭据。
+//
+// 凭据解析在运行期发生，因此实现必须可并发使用。
 type Provider struct {
-	credentials map[string]Credential
+	resolve Resolver
+}
+
+// staticResolver 是按引用名查内存表的实现，供 New 使用。
+type staticResolver map[string]Credential
+
+// Resolve 从内存表里取出引用名对应的凭据；引用名查不到时返回错误，不退化成空密钥。
+func (s staticResolver) Resolve(_ context.Context, route domain.Route) (Credential, error) {
+	cred, ok := s[route.CredentialRef]
+	if !ok {
+		return Credential{}, domain.NewError(domain.CodeInternal,
+			fmt.Sprintf("路由的凭据引用 %q 不在凭据表里", route.CredentialRef))
+	}
+	return cred, nil
 }
 
 // String 实现 fmt.Stringer：凭据表经 %v 或 %+v 打印时只出现占位符。
@@ -97,7 +118,14 @@ func New(credentials map[string]Credential) *Provider {
 	for ref, cred := range credentials {
 		table[ref] = cred
 	}
-	return &Provider{credentials: table}
+	return &Provider{resolve: staticResolver(table)}
+}
+
+// NewWithResolver 用动态解析器构造请求头提供者，供凭据来自数据库一类的场景使用。
+//
+// resolver 必填；取不到凭据的错误由它返回，本包只把它透传给调用方。
+func NewWithResolver(resolver Resolver) *Provider {
+	return &Provider{resolve: resolver}
 }
 
 // UpstreamHeaders 实现 upstream.HeaderProvider 的契约。
@@ -106,11 +134,10 @@ func New(credentials map[string]Credential) *Provider {
 // 内容 = 本次凭据头 + route.Headers。注入形态取自 route.Protocol：协议是路由（端点）的事实，
 // 凭据只回答用哪份密钥；合并规则里凭据头是被上游用来鉴权的唯一来源，
 // 因此与 route.Headers 同名冲突时以凭据头为准，配置里的静态头不能把它覆盖掉。
-func (p *Provider) UpstreamHeaders(_ context.Context, route domain.Route) (http.Header, error) {
-	cred, ok := p.credentials[route.CredentialRef]
-	if !ok {
-		return nil, domain.NewError(domain.CodeInternal,
-			fmt.Sprintf("路由的凭据引用 %q 不在凭据表里", route.CredentialRef))
+func (p *Provider) UpstreamHeaders(ctx context.Context, route domain.Route) (http.Header, error) {
+	cred, err := p.resolve.Resolve(ctx, route)
+	if err != nil {
+		return nil, err
 	}
 	headers, credentialHeader, err := credentialHeaders(route.Protocol, cred.APIKey)
 	if err != nil {

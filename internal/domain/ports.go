@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -157,6 +158,10 @@ func (s CredentialHeaderStyle) Valid() bool {
 // CredentialRef 是不透明引用，明文凭据由装配层的请求头提供者按它解析后注入，Route 不得携带明文。
 type Route struct {
 	UpstreamID string
+	// ChannelID 是上游渠道在 upstream_channel 表里的数字主键，供需要数字渠道 id 的场合使用
+	// （用量流水、按渠道聚合的观测）。它与 UpstreamID 分工不同：后者是给日志与熔断键用的可读标识，
+	// 不保证是数字，也不保证能反查回渠道行。
+	ChannelID uint64
 	// Protocol 是上游渠道使用的线协议。调用方据此判定客户端协议与上游协议是否一致，
 	// 从而决定走同协议透传还是按内部统一格式重建。
 	Protocol      Protocol
@@ -168,6 +173,9 @@ type Route struct {
 	// Headers 是渠道级静态请求头，与凭据头合并后交适配器补协议内置必需头。
 	// nil 表示该渠道没有额外请求头。
 	Headers http.Header
+	// RequestOverrides 是渠道 × 模型级别的请求参数覆盖 JSON，取自 upstream_model_map.request_overrides。
+	// nil 表示该映射没有覆盖项。存储层不解释它的结构，合并进上游请求体的动作由请求定稿侧负责。
+	RequestOverrides json.RawMessage
 	// Timeout 是调用本渠道上游的超时预算。同一个字段按转发形态解释为两种语义：
 	//
 	//   - 非流式（UpstreamCaller.Complete）：整段上游调用的截止时间，覆盖连接、请求与响应体读取；

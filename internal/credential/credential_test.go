@@ -3,6 +3,7 @@ package credential
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -375,6 +376,40 @@ func TestNewCopiesCredentialTable(t *testing.T) {
 	if _, err := provider.UpstreamHeaders(context.Background(),
 		domain.Route{CredentialRef: "late", Protocol: domain.ProtocolOpenAIChat}); err == nil {
 		t.Error("装配后新增的引用不应生效，实际取到了凭据")
+	}
+}
+
+// stubResolver 是 Resolver 的测试替身：固定返回一份凭据或一个错误。
+type stubResolver struct {
+	cred Credential
+	err  error
+}
+
+func (s stubResolver) Resolve(_ context.Context, _ domain.Route) (Credential, error) {
+	return s.cred, s.err
+}
+
+// TestUpstreamHeadersWithResolver 覆盖凭据来自动态解析器（例如数据库）时的注入与错误透传。
+//
+// 解析器决定「用哪份密钥」，注入形态仍由 route.Protocol 决定，与 New 的内存表路径一致；
+// 解析失败时必须原样透传错误，不得退化成空密钥去发一个必然 401 的请求。
+func TestUpstreamHeadersWithResolver(t *testing.T) {
+	provider := NewWithResolver(stubResolver{cred: Credential{APIKey: "sk-dyn"}})
+	headers, err := provider.UpstreamHeaders(context.Background(), domain.Route{
+		CredentialRef: "any-ref",
+		Protocol:      domain.ProtocolAnthropicMessages,
+	})
+	if err != nil {
+		t.Fatalf("UpstreamHeaders 返回错误：%v", err)
+	}
+	if got := headers.Get("x-api-key"); got != "sk-dyn" {
+		t.Fatalf("x-api-key = %q，期望 %q", got, "sk-dyn")
+	}
+
+	sentinel := errors.New("凭据读取失败")
+	failing := NewWithResolver(stubResolver{err: sentinel})
+	if _, err := failing.UpstreamHeaders(context.Background(), domain.Route{Protocol: domain.ProtocolOpenAIChat}); !errors.Is(err, sentinel) {
+		t.Fatalf("解析错误应原样透传，得到 %v", err)
 	}
 }
 
