@@ -27,6 +27,7 @@ const (
 	CodeInvalidRequest      Code = "invalid_request"
 	CodeUnauthorized        Code = "unauthorized"
 	CodeForbidden           Code = "forbidden"
+	CodeQuotaExceeded       Code = "quota_exceeded"
 	CodeRateLimited         Code = "rate_limited"
 	CodeGatewayOverloaded   Code = "gateway_overloaded"
 	CodeModelNotFound       Code = "model_not_found"
@@ -124,6 +125,9 @@ func classify(code Code) (ErrorClass, bool, int) {
 	case CodeForbidden:
 		// 已通过身份校验但无权访问该资源：换凭证可能成功，但重试同一请求不会，故不可重试。
 		return ClassUser, false, http.StatusForbidden
+	case CodeQuotaExceeded:
+		// 账户窗口用量达到限额，处置为直接拒绝：窗口未滚动前重试不会成功，故不可重试。
+		return ClassUser, false, http.StatusTooManyRequests
 	case CodeRateLimited:
 		// 调用方自身超过 RPM/TPM 限额：换成别的渠道也一样超限，故不可重试。
 		return ClassUser, false, http.StatusTooManyRequests

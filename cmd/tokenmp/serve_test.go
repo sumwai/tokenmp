@@ -19,6 +19,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 )
@@ -63,6 +64,11 @@ type fakeGatewayStore struct {
 	accountMultiplier decimal.Decimal
 	channelMultiplier decimal.Decimal
 	buckets           []settlement.Bucket
+
+	// 窗口限额：quotas 是账户维度的限额定义，quotaUsed 按限额 id 给出已用量。
+	quotas    []quota.Limit
+	quotaUsed map[uint64]decimal.Decimal
+	quotaErr  error
 
 	// mu 保护用量记录与账本：流式请求下结算在服务端 goroutine 里被调用。
 	mu sync.Mutex
@@ -117,6 +123,28 @@ func (f *fakeGatewayStore) AccountBuckets(_ context.Context, _ uint64) ([]settle
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]settlement.Bucket(nil), f.effectiveBucketsLocked()...), nil
+}
+
+// Quotas 实现窗口限额定义的读取；只返回请求 scope 与实体下的行。
+func (f *fakeGatewayStore) Quotas(_ context.Context, scope billing.Scope, scopeID uint64) ([]quota.Limit, error) {
+	if f.quotaErr != nil {
+		return nil, f.quotaErr
+	}
+	var limits []quota.Limit
+	for _, limit := range f.quotas {
+		if limit.Scope == scope && limit.ScopeID == scopeID {
+			limits = append(limits, limit)
+		}
+	}
+	return limits, nil
+}
+
+// Usage 实现窗口用量聚合；按限额 id 给出固定的已用量。
+func (f *fakeGatewayStore) Usage(_ context.Context, q quota.UsageQuery) (decimal.Decimal, error) {
+	if f.quotaErr != nil {
+		return decimal.Zero, f.quotaErr
+	}
+	return f.quotaUsed[q.QuotaID], nil
 }
 
 // InTx 模拟一段事务：持锁期间读写同一份账本副本，失败时丢弃改动。
@@ -238,6 +266,7 @@ func newTestGateway(t *testing.T, st gatewayStore) *gateway {
 type httpResult struct {
 	status      int
 	contentType string
+	headers     http.Header
 	body        []byte
 }
 
@@ -261,7 +290,7 @@ func doPost(t *testing.T, url, authorization, body string) httpResult {
 	if err != nil {
 		t.Fatalf("读取响应失败：%v", err)
 	}
-	return httpResult{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"), body: respBody}
+	return httpResult{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"), headers: resp.Header.Clone(), body: respBody}
 }
 
 // assertJSONError 断言响应是期望状态码的 JSON，且带统一错误体的 error 字段。
@@ -850,6 +879,106 @@ func TestGatewayPaymentRequiredPrecheck(t *testing.T) {
 			}
 			if tt.wantStatus == http.StatusPaymentRequired {
 				assertJSONError(t, result, http.StatusPaymentRequired)
+			}
+		})
+	}
+}
+
+// TestGatewayQuotaEnforcement 覆盖窗口限额的端到端响应：
+//
+//   - reject 超限回 429 且错误码为 quota_exceeded；
+//   - throttle 超限回 429 rate_limited 并附 Retry-After；
+//   - 未超限、未配置限额、聚合失败都放行；
+//   - 已用量回落（等价于 quota reset 后）重新放行。
+func TestGatewayQuotaEnforcement(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	dailyQuota := func(action billing.Action) quota.Limit {
+		return quota.Limit{
+			ID: 1, Scope: billing.ScopeAccount, ScopeID: 2, Metric: billing.MetricRequest,
+			WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+			LimitAmount: decimal.NewFromInt(100), Action: action,
+		}
+	}
+	tests := []struct {
+		name       string
+		quotas     []quota.Limit
+		used       map[uint64]decimal.Decimal
+		quotaErr   error
+		wantStatus int
+		wantCode   string
+		wantRetry  bool
+	}{
+		{
+			name:   "未超限放行",
+			quotas: []quota.Limit{dailyQuota(billing.ActionReject)},
+			used:   map[uint64]decimal.Decimal{1: decimal.NewFromInt(99)}, wantStatus: http.StatusOK,
+		},
+		{name: "未配置限额放行", wantStatus: http.StatusOK},
+		{
+			name:       "reject 超限",
+			quotas:     []quota.Limit{dailyQuota(billing.ActionReject)},
+			used:       map[uint64]decimal.Decimal{1: decimal.NewFromInt(100)},
+			wantStatus: http.StatusTooManyRequests, wantCode: string(domain.CodeQuotaExceeded),
+		},
+		{
+			name:       "throttle 超限",
+			quotas:     []quota.Limit{dailyQuota(billing.ActionThrottle)},
+			used:       map[uint64]decimal.Decimal{1: decimal.NewFromInt(150)},
+			wantStatus: http.StatusTooManyRequests, wantCode: string(domain.CodeRateLimited), wantRetry: true,
+		},
+		{
+			name:     "聚合失败放行",
+			quotas:   []quota.Limit{dailyQuota(billing.ActionReject)},
+			quotaErr: fmt.Errorf("聚合超时"), wantStatus: http.StatusOK,
+		},
+		{
+			name:   "重置后已用量回落放行",
+			quotas: []quota.Limit{dailyQuota(billing.ActionReject)},
+			used:   map[uint64]decimal.Decimal{1: decimal.Zero}, wantStatus: http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &fakeGatewayStore{
+				auth:        activeAuth(),
+				routes:      []store.RouteCandidate{{ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model"}},
+				credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+				quotas:      tt.quotas,
+				quotaUsed:   tt.used,
+				quotaErr:    tt.quotaErr,
+			}
+			server := httptest.NewServer(newTestGateway(t, st).handler)
+			t.Cleanup(server.Close)
+
+			result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+				authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+			if result.status != tt.wantStatus {
+				t.Fatalf("状态码 = %d，期望 %d，响应体 %s", result.status, tt.wantStatus, result.body)
+			}
+			if tt.wantStatus == http.StatusOK {
+				return
+			}
+			assertJSONError(t, result, tt.wantStatus)
+			var envelope errorEnvelope
+			if err := json.Unmarshal(result.body, &envelope); err != nil {
+				t.Fatalf("解析错误体失败：%v", err)
+			}
+			if envelope.Error.Code != tt.wantCode {
+				t.Errorf("错误码 = %q，期望 %q", envelope.Error.Code, tt.wantCode)
+			}
+			retryAfter := result.headers.Get(retryAfterHeader)
+			if tt.wantRetry && retryAfter == "" {
+				t.Error("throttle 响应应带 Retry-After")
+			}
+			if !tt.wantRetry && retryAfter != "" {
+				t.Errorf("reject 响应不应带 Retry-After，得到 %q", retryAfter)
 			}
 		})
 	}

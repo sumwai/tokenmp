@@ -7,11 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/settlement"
 )
 
@@ -30,6 +35,8 @@ const (
 	accountStatusActive = "active"
 	// jsonContentType 是共享 JSON 错误体的 Content-Type。
 	jsonContentType = "application/json"
+	// retryAfterHeader 是 throttle 处置下告知客户端何时可重试的响应头。
+	retryAfterHeader = "Retry-After"
 )
 
 // identity 是一次通过鉴权的请求归属。
@@ -80,15 +87,19 @@ func bearerToken(header string) (string, bool) {
 // authenticator 是按密钥哈希鉴权的中间件。
 type authenticator struct {
 	store gatewayStore
-	now   func() time.Time
+	// quotas 执行窗口限额判定；构造时注入，不在中间件里现拼依赖。
+	quotas *quota.Service
+	now    func() time.Time
 }
 
 // newAuthenticator 构造鉴权中间件；now 为 nil 时取系统时钟。
+//
+// 限额判定的日志用 slog 的 Warn：聚合失败被宽容放行，必须有痕迹。
 func newAuthenticator(store gatewayStore, now func() time.Time) *authenticator {
 	if now == nil {
 		now = time.Now
 	}
-	return &authenticator{store: store, now: now}
+	return &authenticator{store: store, quotas: quota.New(store, slog.Warn), now: now}
 }
 
 // middleware 包装下游处理器：鉴权通过后把 identity 写入上下文，失败时回统一的 401 JSON。
@@ -130,6 +141,12 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusPaymentRequired, domain.CodeForbidden, "账户无可用额度")
 			return
 		}
+		// 窗口限额判定与 402 预检同层：都在鉴权通过、协议分派之前。
+		// 聚合失败与组合非法由判定器宽容放行，不阻断转发。
+		if violation := a.quotas.Check(r.Context(), auth.AccountID, now); violation != nil {
+			writeQuotaViolation(w, violation)
+			return
+		}
 		ctx := withIdentity(r.Context(), identity{
 			accountID:  auth.AccountID,
 			merchantID: auth.MerchantID,
@@ -137,6 +154,33 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// writeQuotaViolation 按限额的处置方式写 429 JSON。
+//
+// reject 回 quota_exceeded；throttle 回 rate_limited 并附 Retry-After。平滑节流
+// （排队限速）不在本 issue，这里只给出退避提示。
+func writeQuotaViolation(w http.ResponseWriter, violation *quota.Violation) {
+	if violation.Limit.Action == billing.ActionThrottle {
+		if seconds := retryAfterSeconds(violation.RetryAfter); seconds > 0 {
+			w.Header().Set(retryAfterHeader, strconv.Itoa(seconds))
+		}
+		writeJSONError(w, http.StatusTooManyRequests, domain.CodeRateLimited, "账户用量超过限额，请稍后重试")
+		return
+	}
+	writeJSONError(w, http.StatusTooManyRequests, domain.CodeQuotaExceeded, "账户用量超过限额")
+}
+
+// retryAfterSeconds 把退避时长折成整秒；非正时长返回 0，由调用方省略响应头。
+func retryAfterSeconds(delay time.Duration) int {
+	if delay <= 0 {
+		return 0
+	}
+	seconds := int(math.Ceil(delay.Seconds()))
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
 
 // errorEnvelope 是共享 JSON 错误体的外层结构，形如 {"error":{"message":"…","type":"…","code":"…"}}。
@@ -173,7 +217,7 @@ func writeJSONError(w http.ResponseWriter, code int, domainCode domain.Code, mes
 func errorTypeForCode(code domain.Code) string {
 	switch code {
 	case domain.CodeInvalidRequest, domain.CodeUnauthorized, domain.CodeForbidden,
-		domain.CodeModelNotFound, domain.CodeNotFound, domain.CodeRateLimited:
+		domain.CodeModelNotFound, domain.CodeNotFound, domain.CodeQuotaExceeded, domain.CodeRateLimited:
 		return "invalid_request_error"
 	case domain.CodeUpstreamTimeout, domain.CodeUpstreamUnavailable,
 		domain.CodeUpstreamRateLimited, domain.CodeUpstreamRejected:

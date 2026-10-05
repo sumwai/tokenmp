@@ -23,6 +23,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/pipeline"
+	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/transport"
@@ -76,6 +77,8 @@ type gatewayStore interface {
 	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
+	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
+	quota.Repo
 }
 
 // 编译期断言：真实存储层满足装配层的依赖面。
