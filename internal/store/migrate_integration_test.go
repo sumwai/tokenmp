@@ -196,7 +196,8 @@ func assertAPIKeyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
 	)
 	err := db.QueryRowContext(ctx,
 		"SELECT column_type, is_nullable FROM information_schema.columns "+
-			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND column_name = 'api_key_id'")
+			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND column_name = 'api_key_id'").
+		Scan(&columnType, &nullable)
 	if err != nil {
 		t.Fatalf("查询 billing_usage.api_key_id 列失败：%v", err)
 	}
@@ -210,7 +211,8 @@ func assertAPIKeyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
 	var columns int
 	err = db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM information_schema.statistics "+
-			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND index_name = 'idx_usage_api_key_time'")
+			"WHERE table_schema = DATABASE() AND table_name = 'billing_usage' AND index_name = 'idx_usage_api_key_time'").
+		Scan(&columns)
 	if err != nil {
 		t.Fatalf("查询 billing_usage.idx_usage_api_key_time 索引失败：%v", err)
 	}
