@@ -46,6 +46,8 @@ const (
 	// 渠道配置改写模型名后，响应体中的模型名与网关实际履约的模型可能不同，
 	// 该标头使客户端能读到网关最终履约的模型名。
 	routedModelHeader = "x-tokenmp-routed-model"
+	// requestIDHeader 是客户端透传请求 id 的请求头名。
+	requestIDHeader = "X-Request-Id"
 )
 
 // Forwarder 是 transport 所需的转发表面，由 internal/pipeline 的实现满足。
@@ -68,6 +70,10 @@ type AccessRecord struct {
 	// Model 是客户端请求里的模型名（对外别名），不是实际发往上游的模型名：
 	// 后者由选路决定，记录在流水线的上游尝试记录里。
 	Model string
+	// ChannelID 是本次请求命中的渠道数字主键；未选路或未取得时为 0。
+	ChannelID uint64
+	// UpstreamStatus 是最后一次上游尝试的 HTTP 状态码；未取得（未选路、连接失败）时为 0。
+	UpstreamStatus int
 	// Stream 报告本次是否为流式请求。
 	Stream bool
 	// HTTPStatus 是返回给客户端的 HTTP 状态码。
@@ -106,18 +112,22 @@ type Options struct {
 	MaxBodyBytes int64
 	// WriteTimeout 是单次写出的最长等待时间；<= 0 时取 defaultWriteTimeout。
 	WriteTimeout time.Duration
+	// CompleteTimeout 是非流式请求的 handler 侧整体 deadline；<= 0 时不设 deadline。
+	// 流式不使用本项：长生成的耗时不可预估，由上游的首字节与空闲读超时保护。
+	CompleteTimeout time.Duration
 	// Logger 写请求级访问日志；为 nil 时不记录。
 	Logger AccessLogger
 }
 
 // Handler 是所有协议共用的 HTTP 入口。
 type Handler struct {
-	forwarder    Forwarder
-	adapters     AdapterResolver
-	newRequestID func() string
-	maxBodyBytes int64
-	writeTimeout time.Duration
-	logger       AccessLogger
+	forwarder       Forwarder
+	adapters        AdapterResolver
+	newRequestID    func() string
+	maxBodyBytes    int64
+	writeTimeout    time.Duration
+	completeTimeout time.Duration
+	logger          AccessLogger
 }
 
 // New 构造入口；依赖缺失在构造时报出，不推迟到请求时。
@@ -129,12 +139,13 @@ func New(opts Options) (*Handler, error) {
 		return nil, domain.NewError(domain.CodeInternal, "缺少路径到适配器的映射")
 	}
 	handler := &Handler{
-		forwarder:    opts.Forwarder,
-		adapters:     opts.Adapters,
-		newRequestID: opts.NewRequestID,
-		maxBodyBytes: opts.MaxBodyBytes,
-		writeTimeout: opts.WriteTimeout,
-		logger:       opts.Logger,
+		forwarder:       opts.Forwarder,
+		adapters:        opts.Adapters,
+		newRequestID:    opts.NewRequestID,
+		maxBodyBytes:    opts.MaxBodyBytes,
+		writeTimeout:    opts.WriteTimeout,
+		completeTimeout: opts.CompleteTimeout,
+		logger:          opts.Logger,
 	}
 	if handler.newRequestID == nil {
 		handler.newRequestID = defaultRequestID
@@ -186,9 +197,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeError(rec, adapter, err)
 		return
 	}
-	if req.RequestID == "" {
-		req.RequestID = h.newRequestID()
-	}
+	// 请求 id 优先取客户端透传的 X-Request-Id，其次请求体自带，最后入口生成。
+	req.RequestID = h.resolveRequestID(r, req.RequestID)
 	state.requestID = req.RequestID
 	state.model = req.Model
 	state.stream = req.Stream
@@ -197,6 +207,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveComplete(rec, r, adapter, req)
+}
+
+// resolveRequestID 决定本次请求的 request_id：客户端透传的 X-Request-Id 优先，
+// 其次请求体自带，最后回退到入口生成的随机标识符。
+//
+// 沿用客户端提供的值是为了让网关日志与客户端日志能按同一 id 对齐；
+// 该值只作关联键，不参与任何鉴权与选路判定，故可原样采信。
+func (h *Handler) resolveRequestID(r *http.Request, bodyID string) string {
+	if headerID := strings.TrimSpace(r.Header.Get(requestIDHeader)); headerID != "" {
+		return headerID
+	}
+	if bodyID != "" {
+		return bodyID
+	}
+	return h.newRequestID()
 }
 
 // accessState 是访问日志所需、在请求处理过程中逐步填齐的字段。
@@ -215,16 +240,18 @@ func (h *Handler) observeRequest(rec *responseRecorder, start time.Time, state a
 		return
 	}
 	h.logger.LogAccess(AccessRecord{
-		RequestID:    state.requestID,
-		Protocol:     state.protocol,
-		Model:        state.model,
-		Stream:       state.stream,
-		HTTPStatus:   rec.status,
-		DurationMS:   time.Since(start).Milliseconds(),
-		WrittenBytes: rec.bytes,
-		ErrorCode:    rec.errCode,
-		RemoteAddr:   state.remoteAddr,
-		UserAgent:    state.userAgent,
+		RequestID:      state.requestID,
+		Protocol:       state.protocol,
+		Model:          state.model,
+		ChannelID:      rec.channelID,
+		UpstreamStatus: rec.upstreamStatus,
+		Stream:         state.stream,
+		HTTPStatus:     rec.status,
+		DurationMS:     time.Since(start).Milliseconds(),
+		WrittenBytes:   rec.bytes,
+		ErrorCode:      rec.errCode,
+		RemoteAddr:     state.remoteAddr,
+		UserAgent:      state.userAgent,
 	})
 }
 
@@ -250,7 +277,15 @@ func truncateUserAgent(userAgent string) string {
 func (h *Handler) serveComplete(w *responseRecorder, r *http.Request, adapter domain.Adapter, req *domain.Request) {
 	w.Header().Set(contentTypeHeader, adapter.ContentType())
 	out := newFlushWriter(w, h.writeTimeout)
-	if err := h.forwarder.Forward(r.Context(), adapter, req, out); err != nil && !out.wrote {
+	// 非流式设 handler 侧整体 deadline：上游分段推进但总耗时超预算时同样要收口。
+	// 流式刻意不设：长生成的整段时长不可预估，改由首字节与空闲读两个分级超时保护。
+	ctx := r.Context()
+	if h.completeTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.completeTimeout)
+		defer cancel()
+	}
+	if err := h.forwarder.Forward(ctx, adapter, req, out); err != nil && !out.wrote {
 		h.writeError(w, adapter, err)
 	}
 }
@@ -312,6 +347,9 @@ type responseRecorder struct {
 	bytes     int
 	errCode   string
 	committed bool
+	// channelID 与 upstreamStatus 由流水线经 domain.UpstreamAttemptSink 回流，供访问日志使用。
+	channelID      uint64
+	upstreamStatus int
 }
 
 // newResponseRecorder 包装响应写出目标；未显式调用 WriteHeader 时默认 200。
@@ -356,11 +394,19 @@ func (r *responseRecorder) SetRoutedModel(model string) {
 	r.Header().Set(routedModelHeader, model)
 }
 
-// 编译期断言：响应写出目标与 Flush 包装都能接收最终履约模型注入。
+// 编译期断言：响应写出目标与 Flush 包装都能接收最终履约模型注入与上游尝试信息回流。
 var (
-	_ domain.RoutedModelSink = (*responseRecorder)(nil)
-	_ domain.RoutedModelSink = (*flushWriter)(nil)
+	_ domain.RoutedModelSink     = (*responseRecorder)(nil)
+	_ domain.RoutedModelSink     = (*flushWriter)(nil)
+	_ domain.UpstreamAttemptSink = (*responseRecorder)(nil)
+	_ domain.UpstreamAttemptSink = (*flushWriter)(nil)
 )
+
+// SetAttemptChannel 记录流水线本次尝试命中的渠道数字主键。
+func (r *responseRecorder) SetAttemptChannel(channelID uint64) { r.channelID = channelID }
+
+// SetUpstreamStatus 记录流水线本次尝试取得的上游 HTTP 状态码。
+func (r *responseRecorder) SetUpstreamStatus(status int) { r.upstreamStatus = status }
 
 // Unwrap 返回底层写出目标，供 http.ResponseController 向上查找写超时能力。
 func (r *responseRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
@@ -410,5 +456,19 @@ func (f *flushWriter) Write(p []byte) (int, error) {
 func (f *flushWriter) SetRoutedModel(model string) {
 	if sink, ok := f.writer.(domain.RoutedModelSink); ok {
 		sink.SetRoutedModel(model)
+	}
+}
+
+// SetAttemptChannel 把渠道 id 回流透传给被包装的响应写出目标；目标不支持该能力时为空操作。
+func (f *flushWriter) SetAttemptChannel(channelID uint64) {
+	if sink, ok := f.writer.(domain.UpstreamAttemptSink); ok {
+		sink.SetAttemptChannel(channelID)
+	}
+}
+
+// SetUpstreamStatus 把上游 HTTP 状态码回流透传给被包装的响应写出目标；目标不支持该能力时为空操作。
+func (f *flushWriter) SetUpstreamStatus(status int) {
+	if sink, ok := f.writer.(domain.UpstreamAttemptSink); ok {
+		sink.SetUpstreamStatus(status)
 	}
 }

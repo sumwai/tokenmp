@@ -102,6 +102,104 @@ func TestRewriteRawBodyUsageSwitchSkippedForNonStream(t *testing.T) {
 	}
 }
 
+// TestRewriteRawBodyAppliesRequestOverridesAfterModelRewrite 验证覆盖项按顶层键覆盖并入请求体。
+func TestRewriteRawBodyAppliesRequestOverridesAfterModelRewrite(t *testing.T) {
+	adapter := New()
+	body := []byte(`{"model":"alias","temperature":0.5,"messages":[{"role":"user","content":"hi"}]}`)
+	rewritten, parts, err := adapter.RewriteRawBody(body, domain.RewriteOptions{
+		UpstreamModel:    "up-model",
+		RequestOverrides: json.RawMessage(`{"temperature":0.2,"top_p":0.9}`),
+	})
+	if err != nil {
+		t.Fatalf("改写失败：%v", err)
+	}
+	if !parts.Has(domain.RewritePartRequestOverrides) {
+		t.Errorf("应标注覆盖项改写，得到 %v", parts)
+	}
+	fields := decodeFields(t, rewritten)
+	if string(fields["temperature"]) != "0.2" {
+		t.Errorf("temperature = %s，期望 0.2", fields["temperature"])
+	}
+	if string(fields["top_p"]) != "0.9" {
+		t.Errorf("top_p = %s，期望 0.9", fields["top_p"])
+	}
+	if string(fields["model"]) != `"up-model"` {
+		t.Errorf("model = %s，期望 up-model", fields["model"])
+	}
+}
+
+// TestRewriteRawBodyOverridesCoexistWithUsageSwitch 验证覆盖项与用量索取开关同帧落地，互不覆盖。
+func TestRewriteRawBodyOverridesCoexistWithUsageSwitch(t *testing.T) {
+	adapter := New()
+	body := []byte(`{"model":"alias","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	rewritten, parts, err := adapter.RewriteRawBody(body, domain.RewriteOptions{
+		IncludeUsage:     true,
+		RequestOverrides: json.RawMessage(`{"temperature":0.3}`),
+	})
+	if err != nil {
+		t.Fatalf("改写失败：%v", err)
+	}
+	if !parts.Has(domain.RewritePartRequestUsageSwitch) || !parts.Has(domain.RewritePartRequestOverrides) {
+		t.Errorf("应同时标注两项改写，得到 %v", parts)
+	}
+	fields := decodeFields(t, rewritten)
+	if string(fields["temperature"]) != "0.3" {
+		t.Errorf("temperature = %s，期望 0.3", fields["temperature"])
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(fields["stream_options"], &options); err != nil {
+		t.Fatalf("stream_options 不是对象：%v", err)
+	}
+	if string(options["include_usage"]) != "true" {
+		t.Errorf("include_usage = %s，期望 true", options["include_usage"])
+	}
+}
+
+// TestRewriteRawBodySkipsInvalidOverrides 验证非法覆盖项不中断转发也不改动请求体。
+func TestRewriteRawBodySkipsInvalidOverrides(t *testing.T) {
+	adapter := New()
+	body := []byte(`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	rewritten, parts, err := adapter.RewriteRawBody(body, domain.RewriteOptions{
+		RequestOverrides: json.RawMessage(`[1,2]`),
+	})
+	if err != nil {
+		t.Fatalf("非法覆盖项不应中断转发：%v", err)
+	}
+	if len(parts) != 0 {
+		t.Errorf("无效覆盖项不应产生改写标注，得到 %v", parts)
+	}
+	if string(rewritten) != string(body) {
+		t.Errorf("未发生改写时应逐字节返回入参：\n实际 %s\n期望 %s", rewritten, body)
+	}
+}
+
+// TestEncodeRequestAppliesRequestOverrides 验证跨协议重建路径同样应用覆盖项。
+func TestEncodeRequestAppliesRequestOverrides(t *testing.T) {
+	adapter := New()
+	req := &domain.Request{
+		Protocol: domain.ProtocolAnthropicMessages,
+		Model:    "alias",
+		Messages: []domain.Message{{
+			Role:  domain.RoleUser,
+			Parts: []domain.Part{{Kind: domain.PartText, Text: "hi"}},
+		}},
+	}
+	body, parts, err := adapter.EncodeRequest(req, domain.RewriteOptions{
+		UpstreamModel:    "up-model",
+		RequestOverrides: json.RawMessage(`{"temperature":0.4}`),
+	})
+	if err != nil {
+		t.Fatalf("重建失败：%v", err)
+	}
+	if !parts.Has(domain.RewritePartRequestOverrides) {
+		t.Errorf("应标注覆盖项改写，得到 %v", parts)
+	}
+	fields := decodeFields(t, body)
+	if string(fields["temperature"]) != "0.4" {
+		t.Errorf("temperature = %s，期望 0.4", fields["temperature"])
+	}
+}
+
 // TestEncodeRequestInjectsUsageSwitch 验证跨协议重建的上游请求同样带上用量索取开关。
 func TestEncodeRequestInjectsUsageSwitch(t *testing.T) {
 	adapter := New()

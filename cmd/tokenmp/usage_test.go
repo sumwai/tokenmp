@@ -418,7 +418,7 @@ func TestUsageInsertFailureDoesNotBlockForwarding(t *testing.T) {
 func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 	st := &fakeGatewayStore{}
 	var logged []string
-	recorder := newUsageRecorder(st, func(msg string, args ...any) {
+	recorder := newUsageRecorder(st, 0, func(msg string, args ...any) {
 		logged = append(logged, msg)
 	})
 	ctx := withIdentity(context.Background(), identity{accountID: 2, merchantID: 1})
@@ -453,7 +453,7 @@ func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 // TestUsageRecorderRequiresIdentity 验证未鉴权上下文不写脏流水。
 func TestUsageRecorderRequiresIdentity(t *testing.T) {
 	st := &fakeGatewayStore{}
-	recorder := newUsageRecorder(st, func(string, ...any) {})
+	recorder := newUsageRecorder(st, 0, func(string, ...any) {})
 	if err := recorder.RecordUsage(context.Background(), domain.UsageRecord{ChannelID: 10, Model: "m"}); err == nil {
 		t.Fatal("缺少鉴权上下文应报错")
 	}

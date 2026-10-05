@@ -11,8 +11,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -288,6 +290,9 @@ func (p *Pipeline) forward(
 		attemptsMade++
 		p.markRoutedModel(out, route)
 		attempt := doAttempt(ctx, route, body, requestParts)
+		// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
+		// 请求结束时保留的是最终履约（或最终失败）的那次。
+		p.recordAttemptInfo(out, route, attempt)
 		p.recordRouteOutcome(route, attempt.Err)
 		attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
 		p.recordAttempt(ctx, req, route, attemptsMade, attempt)
@@ -334,6 +339,32 @@ func (p *Pipeline) markRoutedModel(out io.Writer, route domain.Route) {
 		return
 	}
 	sink.SetRoutedModel(domain.UpstreamModelName("", domain.RewriteOptions{UpstreamModel: route.UpstreamModel}))
+}
+
+// recordAttemptInfo 把本次尝试命中的渠道 id 与上游状态码回流给入口层写出目标；
+// 目标不支持该能力时为空操作。
+func (p *Pipeline) recordAttemptInfo(out io.Writer, route domain.Route, result attemptResult) {
+	sink, ok := out.(domain.UpstreamAttemptSink)
+	if !ok {
+		return
+	}
+	sink.SetAttemptChannel(route.ChannelID)
+	sink.SetUpstreamStatus(upstreamStatusOf(result.Err))
+}
+
+// upstreamStatusOf 从一次尝试的结果里取出上游 HTTP 状态码。
+//
+// 成功固定记为 200：三种协议的 2xx 成功响应都按 200 处理；失败时由上游客户端把实际状态码
+// 附在错误的 UpstreamStatus 能力上，连接类失败没有该能力，记为 0 表示未取得。
+func upstreamStatusOf(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var carrier interface{ UpstreamStatus() int }
+	if errors.As(err, &carrier) {
+		return carrier.UpstreamStatus()
+	}
+	return 0
 }
 
 // allowRoute 询问渠道熔断器是否放行该候选；未装配熔断器时恒放行。
@@ -460,6 +491,8 @@ func (p *Pipeline) finalizeRequest(req *domain.Request, route domain.Route) ([]b
 		UpstreamModel:   route.UpstreamModel,
 		// 流式转发向支持该开关的上游索取用量：不注入就拿不到末尾的用量帧。
 		IncludeUsage: req.Stream,
+		// 渠道 × 模型的参数覆盖项经适配器合并进上游请求体；形状已在选路边界收敛。
+		RequestOverrides: route.RequestOverrides,
 	}
 	if route.Protocol == req.Protocol {
 		return builder.RewriteRawBody(req.RawBody, options)

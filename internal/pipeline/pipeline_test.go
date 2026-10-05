@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"sync"
 	"testing"
@@ -186,6 +187,87 @@ func TestForwardStreamRecordsUsageAfterStream(t *testing.T) {
 	}
 	if records[0].Usage.InputTokens != 5 || records[0].Usage.OutputTokens != 3 {
 		t.Errorf("用量 = %+v，期望输入 5 输出 3", records[0].Usage)
+	}
+}
+
+// attemptInfoWriter 记录流水线回流的渠道 id 与上游状态码，同时保留写出事件。
+type attemptInfoWriter struct {
+	events         *[]string
+	channelID      uint64
+	upstreamStatus int
+}
+
+func (w *attemptInfoWriter) Write([]byte) (int, error) {
+	*w.events = append(*w.events, "write")
+	return 0, nil
+}
+
+func (w *attemptInfoWriter) SetAttemptChannel(channelID uint64) { w.channelID = channelID }
+
+func (w *attemptInfoWriter) SetUpstreamStatus(status int) { w.upstreamStatus = status }
+
+// statusCarrierError 是携带上游 HTTP 状态码的测试错误，模拟上游客户端包在错误上的能力。
+type statusCarrierError struct {
+	err    error
+	status int
+}
+
+func (e statusCarrierError) Error() string       { return e.err.Error() }
+func (e statusCarrierError) Unwrap() error       { return e.err }
+func (e statusCarrierError) UpstreamStatus() int { return e.status }
+
+// TestForwardReportsAttemptInfoToSink 断言成功的非流式尝试把渠道 id 与上游状态码回流。
+func TestForwardReportsAttemptInfoToSink(t *testing.T) {
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		return &domain.UpstreamResult{Raw: []byte(`{"ok":true}`), Response: &domain.Response{}}, nil
+	}}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters: chatAdapterLookup(adapter),
+		Upstream: caller,
+		Routes:   fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+	events := []string{}
+	out := &attemptInfoWriter{events: &events}
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), out); err != nil {
+		t.Fatalf("转发失败：%v", err)
+	}
+	if out.channelID != 7 {
+		t.Errorf("渠道 id = %d，期望 7", out.channelID)
+	}
+	if out.upstreamStatus != http.StatusOK {
+		t.Errorf("上游状态码 = %d，期望 200", out.upstreamStatus)
+	}
+}
+
+// TestForwardReportsUpstreamStatusOnFailure 断言失败尝试把上游返回的状态码回流。
+func TestForwardReportsUpstreamStatusOnFailure(t *testing.T) {
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		return nil, statusCarrierError{err: errRetryable, status: http.StatusTooManyRequests}
+	}}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRoute()}},
+		MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+	events := []string{}
+	out := &attemptInfoWriter{events: &events}
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), out); err == nil {
+		t.Fatal("上游失败时应返回错误")
+	}
+	if out.channelID != 7 {
+		t.Errorf("渠道 id = %d，期望 7", out.channelID)
+	}
+	if out.upstreamStatus != http.StatusTooManyRequests {
+		t.Errorf("上游状态码 = %d，期望 429", out.upstreamStatus)
 	}
 }
 

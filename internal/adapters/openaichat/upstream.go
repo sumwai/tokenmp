@@ -137,6 +137,11 @@ func (a *Adapter) EncodeRequest(req *domain.Request, options domain.RewriteOptio
 	if err != nil {
 		return nil, nil, domain.NewError(domain.CodeInternal, "编码上游请求失败").WithCause(err)
 	}
+	// 覆盖项在重建产物上按顶层键合并；非法覆盖项在选路边界已被丢弃，此处按跳过处理。
+	if merged, changed, mergeErr := domain.ApplyRequestOverrides(body, options.RequestOverrides); mergeErr == nil && changed {
+		body = merged
+		parts = append(parts, domain.RewritePartRequestOverrides)
+	}
 	return body, parts, nil
 }
 
@@ -147,10 +152,11 @@ func (a *Adapter) EncodeRequest(req *domain.Request, options domain.RewriteOptio
 //   - max_tokens / max_completion_tokens：按统一口径处理输出上限
 //     （客户端未声明时补 max_completion_tokens，已存在时按 max_tokens 优先钳制）
 //   - stream_options.include_usage：流式请求注入用量索取开关
+//   - 渠道 × 模型覆盖项：按顶层键覆盖合并
 //
 // 第二个返回值由本适配器按实际发生的变化填报，无改动时为空。
 func (a *Adapter) RewriteRawBody(body []byte, options domain.RewriteOptions) ([]byte, domain.RewriteParts, error) {
-	if options.MaxOutputTokens == nil && !options.IncludeUsage && options.UpstreamModel == "" {
+	if options.MaxOutputTokens == nil && !options.IncludeUsage && options.UpstreamModel == "" && len(options.RequestOverrides) == 0 {
 		return body, nil, nil
 	}
 	fields, err := domain.DecodeRawFields(body)
@@ -173,6 +179,11 @@ func (a *Adapter) RewriteRawBody(body []byte, options domain.RewriteOptions) ([]
 		if injected {
 			parts = append(parts, domain.RewritePartRequestUsageSwitch)
 		}
+	}
+	// 覆盖项最后合并：它按顶层键整体替换，应在其它改写项之后落地。
+	// 非法覆盖项在选路边界已被丢弃，此处报错属内部缺陷；仍按跳过处理而不中断转发。
+	if changed, mergeErr := domain.MergeRawOverrides(fields, options.RequestOverrides); mergeErr == nil && changed {
+		parts = append(parts, domain.RewritePartRequestOverrides)
 	}
 	if len(parts) == 0 {
 		return body, nil, nil

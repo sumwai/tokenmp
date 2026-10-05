@@ -176,8 +176,8 @@ func TestResolveMerchantID(t *testing.T) {
 
 func TestRouteCandidates(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(11), "https://up.example.com/api/v3", "group-a", 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
-		{uint64(12), "https://up.example.com", "group-b", 100, 0, 0, nil, "glm-4", nil},
+		{uint64(11), "https://up.example.com/api/v3", "group-a", 200, 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
+		{uint64(12), "https://up.example.com", "group-b", 100, 100, 0, 0, nil, "glm-4", nil},
 	}}
 
 	got, err := routeCandidates(context.Background(), fake, ChannelTypeOpenAIChat, "alias", 7)
@@ -197,13 +197,13 @@ func TestRouteCandidates(t *testing.T) {
 	want := []RouteCandidate{
 		{
 			ChannelID: 11, BaseURL: "https://up.example.com/api/v3", CredGroup: "group-a",
-			Weight: 200, RateLimitQPS: 10, RateLimitConcurrency: 4,
+			Priority: 200, Weight: 200, RateLimitQPS: 10, RateLimitConcurrency: 4,
 			Config: []byte(`{"headers":{"x":"y"}}`), UpstreamModel: "glm-5",
 			RequestOverrides: []byte(`{"temperature":0.2}`),
 		},
 		{
 			ChannelID: 12, BaseURL: "https://up.example.com", CredGroup: "group-b",
-			Weight: 100, UpstreamModel: "glm-4",
+			Priority: 100, Weight: 100, UpstreamModel: "glm-4",
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

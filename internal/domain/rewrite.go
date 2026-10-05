@@ -3,6 +3,7 @@ package domain
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strconv"
 )
 
@@ -32,6 +33,13 @@ type RewriteOptions struct {
 	// 非空时两条路径都按它取模型名：同协议透传路径改写原始报文的顶层模型字段
 	// （字段存在则替换、缺失则补齐），跨协议重建路径用它替代 Request.Model。
 	UpstreamModel string
+	// RequestOverrides 是渠道 × 模型级别的请求参数覆盖 JSON，取自
+	// Route.RequestOverrides；nil 或空对象表示本项关闭。
+	//
+	// 合并语义为顶层键覆盖：出现的顶层键整体替换请求体里的同名字段，其余保持不变。
+	// 刻意不做结构递归合并——递归会让「数组该替换还是追加」这类语义落在协议无关的
+	// 通用层，各协议无法各自表达；顶层覆盖已能覆盖 temperature、top_p 一类调参需求。
+	RequestOverrides json.RawMessage
 }
 
 // OutputLimit 按统一口径计算要向上游请求声明的输出上限，返回值 <= 0 表示不设置该字段。
@@ -125,6 +133,75 @@ func DecodeRawFields(body []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
+// MergeRawOverrides 在已解析的请求字段表上按顶层键覆盖合并覆盖项，返回是否发生改写。
+//
+// overrides 为空或 JSON null 时不做任何事；不是 JSON 对象时返回错误，
+// 由调用方决定跳过（形状在选路边界已收敛，这里是防御性判定）。
+func MergeRawOverrides(fields map[string]json.RawMessage, overrides json.RawMessage) (bool, error) {
+	patch, err := parseRequestOverrides(overrides)
+	if err != nil || len(patch) == 0 {
+		return false, err
+	}
+	changed := false
+	for key, value := range patch {
+		if existing, ok := fields[key]; ok && bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(value)) {
+			continue
+		}
+		// 复制一份：覆盖项与请求字段表可能共享底层数组，避免调用方后续修改互相影响。
+		fields[key] = json.RawMessage(append([]byte(nil), value...))
+		changed = true
+	}
+	return changed, nil
+}
+
+// ApplyRequestOverrides 在已编码的 JSON 对象请求体上按顶层键覆盖合并覆盖项。
+//
+// 供跨协议重建路径使用：重建产物是字节，与同协议透传路径共用一个顶层覆盖语义。
+// overrides 为空时逐字节返回入参；发生改写时返回重新编码的请求体。
+func ApplyRequestOverrides(body []byte, overrides json.RawMessage) ([]byte, bool, error) {
+	patch, err := parseRequestOverrides(overrides)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(patch) == 0 {
+		return body, false, nil
+	}
+	fields, err := DecodeRawFields(body)
+	if err != nil {
+		return nil, false, err
+	}
+	changed, err := MergeRawOverrides(fields, overrides)
+	if err != nil {
+		return nil, false, err
+	}
+	if !changed {
+		return body, false, nil
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return nil, false, NewError(CodeInternal, "编码覆盖后的请求失败").WithCause(err)
+	}
+	return encoded, true, nil
+}
+
+// parseRequestOverrides 把覆盖项解析为顶层字段表。
+//
+// 空值与 JSON null 视为未配置（返回 nil, nil）；不是 JSON 对象时返回错误。
+func parseRequestOverrides(overrides json.RawMessage) (map[string]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(overrides)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &patch); err != nil {
+		return nil, errors.New("请求覆盖项不是合法 JSON 对象")
+	}
+	if patch == nil {
+		return nil, errors.New("请求覆盖项不是合法 JSON 对象")
+	}
+	return patch, nil
+}
+
 // RewritePart 标识一次转发中被网关改写过的报文部分。
 //
 // 它让「网关动过哪些部分」在尝试记录与日志中可审计，而不是只留一个布尔。
@@ -144,6 +221,9 @@ const (
 	// RewritePartRequestModel 表示上游请求的模型名被网关改写：
 	// 用渠道对应的上游模型名替换或补齐客户端请求里的模型名。
 	RewritePartRequestModel RewritePart = "request_model"
+	// RewritePartRequestOverrides 表示上游请求体被渠道 × 模型的覆盖项改写。
+	// 只有确实合并进至少一个顶层键时才产生本取值。
+	RewritePartRequestOverrides RewritePart = "request_overrides"
 	// RewritePartResponseReencoded 表示面向客户端的响应由网关按客户端协议重新编码。
 	// 两个生产者：非流式跨协议重建分支；流式重建下沉目标在确实写出过网关编码字节时。
 	// 同协议透传的两条路径（非流式逐字节写出上游原始字节、流式按帧原样下沉）均不产生本取值。

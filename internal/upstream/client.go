@@ -30,6 +30,8 @@ const (
 	// defaultChannelTimeout 是渠道未配置超时时使用的兜底超时。上游调用必须有超时，
 	// 否则挂死的上游会一直占住网关连接。
 	defaultChannelTimeout = 60 * time.Second
+	// defaultStreamFirstByteTimeout 是流式转发等待上游第一个字节的兜底超时。
+	defaultStreamFirstByteTimeout = 30 * time.Second
 	// errorDetailLimit 是写进排障文案（domain.Error.Detail）的上游响应体最大字节数，
 	// 避免超长报文进入日志。
 	errorDetailLimit = 256
@@ -64,16 +66,26 @@ type Options struct {
 	// Adapters 按上游协议返回适配器。必填。
 	Adapters AdapterLookup
 	// DefaultTimeout 是渠道未配置超时（Route.Timeout <= 0）时使用的超时；
-	// 非正时取 defaultChannelTimeout。
+	// 非正时取 defaultChannelTimeout。它按调用形态解释：
+	//   - 非流式（Complete）：整段调用的截止时间；
+	//   - 流式（Stream）：仅作为空闲读超时的兜底，见 StreamIdleTimeout。
 	DefaultTimeout time.Duration
+	// StreamFirstByteTimeout 是流式转发在收到上游第一个字节前的兜底超时；
+	// 非正时取 defaultStreamFirstByteTimeout。
+	StreamFirstByteTimeout time.Duration
+	// StreamIdleTimeout 是流式转发中两个字节/帧之间的最大间隔的兜底值；
+	// 非正时取 defaultChannelTimeout。渠道配置 Route.Timeout 非零时优先。
+	StreamIdleTimeout time.Duration
 }
 
 // Client 是 domain.UpstreamCaller 的 HTTP 实现。
 type Client struct {
-	httpClient     *http.Client
-	headers        HeaderProvider
-	adapters       AdapterLookup
-	defaultTimeout time.Duration
+	httpClient             *http.Client
+	headers                HeaderProvider
+	adapters               AdapterLookup
+	defaultTimeout         time.Duration
+	streamFirstByteTimeout time.Duration
+	streamIdleTimeout      time.Duration
 }
 
 // New 构造上游客户端。Headers 与 Adapters 必填，配置错误在构造时报出，不推迟到请求时。
@@ -92,11 +104,21 @@ func New(opts Options) (*Client, error) {
 	if timeout <= 0 {
 		timeout = defaultChannelTimeout
 	}
+	firstByte := opts.StreamFirstByteTimeout
+	if firstByte <= 0 {
+		firstByte = defaultStreamFirstByteTimeout
+	}
+	idle := opts.StreamIdleTimeout
+	if idle <= 0 {
+		idle = defaultChannelTimeout
+	}
 	return &Client{
-		httpClient:     httpClient,
-		headers:        opts.Headers,
-		adapters:       opts.Adapters,
-		defaultTimeout: timeout,
+		httpClient:             httpClient,
+		headers:                opts.Headers,
+		adapters:               opts.Adapters,
+		defaultTimeout:         timeout,
+		streamFirstByteTimeout: firstByte,
+		streamIdleTimeout:      idle,
 	}, nil
 }
 
@@ -235,12 +257,20 @@ func (c *Client) adapterFor(protocol domain.Protocol) (domain.Adapter, error) {
 	return adapter, nil
 }
 
-// timeoutFor 返回本次调用的超时：渠道配置优先，未配置时用默认值。
+// timeoutFor 返回本次非流式调用的超时：渠道配置优先，未配置时用默认值。
 func (c *Client) timeoutFor(route domain.Route) time.Duration {
 	if route.Timeout > 0 {
 		return route.Timeout
 	}
 	return c.defaultTimeout
+}
+
+// idleTimeoutFor 返回本次流式调用的空闲读超时：渠道配置优先，未配置时用流式专用默认值。
+func (c *Client) idleTimeoutFor(route domain.Route) time.Duration {
+	if route.Timeout > 0 {
+		return route.Timeout
+	}
+	return c.streamIdleTimeout
 }
 
 // mapTransportError 把 HTTP 传输层错误转换为统一错误。
@@ -278,7 +308,7 @@ func classifyHTTPStatus(status int, header http.Header, body []byte) error {
 	default:
 		err = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用").WithDetail(detail)
 	}
-	return withRetryAfter(err, header, time.Now())
+	return withUpstreamStatus(withRetryAfter(err, header, time.Now()), status)
 }
 
 // retryAfterError 在统一错误之上附加上游通过 Retry-After 响应头给出的建议退避时长。
@@ -312,6 +342,33 @@ func withRetryAfter(err *domain.Error, header http.Header, now time.Time) error 
 		return err
 	}
 	return &retryAfterError{err: err, retryAfter: delay}
+}
+
+// upstreamStatusError 在已分级的错误之上附加上游实际返回的 HTTP 状态码。
+//
+// 与 retryAfterError 同一目的：状态码是排障事实，而对外错误分级由 domain.Error 决定，
+// 因此用包装而不往 domain.Error 加字段；Unwrap 暴露的仍是同一个统一错误，
+// domain.AsError 与 domain.Retryable 照常工作。
+type upstreamStatusError struct {
+	err    error
+	status int
+}
+
+// Error 实现 error 接口，转发被包装错误的面向排障文案。
+func (e *upstreamStatusError) Error() string { return e.err.Error() }
+
+// UpstreamStatus 返回上游实际返回的 HTTP 状态码。
+func (e *upstreamStatusError) UpstreamStatus() int { return e.status }
+
+// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
+func (e *upstreamStatusError) Unwrap() error { return e.err }
+
+// withUpstreamStatus 给已分级的错误附加上游 HTTP 状态码；状态码非正时原样返回。
+func withUpstreamStatus(err error, status int) error {
+	if status <= 0 {
+		return err
+	}
+	return &upstreamStatusError{err: err, status: status}
 }
 
 // parseRetryAfter 解析上游 Retry-After 响应头的两种合法取值，返回相对 now 的退避时长。

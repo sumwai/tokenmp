@@ -30,8 +30,9 @@ var _ domain.UpstreamCaller = (*Client)(nil)
 //  5. 读到 EOF 且本轮从未产出结束帧（domain.ChunkStreamEnd）时，说明上游在协议结束信号前断开，
 //     返回可重试的上游错误。由流水线负责换渠道重试或下发错误帧，跨渠道重试循环不属于本包。
 //  6. 单帧超过 sse.Reader 的上限时返回可重试的上游错误，不丢弃该情况。
-//  7. 超时按空闲（无字节）口径：在指定超时（route.Timeout 或 DefaultTimeout）内底层没有任何字节到达，
-//     即取消请求并返回可重试的上游超时，避免长流被整段超时误杀。
+//  7. 超时按两个口径分级：收到上游第一个字节前按首字节超时（streamFirstByteTimeout），
+//     之后再按空闲（无字节）口径计时。在空闲超时（route.Timeout 或 StreamIdleTimeout）内
+//     底层没有任何字节到达，即取消请求并返回可重试的上游超时，避免长流被整段超时误杀。
 //     注释行与纯空块心跳不产生帧，但字节到达即视为有进展并重置看门狗，
 //     使只发心跳的长思考流不会被误切断。
 func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Request, body []byte, sink domain.ChunkSink) error {
@@ -55,12 +56,12 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Reque
 		return err
 	}
 
-	// 空闲超时看门狗：上游在没有任何字节到达的时间内挂死时取消请求。
-	// 定时器在任何底层字节到达时重置，而不是只在读到完整帧时重置：
-	// 注释行与纯空块心跳不产生帧，但同属上游仍在推进的证据。
+	// 超时分级：首字节与空闲读共用一只定时器，收到第一个字节后重置为空闲预算。
+	// 分开是为了拦住「连接已建立但上游迟迟不吐首字节」与「长流中途挂死」两类不同故障。
 	var stalled atomic.Bool
-	idleTimeout := c.timeoutFor(route)
-	timer := time.AfterFunc(idleTimeout, func() {
+	firstByteTimeout := c.streamFirstByteTimeout
+	idleTimeout := c.idleTimeoutFor(route)
+	timer := time.AfterFunc(firstByteTimeout, func() {
 		stalled.Store(true)
 		cancel()
 	})

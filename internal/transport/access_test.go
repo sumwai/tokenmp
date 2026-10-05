@@ -70,6 +70,67 @@ func TestServeHTTPRecordsClientFacts(t *testing.T) {
 	}
 }
 
+// TestServeHTTPPropagatesClientRequestID 断言客户端透传的 X-Request-Id 被沿用。
+func TestServeHTTPPropagatesClientRequestID(t *testing.T) {
+	logger := &capturingLogger{}
+	handler, err := New(Options{
+		Forwarder: stubForwarder{},
+		Adapters: func(path string) (domain.Adapter, bool) {
+			if path == "/v1/chat/completions" {
+				return openaichat.New(), true
+			}
+			return nil, false
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("构造入口失败: %v", err)
+	}
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequestWithContext(context.Background(),
+		http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("X-Request-Id", "client-trace-1")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(logger.records) != 1 {
+		t.Fatalf("应写出恰好一条访问记录，实际 %d 条", len(logger.records))
+	}
+	if got := logger.records[0].RequestID; got != "client-trace-1" {
+		t.Errorf("request id = %q，期望沿用客户端透传的 client-trace-1", got)
+	}
+}
+
+// TestServeHTTPGeneratesRequestID 断言未透传时入口生成非空 request id。
+func TestServeHTTPGeneratesRequestID(t *testing.T) {
+	logger := &capturingLogger{}
+	handler, err := New(Options{
+		Forwarder: stubForwarder{},
+		Adapters: func(path string) (domain.Adapter, bool) {
+			if path == "/v1/chat/completions" {
+				return openaichat.New(), true
+			}
+			return nil, false
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("构造入口失败: %v", err)
+	}
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequestWithContext(context.Background(),
+		http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(logger.records) != 1 {
+		t.Fatalf("应写出恰好一条访问记录，实际 %d 条", len(logger.records))
+	}
+	if logger.records[0].RequestID == "" {
+		t.Error("未透传 X-Request-Id 时入口应生成非空 request id")
+	}
+}
+
 // TestTruncateUserAgent 守护按字符（而非字节）截断：
 // 多字节的 User-Agent 不能被截成半个字符，否则日志里会出现乱码。
 func TestTruncateUserAgent(t *testing.T) {

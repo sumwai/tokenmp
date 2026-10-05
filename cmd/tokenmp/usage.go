@@ -10,12 +10,12 @@ import (
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
-// usageWriteTimeout 是写用量流水的耗时上限。
+// defaultUsageWriteTimeout 是未配置写用量流水的耗时上限时的默认值。
 //
 // 写流水发生在请求终态之后：客户端断开会让请求上下文被取消，而这次转发已经在
 // 上游产生过用量。因此先摘掉取消信号再写，否则断连就把流水丢掉；
 // 本超时用来兜住「数据库挂死导致协程悬空」。
-const usageWriteTimeout = 5 * time.Second
+const defaultUsageWriteTimeout = 5 * time.Second
 
 // 本文件把流水线交出的用量事实写成 billing_usage 流水。
 //
@@ -29,17 +29,22 @@ type logFunc func(msg string, args ...any)
 type storeUsageRecorder struct {
 	store gatewayStore
 	logf  logFunc
+	// writeTimeout 是单次写用量流水的耗时上限；非正时取 defaultUsageWriteTimeout。
+	writeTimeout time.Duration
 }
 
 // 编译期断言：装配层的记账实现满足流水线的用量记录接口。
 var _ domain.UsageRecorder = (*storeUsageRecorder)(nil)
 
-// newUsageRecorder 构造记账实现；logf 为 nil 时用 slog 的默认 logger。
-func newUsageRecorder(st gatewayStore, logf logFunc) *storeUsageRecorder {
+// newUsageRecorder 构造记账实现；writeTimeout 非正时取默认值，logf 为 nil 时用 slog 的默认 logger。
+func newUsageRecorder(st gatewayStore, writeTimeout time.Duration, logf logFunc) *storeUsageRecorder {
 	if logf == nil {
 		logf = slog.Warn
 	}
-	return &storeUsageRecorder{store: st, logf: logf}
+	if writeTimeout <= 0 {
+		writeTimeout = defaultUsageWriteTimeout
+	}
+	return &storeUsageRecorder{store: st, logf: logf, writeTimeout: writeTimeout}
 }
 
 // RecordUsage 把一次转发的用量写进 billing_usage。
@@ -58,7 +63,7 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 		r.logf("用量分量没有对应的计费指标，已丢弃",
 			"component", name, "request_id", rec.RequestID)
 	}
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), usageWriteTimeout)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeTimeout)
 	defer cancel()
 	if _, err := r.store.InsertUsage(writeCtx, store.UsageRow{
 		MerchantID: id.merchantID,

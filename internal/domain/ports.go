@@ -347,6 +347,21 @@ type RoutedModelSink interface {
 	SetRoutedModel(model string)
 }
 
+// UpstreamAttemptSink 接收一次上游尝试的归属事实，供入口层汇总访问日志。
+//
+// 它与 RoutedModelSink 同一机制：渠道 id 与上游状态码只有流水线知道，而汇总日志的时机在
+// 入口层请求结束处；经写出目标回流可以避免引入请求级全局状态。写出目标不实现本接口时，
+// 流水线跳过回流，不影响转发。
+//
+// 一次请求可能产生多次尝试（重试与回退），实现方只需保留最后一次的取值：
+// 访问日志记录的是最终履约（或最终失败）的那次。
+type UpstreamAttemptSink interface {
+	// SetAttemptChannel 记录本次尝试命中的渠道数字主键；0 表示尚未确定。
+	SetAttemptChannel(channelID uint64)
+	// SetUpstreamStatus 记录本次尝试的上游 HTTP 状态码；0 表示未取得（例如连接失败）。
+	SetUpstreamStatus(status int)
+}
+
 // AttemptOutcome 是一次上游尝试的结果分类。
 type AttemptOutcome string
 

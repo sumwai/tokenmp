@@ -38,8 +38,13 @@ const (
 	// defaultUpstreamAttempts 是单请求最多发起的上游尝试次数（含首次）。
 	// 取值 2 对应本轮口径：首次失败后至多换下一条候选一次。
 	defaultUpstreamAttempts = 2
-	// defaultUpstreamTimeout 是渠道未配置超时时使用的兜底上游超时。
-	defaultUpstreamTimeout = 60 * time.Second
+	// defaultCompleteTimeout 是未配置非流式整体超时时的兜底值。
+	defaultCompleteTimeout = 120 * time.Second
+	// 上游连接池里与 DefaultTransport 对齐的基本超时。
+	upstreamDialTimeout           = 30 * time.Second
+	upstreamKeepAlive             = 30 * time.Second
+	upstreamTLSHandshakeTimeout   = 10 * time.Second
+	upstreamExpectContinueTimeout = time.Second
 	// readHeaderTimeout 是读取客户端请求头的最长等待时间，
 	// 用来拦住只发一半请求头的连接占住服务端连接（Slowloris）。
 	readHeaderTimeout = 30 * time.Second
@@ -74,12 +79,26 @@ var _ gatewayStore = (*store.Store)(nil)
 
 // gatewayOptions 是装配的可调参数；零值字段取对应默认值。
 type gatewayOptions struct {
-	// UpstreamTimeout 是渠道未配置超时时使用的兜底上游超时。
-	UpstreamTimeout time.Duration
+	// CompleteTimeout 是非流式请求的整段超时：既是 handler 侧整体 deadline，
+	// 也是渠道未配置超时时上游调用的兜底截止时间。
+	CompleteTimeout time.Duration
+	// StreamFirstByteTimeout、StreamIdleTimeout 是流式转发的两级超时：
+	// 前者限住等待上游第一个字节的时长，后者限住两个字节之间的最大间隔。
+	StreamFirstByteTimeout time.Duration
+	StreamIdleTimeout      time.Duration
+	// UpstreamMaxIdleConns、UpstreamMaxIdleConnsPerHost 与 UpstreamIdleConnTimeout
+	// 是上游 HTTP 连接池参数；零值交由 http.Transport 自身语义处理。
+	UpstreamMaxIdleConns        int
+	UpstreamMaxIdleConnsPerHost int
+	UpstreamIdleConnTimeout     time.Duration
 	// MaxAttempts 是单请求最多发起的上游尝试次数（含首次）。
 	MaxAttempts int
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
 	Now func() time.Time
+	// UsageWriteTimeout 是写用量流水的耗时上限；非正时取默认值。
+	UsageWriteTimeout time.Duration
+	// Logger 是结构化请求日志实现；nil 时不记录。
+	Logger transport.AccessLogger
 }
 
 // gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -104,9 +123,9 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 	if attempts <= 0 {
 		attempts = defaultUpstreamAttempts
 	}
-	timeout := opts.UpstreamTimeout
-	if timeout <= 0 {
-		timeout = defaultUpstreamTimeout
+	completeTimeout := opts.CompleteTimeout
+	if completeTimeout <= 0 {
+		completeTimeout = defaultCompleteTimeout
 	}
 
 	// 协议适配器做成单例：不持有跨请求业务状态（流式状态由 NewStream 派生），可按协议共享。
@@ -133,12 +152,14 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 	}
 
 	headers := credential.NewWithResolver(storeCredentialResolver{store: st})
-	upstreamHTTP := &http.Client{}
+	upstreamHTTP := &http.Client{Transport: newUpstreamTransport(opts)}
 	upstreamClient, err := upstream.New(upstream.Options{
-		HTTPClient:     upstreamHTTP,
-		Headers:        headers,
-		Adapters:       lookupAdapter,
-		DefaultTimeout: timeout,
+		HTTPClient:             upstreamHTTP,
+		Headers:                headers,
+		Adapters:               lookupAdapter,
+		DefaultTimeout:         completeTimeout,
+		StreamFirstByteTimeout: opts.StreamFirstByteTimeout,
+		StreamIdleTimeout:      opts.StreamIdleTimeout,
 	})
 	if err != nil {
 		return nil, err
@@ -148,7 +169,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Adapters:    lookupAdapter,
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
-		Usage:       newUsageRecorder(st, nil),
+		Usage:       newUsageRecorder(st, opts.UsageWriteTimeout, nil),
 		MaxAttempts: attempts,
 	})
 	if err != nil {
@@ -156,8 +177,10 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 	}
 
 	handler, err := transport.New(transport.Options{
-		Forwarder: forwarder,
-		Adapters:  resolveAdapter,
+		Forwarder:       forwarder,
+		Adapters:        resolveAdapter,
+		CompleteTimeout: completeTimeout,
+		Logger:          opts.Logger,
 	})
 	if err != nil {
 		return nil, err
@@ -174,6 +197,27 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 	mux.HandleFunc("/", notFoundJSON)
 
 	return &gateway{handler: mux, upstream: upstreamHTTP}, nil
+}
+
+// newUpstreamTransport 按配置构造上游连接池。
+//
+// 不复用 http.DefaultTransport：它是进程级共享的全局对象，改其连接池参数会影响同进程里
+// 所有 HTTP 客户端，关闭空闲连接也会连带关掉别人的。自建一份，附带上与 DefaultTransport
+// 相同的基本超时；代理取自环境变量，与标准库一致。
+func newUpstreamTransport(opts gatewayOptions) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   upstreamDialTimeout,
+			KeepAlive: upstreamKeepAlive,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          opts.UpstreamMaxIdleConns,
+		MaxIdleConnsPerHost:   opts.UpstreamMaxIdleConnsPerHost,
+		IdleConnTimeout:       opts.UpstreamIdleConnTimeout,
+		TLSHandshakeTimeout:   upstreamTLSHandshakeTimeout,
+		ExpectContinueTimeout: upstreamExpectContinueTimeout,
+	}
 }
 
 // healthz 是健康检查处理器：固定返回 200 与纯文本 ok。
@@ -200,9 +244,15 @@ func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
 // 否则一个商家的密钥可以打到另一个商家的渠道。
 type storeRouteResolver struct {
 	store gatewayStore
+	// intN 是加权随机的随机源，返回 [0, n) 内的整数；nil 时用 defaultIntN。
+	// 注入后同优先级候选的首选可被测试固定。
+	intN func(int) int
 }
 
-// Candidates 返回本次请求在客户端协议与商家下的候选渠道，按 priority 降序。
+// Candidates 返回本次请求在客户端协议与商家下的候选渠道。
+//
+// 存储层按 priority 降序、同优先级按渠道 id 稳定排序返回；这里再在每组内部做加权随机，
+// 把选中项提到组首作为首选，其余候选保持原顺序供流水线回退。
 func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request) ([]domain.Route, error) {
 	if req == nil {
 		return nil, nil
@@ -216,8 +266,11 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 	if err != nil {
 		return nil, err
 	}
-	routes := make([]domain.Route, 0, len(candidates))
-	for _, c := range candidates {
+	// 拷贝后再重排：存储替身可能返回共享切片，就地重排会污染下一次调用。
+	ordered := append([]store.RouteCandidate(nil), candidates...)
+	orderCandidatesByWeight(ordered, r.intN)
+	routes := make([]domain.Route, 0, len(ordered))
+	for _, c := range ordered {
 		routes = append(routes, domain.Route{
 			ChannelID:        c.ChannelID,
 			UpstreamID:       strconv.FormatUint(c.ChannelID, 10),
@@ -225,7 +278,7 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 			UpstreamModel:    c.UpstreamModel,
 			BaseURL:          endpointURL(c.BaseURL, req.Protocol),
 			CredentialRef:    c.CredGroup,
-			RequestOverrides: c.RequestOverrides,
+			RequestOverrides: sanitizeRequestOverrides(c),
 		})
 	}
 	return routes, nil
@@ -318,7 +371,16 @@ func cmdServe(stderr io.Writer) int {
 		return exitFailure
 	}
 
-	gw, err := newGateway(st, gatewayOptions{})
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout:             cfg.CompleteTimeout,
+		StreamFirstByteTimeout:      cfg.StreamFirstByteTimeout,
+		StreamIdleTimeout:           cfg.StreamIdleTimeout,
+		UpstreamMaxIdleConns:        cfg.UpstreamMaxIdleConns,
+		UpstreamMaxIdleConnsPerHost: cfg.UpstreamMaxIdleConnsPerHost,
+		UpstreamIdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
+		UsageWriteTimeout:           cfg.UsageWriteTimeout,
+		Logger:                      newAccessLogger(os.Stdout),
+	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
 		return exitFailure

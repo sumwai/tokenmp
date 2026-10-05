@@ -129,9 +129,12 @@ func (s *Store) LookupAPIKey(ctx context.Context, keyHash string, now time.Time)
 // 它是库表事实的直出：BaseURL 只到端点段之前，协议端点段由装配层按本次协议拼接；
 // Config 与 RequestOverrides 是原始 JSON，存储层不解释其结构。
 type RouteCandidate struct {
-	ChannelID            uint64
-	BaseURL              string
-	CredGroup            string
+	ChannelID uint64
+	BaseURL   string
+	CredGroup string
+	// Priority 是渠道的路由排序值，值大者优先；同优先级内由选路策略决定顺序。
+	// 存储层按它降序返回，但同优先级内的加权随机不在存储层完成，故把取值交给调用方。
+	Priority             int
 	Weight               int
 	RateLimitQPS         int
 	RateLimitConcurrency int
@@ -140,7 +143,7 @@ type RouteCandidate struct {
 	RequestOverrides     []byte
 }
 
-const routeCandidatesSQL = `SELECT c.id, c.base_url, c.cred_group, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
+const routeCandidatesSQL = `SELECT c.id, c.base_url, c.cred_group, c.priority, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
 FROM upstream_channel c
 JOIN upstream_model_map m ON m.channel_id = c.id
 WHERE c.type = ? AND c.enabled = 1 AND c.merchant_id = ? AND m.model = ? AND m.enabled = 1
@@ -149,7 +152,7 @@ ORDER BY c.priority DESC, c.id`
 // routeCandidates 查某商家下、某协议方言与某模型命中的候选渠道。
 //
 // 只按 priority 降序返回，同优先级内按渠道 id 稳定排序；同优先级内的加权随机属选路策略，
-// 不放在存储层 —— 存储层只回答「有哪些候选」。
+// 不放在存储层 —— 存储层只回答「有哪些候选」，因此把 priority 一并交给调用方分组。
 func routeCandidates(ctx context.Context, q querier, channelType ChannelType, model string, merchantID uint64) ([]RouteCandidate, error) {
 	if err := ValidateChannelType(channelType); err != nil {
 		return nil, err
@@ -169,7 +172,7 @@ func routeCandidates(ctx context.Context, q querier, channelType ChannelType, mo
 	var candidates []RouteCandidate
 	for rows.Next() {
 		var c RouteCandidate
-		if err := rows.Scan(&c.ChannelID, &c.BaseURL, &c.CredGroup, &c.Weight,
+		if err := rows.Scan(&c.ChannelID, &c.BaseURL, &c.CredGroup, &c.Priority, &c.Weight,
 			&c.RateLimitQPS, &c.RateLimitConcurrency, &c.Config, &c.UpstreamModel, &c.RequestOverrides); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
 		}

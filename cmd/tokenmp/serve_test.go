@@ -85,7 +85,7 @@ func activeAuth() *store.APIKeyAuth {
 // newTestGateway 装配网关；装配失败即让用例失败。
 func newTestGateway(t *testing.T, st gatewayStore) *gateway {
 	t.Helper()
-	gw, err := newGateway(st, gatewayOptions{UpstreamTimeout: 5 * time.Second})
+	gw, err := newGateway(st, gatewayOptions{CompleteTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatalf("装配网关失败：%v", err)
 	}
@@ -249,6 +249,24 @@ func TestGatewayForwardingThreeDialects(t *testing.T) {
 	}
 }
 
+// TestNewUpstreamTransportUsesConfiguredPool 断言连接池参数来自配置而非常量。
+func TestNewUpstreamTransportUsesConfiguredPool(t *testing.T) {
+	transport := newUpstreamTransport(gatewayOptions{
+		UpstreamMaxIdleConns:        100,
+		UpstreamMaxIdleConnsPerHost: 32,
+		UpstreamIdleConnTimeout:     90 * time.Second,
+	})
+	if transport.MaxIdleConns != 100 {
+		t.Errorf("MaxIdleConns = %d，期望 100", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 32 {
+		t.Errorf("MaxIdleConnsPerHost = %d，期望 32", transport.MaxIdleConnsPerHost)
+	}
+	if transport.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %s，期望 90s", transport.IdleConnTimeout)
+	}
+}
+
 // TestGatewayHealthz 断言健康检查不鉴权且固定 200。
 func TestGatewayHealthz(t *testing.T) {
 	server := httptest.NewServer(newTestGateway(t, &fakeGatewayStore{}).handler)
@@ -345,6 +363,37 @@ func TestGatewayUpstreamUnreachableIsJSON(t *testing.T) {
 	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
 		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
 	assertJSONError(t, result, http.StatusBadGateway)
+}
+
+// TestGatewayNonStreamTimeoutIsJSON504 覆盖非流式整体超时回 JSON 504。
+//
+// 上游一直不返回，handler 侧 deadline 到时取消上游调用，错误按上游超时编码。
+func TestGatewayNonStreamTimeoutIsJSON504(t *testing.T) {
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer slowUpstream.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		routes: []store.RouteCandidate{{
+			ChannelID: 10, BaseURL: slowUpstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		}},
+		credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+	}
+	gw, err := newGateway(st, gatewayOptions{CompleteTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	assertJSONError(t, result, http.StatusGatewayTimeout)
 }
 
 // TestGatewayUnregisteredPathIsJSON 覆盖未注册路径回 JSON 404 而不是标准库的纯文本。
