@@ -98,6 +98,18 @@ func nullArg(s string) any {
 	return s
 }
 
+// optionalStringArg 把可空字符串转成驱动参数；nil 即 SQL NULL。
+//
+// 与 nullArg 的分工：nullArg 按空串判定「未设置」，适用于列语义里空串无意义、
+// 空串与 NULL 同义的场景；本函数按指针判定，供调用方显式区分「有值」与
+// 「无值」，用于 unit_rate 这类 0 与 NULL 同义但空串非法的数值列。
+func optionalStringArg(s *string) any {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
 // timeArg 把可空时间转成驱动参数。
 func timeArg(t *time.Time) any {
 	if t == nil {

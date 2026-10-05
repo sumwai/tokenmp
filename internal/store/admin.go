@@ -736,6 +736,9 @@ func (s *Store) SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) e
 }
 
 // BucketRow 是 account_bucket 的一行，供管理面列表与发放使用。
+//
+// UnitRate 为 nil 即 SQL NULL，表示该账本没有锁定的折算率（赠送、手工充值）；
+// 购买生成的账本写入 price / qty。NULL 与 0 在扣减时同义，见 internal/settlement。
 type BucketRow struct {
 	ID         uint64             `json:"id"`
 	AccountID  uint64             `json:"account_id"`
@@ -747,11 +750,12 @@ type BucketRow struct {
 	Fallback   billing.Fallback   `json:"fallback"`
 	Source     billing.Source     `json:"source"`
 	Priority   int                `json:"priority"`
+	UnitRate   *string            `json:"unit_rate"`
 }
 
 const insertBucketSQL = `INSERT INTO account_bucket
-  (account_id, merchant_id, unit, total, remaining, expires_at, fallback, source, priority)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  (account_id, merchant_id, unit, total, remaining, expires_at, fallback, source, priority, unit_rate)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // insertBucket 写一行账本；remaining 初值等于 total。
 func insertBucket(ctx context.Context, ex executor, b BucketRow) (uint64, error) {
@@ -775,7 +779,7 @@ func insertBucket(ctx context.Context, ex executor, b BucketRow) (uint64, error)
 	}
 	res, err := ex.ExecContext(ctx, insertBucketSQL,
 		b.AccountID, b.MerchantID, b.Unit, b.Total, b.Remaining, timeArg(b.ExpiresAt),
-		b.Fallback, b.Source, b.Priority)
+		b.Fallback, b.Source, b.Priority, optionalStringArg(b.UnitRate))
 	if err != nil {
 		return 0, describeWriteError("account_bucket", err)
 	}
@@ -787,7 +791,7 @@ func (s *Store) InsertBucket(ctx context.Context, b BucketRow) (uint64, error) {
 	return insertBucket(ctx, s.db, b)
 }
 
-const listBucketsSQL = `SELECT id, account_id, merchant_id, unit, total, remaining, expires_at, fallback, source, priority
+const listBucketsSQL = `SELECT id, account_id, merchant_id, unit, total, remaining, expires_at, fallback, source, priority, unit_rate
 FROM account_bucket`
 
 const listBucketsByAccountSQL = listBucketsSQL + " WHERE account_id = ? ORDER BY id"
@@ -814,9 +818,10 @@ func listBuckets(ctx context.Context, q querier, accountID uint64) ([]BucketRow,
 			fallbackRaw string
 			sourceRaw   string
 			expiresAt   scanTime
+			unitRate    sql.NullString
 		)
 		if err := rows.Scan(&b.ID, &b.AccountID, &b.MerchantID, &unitRaw, &b.Total, &b.Remaining,
-			&expiresAt, &fallbackRaw, &sourceRaw, &b.Priority); err != nil {
+			&expiresAt, &fallbackRaw, &sourceRaw, &b.Priority, &unitRate); err != nil {
 			return nil, fmt.Errorf("store: 解析 account_bucket 行失败: %w", err)
 		}
 		b.Unit = billing.UnitSettleFromDB(unitRaw)
@@ -824,6 +829,10 @@ func listBuckets(ctx context.Context, q querier, accountID uint64) ([]BucketRow,
 		b.Source = billing.SourceFromDB(sourceRaw)
 		if expiresAt.Valid {
 			b.ExpiresAt = &expiresAt.Time
+		}
+		if unitRate.Valid {
+			v := unitRate.String
+			b.UnitRate = &v
 		}
 		buckets = append(buckets, b)
 	}

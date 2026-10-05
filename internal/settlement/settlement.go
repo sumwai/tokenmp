@@ -83,6 +83,8 @@ type Rule struct {
 // Bucket 是一行账本存量。
 //
 // ExpiresAt 为 nil 表示不过期，扣减时排在所有会过期的包之后。
+// UnitRate 是购买时刻锁定的单位货币价值（price / qty）；零值表示无折算率，
+// 包扣尽后的差额退化为记欠额。
 type Bucket struct {
 	ID        uint64
 	Unit      billing.UnitSettle
@@ -90,6 +92,7 @@ type Bucket struct {
 	ExpiresAt *time.Time
 	Fallback  billing.Fallback
 	Priority  int
+	UnitRate  decimal.Decimal
 }
 
 // Usage 是一条待落库的结算流水。
@@ -156,10 +159,14 @@ type Charge struct {
 }
 
 // DeductionLine 是一行扣减明细。
+//
+// Rate 是跨单位折算率：非零表示这一行由其它结算单位的差额按 Rate 折算而来，
+// 零值表示原始单位的直接扣减。明细带上 Rate 后，转换部分可从流水本身复算。
 type DeductionLine struct {
 	BucketID uint64
 	Unit     billing.UnitSettle
 	Qty      decimal.Decimal
+	Rate     decimal.Decimal
 }
 
 // DeductionPlan 是一次扣减的结果：明细、各账本新存量与欠额。

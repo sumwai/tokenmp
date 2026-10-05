@@ -713,8 +713,39 @@ func TestBuyComputesAndDerivesBucket(t *testing.T) {
 	if gotBucket.ExpiresAt == nil || !gotBucket.ExpiresAt.Equal(fixedNow.AddDate(0, 0, 30)) {
 		t.Errorf("到期时间不符：%v", gotBucket.ExpiresAt)
 	}
+	// 折算率 = 商品单价 / 商品每份数量 = 10 / 100000000。
+	if gotBucket.UnitRate == nil || *gotBucket.UnitRate != "0.0000001" {
+		t.Errorf("派生账本折算率不符：%+v", gotBucket.UnitRate)
+	}
 	if result.PurchaseID != 11 || result.BucketID != 12 || result.Total != "200000000" {
 		t.Errorf("返回结果不符：%+v", result)
+	}
+	if result.UnitRate != "0.0000001" {
+		t.Errorf("返回折算率 = %q，期望 0.0000001", result.UnitRate)
+	}
+}
+
+// TestBuyUnitRateRounds 覆盖折算率按 8 位四舍五入：10 / 3 = 3.33333333。
+func TestBuyUnitRateRounds(t *testing.T) {
+	f := &fakeStore{}
+	f.getProduct = func(_ context.Context, id uint64) (*store.Product, error) {
+		return &store.Product{ID: id, MerchantID: 8, Name: "散装", Unit: billing.UnitSettleToken, Qty: "3", Price: "10"}, nil
+	}
+	var gotBucket store.BucketRow
+	f.createPurchase = func(_ context.Context, _ store.Purchase, b store.BucketRow) (uint64, uint64, error) {
+		gotBucket = b
+		return 1, 2, nil
+	}
+	s := newService(f)
+	result, err := s.Buy(context.Background(), BuyInput{AccountID: 3, ProductID: 5, Qty: "1"})
+	if err != nil {
+		t.Fatalf("购买失败：%v", err)
+	}
+	if gotBucket.UnitRate == nil || *gotBucket.UnitRate != "3.33333333" {
+		t.Errorf("折算率 = %+v，期望 3.33333333", gotBucket.UnitRate)
+	}
+	if result.UnitRate != "3.33333333" {
+		t.Errorf("返回折算率 = %q，期望 3.33333333", result.UnitRate)
 	}
 }
 

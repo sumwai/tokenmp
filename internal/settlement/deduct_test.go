@@ -132,3 +132,151 @@ func TestNeedAfterMultiplier(t *testing.T) {
 		t.Errorf("token 扣减量 = %s，期望 1500", got[1].Qty)
 	}
 }
+
+// TestPlanDeductionConvertsOverflowByUnitRate 覆盖非货币包扣尽后按锁定的折算率
+// 把差额折成 currency：转换行带折算率，currency 钱包被扣成负数。
+func TestPlanDeductionConvertsOverflowByUnitRate(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "100"),
+			Fallback: billing.FallbackChargeBalance, UnitRate: dec(t, "0.1")},
+		{ID: 2, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "300")}}, buckets, now)
+
+	if len(plan.Lines) != 2 {
+		t.Fatalf("应产生 token 扣净与折算 currency 两行：%#v", plan.Lines)
+	}
+	if got := plan.Lines[0]; got.BucketID != 1 || got.Unit != billing.UnitSettleToken ||
+		got.Qty.String() != "100" || got.Rate.IsPositive() {
+		t.Errorf("第 1 行应为 token 直接扣减且无折算率：%#v", got)
+	}
+	if got := plan.Lines[1]; got.BucketID != 2 || got.Unit != billing.UnitSettleCurrency ||
+		got.Qty.String() != "20" || got.Rate.String() != "0.1" {
+		t.Errorf("第 2 行应为 200 × 0.1 = 20 currency 且带折算率：%#v", got)
+	}
+	if plan.Updates[1].String() != "0" {
+		t.Errorf("token 余量 = %s，期望 0", plan.Updates[1])
+	}
+	if plan.Updates[2].String() != "-20" {
+		t.Errorf("currency 余量 = %s，期望 -20", plan.Updates[2])
+	}
+	if len(plan.Shortfall) != 0 {
+		t.Errorf("转换成功后不应有欠额：%#v", plan.Shortfall)
+	}
+}
+
+// TestPlanDeductionMissingUnitRateFallsBackToShortfall 覆盖折算率为零值（对应
+// NULL）时退化为记欠额：不按 1:1 把 200 token 记成 200 currency。
+func TestPlanDeductionMissingUnitRateFallsBackToShortfall(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "100"),
+			Fallback: billing.FallbackChargeBalance},
+		{ID: 2, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "300")}}, buckets, now)
+
+	if len(plan.Lines) != 1 {
+		t.Fatalf("无折算率时不应产生 currency 行：%#v", plan.Lines)
+	}
+	if plan.Shortfall[billing.UnitSettleToken].String() != "200" {
+		t.Errorf("欠额 = %#v，期望 token=200", plan.Shortfall)
+	}
+	if _, ok := plan.Updates[2]; ok {
+		t.Errorf("无折算率时 currency 钱包不应被触达：%#v", plan.Updates)
+	}
+}
+
+// TestPlanDeductionRejectIgnoresUnitRate 覆盖 fallback=reject 的包：
+// 即使带折算率也不做跨单位转换，差额记欠额。
+func TestPlanDeductionRejectIgnoresUnitRate(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "100"),
+			Fallback: billing.FallbackReject, UnitRate: dec(t, "0.1")},
+		{ID: 2, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "300")}}, buckets, now)
+
+	if len(plan.Lines) != 1 {
+		t.Fatalf("reject 包不应产生折算行：%#v", plan.Lines)
+	}
+	if plan.Shortfall[billing.UnitSettleToken].String() != "200" {
+		t.Errorf("欠额 = %#v，期望 token=200", plan.Shortfall)
+	}
+}
+
+// TestPlanDeductionConvertedOverflowFillsCurrencyInOrder 覆盖混合账本扣减序：
+// 折算出的 currency 先扣正余量的 currency 包，余量不足的部分才挂到后付钱包。
+func TestPlanDeductionConvertedOverflowFillsCurrencyInOrder(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "100"),
+			Fallback: billing.FallbackChargeBalance, UnitRate: dec(t, "0.1")},
+		{ID: 2, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "5"),
+			Fallback: billing.FallbackReject, Priority: 50},
+		{ID: 3, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance, Priority: 100},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "300")}}, buckets, now)
+
+	if len(plan.Lines) != 3 {
+		t.Fatalf("应为 token + currency 包 + currency 钱包三行：%#v", plan.Lines)
+	}
+	if got := plan.Lines[1]; got.BucketID != 2 || got.Qty.String() != "5" || got.Rate.String() != "0.1" {
+		t.Errorf("第 2 行应为 currency 包扣 5 且带折算率：%#v", got)
+	}
+	if got := plan.Lines[2]; got.BucketID != 3 || got.Qty.String() != "15" || got.Rate.String() != "0.1" {
+		t.Errorf("第 3 行应为后付钱包扣 15 且带折算率：%#v", got)
+	}
+	if plan.Updates[2].String() != "0" {
+		t.Errorf("currency 包余量 = %s，期望 0", plan.Updates[2])
+	}
+	if plan.Updates[3].String() != "-15" {
+		t.Errorf("currency 钱包余量 = %s，期望 -15", plan.Updates[3])
+	}
+	if len(plan.Shortfall) != 0 {
+		t.Errorf("转换成功后不应有欠额：%#v", plan.Shortfall)
+	}
+}
+
+// TestPlanDeductionRoundsConvertedAmount 覆盖折算结果按金额标度 8 位四舍五入。
+func TestPlanDeductionRoundsConvertedAmount(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance, UnitRate: dec(t, "0.123456789")},
+		{ID: 2, Unit: billing.UnitSettleCurrency, Remaining: dec(t, "0"),
+			Fallback: billing.FallbackChargeBalance},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "1")}}, buckets, now)
+
+	if len(plan.Lines) != 1 {
+		t.Fatalf("应产生一行折算扣减：%#v", plan.Lines)
+	}
+	if got := plan.Lines[0].Qty.String(); got != "0.12345679" {
+		t.Errorf("折算量 = %s，期望 0.12345679（8 位四舍五入）", got)
+	}
+	if plan.Updates[2].String() != "-0.12345679" {
+		t.Errorf("currency 余量 = %s，期望 -0.12345679", plan.Updates[2])
+	}
+}
+
+// TestPlanDeductionConvertedOverflowWithoutSink 覆盖无 currency 账本可承接时，
+// 折算后的差额记为 currency 欠额：折算率已知，欠额以货币口径留痕。
+func TestPlanDeductionConvertedOverflowWithoutSink(t *testing.T) {
+	buckets := []Bucket{
+		{ID: 1, Unit: billing.UnitSettleToken, Remaining: dec(t, "100"),
+			Fallback: billing.FallbackChargeBalance, UnitRate: dec(t, "0.1")},
+	}
+	plan := PlanDeduction([]Charge{{Unit: billing.UnitSettleToken, Qty: dec(t, "300")}}, buckets, now)
+
+	if len(plan.Lines) != 1 {
+		t.Fatalf("无 currency 账本时只应有 token 一行：%#v", plan.Lines)
+	}
+	if plan.Shortfall[billing.UnitSettleCurrency].String() != "20" {
+		t.Errorf("欠额 = %#v，期望 currency=20", plan.Shortfall)
+	}
+	if _, ok := plan.Shortfall[billing.UnitSettleToken]; ok {
+		t.Errorf("已折算的差额不应再记 token 欠额：%#v", plan.Shortfall)
+	}
+}

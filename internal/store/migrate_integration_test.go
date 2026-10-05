@@ -20,7 +20,7 @@ import (
 // envTestDSN 指向一个可丢弃的库：本测试会先删掉已知表再重建。
 const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 
-// knownTables 与 migrations/0001_init.sql、0002_billing.sql 对应，
+// knownTables 与 migrations/0001_init.sql、0002_billing.sql、0003_account_bucket_unit_rate.sql 对应，
 // 删除顺序无关紧要（全库无外键）。
 var knownTables = []string{
 	"billing_adjustment",
@@ -82,13 +82,16 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	}
 
 	assertPlatformMerchant(ctx, t, s.DB())
+	assertUnitRateColumn(ctx, t, s.DB())
 
 	// 重复启动的幂等性：第二次迁移不应因表已存在而失败，也不应重复插入种子行。
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 2)
+	assertMigrationVersionCount(ctx, t, s.DB(), 3)
 	assertPlatformMerchantCount(ctx, t, s.DB(), 1)
+	// 第二次迁移不应重复加列：列仍存在且可空。
+	assertUnitRateColumn(ctx, t, s.DB())
 }
 
 func dropKnownTables(ctx context.Context, t *testing.T, db *sql.DB) {
@@ -162,6 +165,22 @@ func decimalEqual(a, b string) bool {
 	ra, okA := new(big.Rat).SetString(a)
 	rb, okB := new(big.Rat).SetString(b)
 	return okA && okB && ra.Cmp(rb) == 0
+}
+
+// assertUnitRateColumn 断言 0003 加上的可空折算率列存在且为 NULL 语义。
+func assertUnitRateColumn(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var nullable string
+	err := db.QueryRowContext(ctx,
+		"SELECT is_nullable FROM information_schema.columns "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account_bucket' AND column_name = 'unit_rate'").
+		Scan(&nullable)
+	if err != nil {
+		t.Fatalf("查询 account_bucket.unit_rate 列失败：%v", err)
+	}
+	if nullable != "YES" {
+		t.Errorf("account_bucket.unit_rate 应为可空列，得到 is_nullable=%q", nullable)
+	}
 }
 
 // TestBillingStoreRoundTrip 在真实 MySQL 上把 0002 的新表走一遍写读回环。
@@ -363,5 +382,5 @@ func TestBillingStoreRoundTrip(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 2)
+	assertMigrationVersionCount(ctx, t, s.DB(), 3)
 }

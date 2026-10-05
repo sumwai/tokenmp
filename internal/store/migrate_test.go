@@ -171,6 +171,36 @@ func TestBillingMigrationContent(t *testing.T) {
 	}
 }
 
+// TestUnitRateMigrationShape 锁定 0003 的形状：只加一列、可空、自动检测列是否
+// 已存在。MySQL 没有 ADD COLUMN IF NOT EXISTS，若改成裸 ALTER，在「DDL 已生效、
+// 版本登记失败」的重跑场景会因列已存在而中断，这里用断言阻止那次简化。
+func TestUnitRateMigrationShape(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0003_account_bucket_unit_rate.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	script := strings.Join(statements, "\n")
+
+	if len(statements) != 4 {
+		t.Errorf("0003 应拆成 4 条语句（SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v", len(statements), statements)
+	}
+	if !strings.Contains(script, "ALTER TABLE account_bucket ADD COLUMN unit_rate DECIMAL(24,8) NULL") {
+		t.Error("0003 应加可空的 DECIMAL(24,8) unit_rate 列")
+	}
+	for _, want := range []string{"information_schema.COLUMNS", "PREPARE", "EXECUTE", "DEALLOCATE PREPARE"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("0003 缺少可重跑所需的 %q", want)
+		}
+	}
+	// 只加列不改存量：不得出现 UPDATE / INSERT，也不建新表。
+	for _, forbidden := range []string{"UPDATE account_bucket", "INSERT INTO", "CREATE TABLE"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("0003 不应包含 %q", forbidden)
+		}
+	}
+}
+
 func TestParseMigrationName(t *testing.T) {
 	tests := []struct {
 		name        string

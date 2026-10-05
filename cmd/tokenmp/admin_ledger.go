@@ -205,9 +205,9 @@ func adminPurchaseBuy(ctx context.Context, args []string, env *adminEnv) int {
 		return env.fail(err)
 	}
 	return env.printf(
-		"已购买 purchase=%d bucket=%d 数量=%s 实付=%s 单位=%s 到期=%s\n",
+		"已购买 purchase=%d bucket=%d 数量=%s 实付=%s 单位=%s 折算率=%s 到期=%s\n",
 		result.PurchaseID, result.BucketID, result.Total, result.PricePaid,
-		string(result.Unit), formatTimePtr(result.ExpiresAt))
+		string(result.Unit), result.UnitRate, formatTimePtr(result.ExpiresAt))
 }
 
 func adminPurchaseList(ctx context.Context, args []string, env *adminEnv) int {

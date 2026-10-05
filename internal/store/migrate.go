@@ -99,18 +99,28 @@ func (s *Store) appliedVersions(ctx context.Context) (map[int64]bool, error) {
 
 // applyMigration 逐条执行一个版本的语句，全部成功后才登记版本。
 //
-// 不在事务里执行：MySQL 的 DDL 会隐式提交，事务包不住建表语句，
+// 所有语句在同一个连接上执行：迁移里会出现会话级语法（如 0003 用
+// PREPARE / EXECUTE 实现可重跑的加列），而连接池会把不同语句分发到不同连接，
+// 会话状态随之丢失。这里显式占住一个连接，让一个版本的语句共享会话。
+//
+// 不把整组语句包进事务：MySQL 的 DDL 会隐式提交，事务包不住建表语句，
 // 包进去只会给出「原子」的错觉。原子性改由「DDL 幂等 + 最后登记版本」达成。
 func (s *Store) applyMigration(ctx context.Context, m migration) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: 获取迁移连接失败: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
 	for i, stmt := range m.statements {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("store: 迁移 %d_%s 第 %d 条语句执行失败: %w", m.version, m.name, i+1, err)
 		}
 	}
 	// ON DUPLICATE KEY UPDATE 而非裸 INSERT：并发实例可能同时通过上面的
 	// 已应用检查，各自执行完同样的 DDL 后来登记，唯一键冲突在此跳过，
 	// 不影响已经生效的表结构。
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = name",
 		m.version, m.name); err != nil {
 		return fmt.Errorf("store: 登记迁移 %d_%s 失败: %w", m.version, m.name, err)

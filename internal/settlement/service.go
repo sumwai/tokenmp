@@ -338,10 +338,14 @@ func buildSnapshot(pricing *Pricing, components []Component, rules []Rule,
 }
 
 // settlementLineJSON 是一行扣减明细。
+//
+// Rate 省略时表示原始单位的直接扣减；非空时该行由其它单位的差额按此折算率
+// 换算而来，快照可据此复算（转为 currency 的行，数量 = 原单位差额 × rate）。
 type settlementLineJSON struct {
 	BucketID uint64 `json:"bucket_id"`
 	Unit     string `json:"unit"`
 	Qty      string `json:"qty"`
+	Rate     string `json:"rate,omitempty"`
 }
 
 // settlementJSON 是 settlement 列的内容。
@@ -357,11 +361,16 @@ type settlementJSON struct {
 func buildSettlement(plan DeductionPlan) ([]byte, error) {
 	payload := settlementJSON{Lines: make([]settlementLineJSON, 0, len(plan.Lines))}
 	for _, line := range plan.Lines {
-		payload.Lines = append(payload.Lines, settlementLineJSON{
+		settlementLine := settlementLineJSON{
 			BucketID: line.BucketID,
 			Unit:     string(line.Unit),
 			Qty:      line.Qty.String(),
-		})
+		}
+		// 零折算率是「无折算」的占位，不写进明细，避免每行都带一个无意义的 0。
+		if line.Rate.IsPositive() {
+			settlementLine.Rate = line.Rate.String()
+		}
+		payload.Lines = append(payload.Lines, settlementLine)
 	}
 	if len(plan.Shortfall) > 0 {
 		payload.Shortfall = make(map[string]string, len(plan.Shortfall))
