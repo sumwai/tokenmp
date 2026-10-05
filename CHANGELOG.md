@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/sumwai/tokenmp/compare/v0.1.2...v0.1.3) (2026-10-05)
+
+
+### Features
+
+* 核心转发层——serve 子命令与三协议转发 ([#19](https://github.com/sumwai/tokenmp/issues/19)) ([793c147](https://github.com/sumwai/tokenmp/commit/793c147dd9b584d95c2b9e0922cd3c81357a9d64)), closes [#18](https://github.com/sumwai/tokenmp/issues/18)
+
 ## [0.1.2](https://github.com/sumwai/tokenmp/compare/v0.1.1...v0.1.2) (2026-10-05)
 
 
