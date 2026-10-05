@@ -232,7 +232,13 @@ func (p *Pipeline) streamAttempt(
 // newSink 按客户端协议与上游协议是否一致选择下沉目标：一致时按原始帧透传，不一致时按客户端协议重建。
 func newSink(req *domain.Request, route domain.Route, out io.Writer, streamClient domain.Adapter) (attemptSink, error) {
 	if route.Protocol == req.Protocol {
-		return &passthroughSink{out: out}, nil
+		return &passthroughSink{
+			out: out,
+			// 客户端未索取用量帧时抑制只承载用量的帧：网关为计费注入了索取开关，
+			// 上游因此多发的那一帧不该写回给未索取的客户端。跨协议重建路径不走本目标，
+			// anthropic / responses 的用量是协议固有事件，不在此抑制。
+			suppressUsageFrames: !req.UsageFramesRequested,
+		}, nil
 	}
 	model := domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel})
 	return newRebuildSink(out, streamClient, model)

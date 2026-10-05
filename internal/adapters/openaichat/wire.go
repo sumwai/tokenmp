@@ -33,6 +33,8 @@ type requestWire struct {
 	MaxCompletionTokens *int     `json:"max_completion_tokens"`
 	Temperature         *float64 `json:"temperature"`
 	Stream              bool     `json:"stream"`
+	// StreamOptions 是流式选项；形状在解码时宽容处理，不因为一个可选开关把整条请求判为失败。
+	StreamOptions json.RawMessage `json:"stream_options"`
 	// User 是 OpenAI 客户端自带的终端用户标识；非空时作为会话标识参与前缀指纹拼装。
 	User string `json:"user"`
 }

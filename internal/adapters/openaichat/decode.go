@@ -80,6 +80,8 @@ func (a *Adapter) DecodeRequest(body []byte) (*domain.Request, error) {
 		Tools:      tools,
 		ToolChoice: toolChoice,
 		Stream:     wire.Stream,
+		// 客户端是否索取流式用量帧：透传写回据此决定是否抑制只承载用量的帧。
+		UsageFramesRequested: decodeUsageFramesRequested(wire.StreamOptions),
 		// RawBody 必须是解码时的一份拷贝，不能别名调用方传入的缓冲：
 		// 调用方可能在解码后复用或改写 body（例如按原协议重放竞态）。
 		RawBody: append([]byte(nil), body...),
@@ -96,6 +98,22 @@ func (a *Adapter) DecodeRequest(body []byte) (*domain.Request, error) {
 
 func invalidRequest(message string) *domain.Error {
 	return domain.NewError(domain.CodeInvalidRequest, message)
+}
+
+// decodeUsageFramesRequested 报告客户端是否显式索取流式用量帧。
+//
+// 只认 stream_options.include_usage 为 JSON true；stream_options 缺失、非对象，
+// 或开关取值不是布尔时均按「未索取」处理。可选开关的形状错误不该把整条请求判为失败，
+// 与适配器对未知字段的宽容口径一致。
+func decodeUsageFramesRequested(raw json.RawMessage) bool {
+	if isAbsent(raw) {
+		return false
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &options); err != nil {
+		return false
+	}
+	return isJSONTrue(options[includeUsageField])
 }
 
 // decodeMessage 解码一条消息。第二个返回值为 false 表示该消息无法用内部格式表达

@@ -33,6 +33,9 @@ type attemptSink interface {
 // 不再被编码给客户端，避免出现「原始帧 + 网关自己编码的帧」的双写。
 type passthroughSink struct {
 	out io.Writer
+	// suppressUsageFrames 为真时抑制只承载用量的上游帧：客户端未索取用量帧，
+	// 网关为计费注入索取开关后上游多发的那一帧不该写给它。用量仍照常记账。
+	suppressUsageFrames bool
 	// usage 是最后一个携带用量的分片给出的用量；未取得时为零值。
 	usage domain.Usage
 	// wrote 记录是否已向客户端写出过字节。
@@ -59,9 +62,16 @@ func (s *passthroughSink) Send(_ context.Context, chunk domain.Chunk) error {
 }
 
 // SendFrame 原样写出上游帧，并先按该帧解出的分片记账。
+//
+// 分片里含只承载用量的帧且客户端未索取用量时，用量记下、原始字节不写出，也不置位 wrote：
+// 这一帧本不产生客户端字节，抑制它不应关闭换渠道重试。判定依据是分片类型而不是字节前缀，
+// 无法解析或形状非预期的帧不会产出该分片，因而原样转发，宁多勿丢。
 func (s *passthroughSink) SendFrame(_ context.Context, raw []byte, chunks []domain.Chunk) error {
 	for _, chunk := range chunks {
 		s.recordUsage(chunk)
+	}
+	if s.suppressUsageFrames && carriesUsageOnlyFrame(chunks) {
+		return nil
 	}
 	s.wrote = true
 	if _, err := s.out.Write(raw); err != nil {
@@ -69,6 +79,19 @@ func (s *passthroughSink) SendFrame(_ context.Context, raw []byte, chunks []doma
 		return clientWriteError(err)
 	}
 	return nil
+}
+
+// carriesUsageOnlyFrame 报告一帧解出的分片里是否含只承载用量的帧。
+//
+// 该分片由 openai_chat 解码器对「choices 为空且 usage 非空」的帧产出；
+// anthropic / responses 的用量是协议固有事件，不产出它，故本判据不作用于它们。
+func carriesUsageOnlyFrame(chunks []domain.Chunk) bool {
+	for _, chunk := range chunks {
+		if chunk.Kind == domain.ChunkUsage {
+			return true
+		}
+	}
+	return false
 }
 
 // recordUsage 记下分片携带的用量；后到的用量覆盖先到的。

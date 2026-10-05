@@ -22,13 +22,22 @@ import (
 // 上游用 httptest 模拟，流水记录用内存假存储；不连数据库、不依赖测试夹具。
 
 const (
+	// chatSSEContent 是 Chat Completions 上游流的内容帧部分。
+	chatSSEContent = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+
+	// chatSSEUsageFrame 是只承载用量的帧：choices 为空、usage 非空。
+	// 它是 include_usage 生效后上游追加的帧，客户端未索取时不应收到。
+	chatSSEUsageFrame = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n"
+
 	// chatSSE 是一段完整的 Chat Completions 上游流：结束原因与用量分两帧下发，
 	// 用量帧的 choices 为空，是 include_usage 生效后的标准形态。
-	chatSSE = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n" +
-		"data: [DONE]\n\n"
+	chatSSE = chatSSEContent + chatSSEUsageFrame + "data: [DONE]\n\n"
+
+	// chatSSEWithoutUsage 是客户端未索取用量时网关应当写回的内容：去掉用量帧，
+	// [DONE] 与内容帧原样保留。
+	chatSSEWithoutUsage = chatSSEContent + "data: [DONE]\n\n"
 
 	// responsesSSE 是 Responses 上游流：用量随 response.completed 事件下发。
 	responsesSSE = "event: response.output_text.delta\n" +
@@ -73,6 +82,9 @@ type streamUsageCase struct {
 	protocol     domain.Protocol
 	clientBody   string
 	upstreamBody string
+	// wantClientBody 是期望客户端收到的响应体；为空时取 upstreamBody。
+	// 客户端未索取用量帧时，上游额外的用量帧被抑制，二者因此不同。
+	wantClientBody string
 	// wantUsage 是期望落库的分量。三个方言的上游计数形状不同，但内部口径归一后
 	// 落库分量一致：Anthropic 的 input_tokens 不含缓存，由适配器换算进 input_token。
 	wantUsage map[billing.Metric]int
@@ -97,9 +109,20 @@ func streamUsageCases() []streamUsageCase {
 	}
 	return []streamUsageCase{
 		{
+			// 客户端未索取用量帧：上游的用量帧被抑制，用量仍照常落库。
 			name:             "openai_chat",
 			protocol:         domain.ProtocolOpenAIChat,
 			clientBody:       `{"model":"alias","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamBody:     chatSSE,
+			wantClientBody:   chatSSEWithoutUsage,
+			wantUsage:        metrics,
+			wantIncludeUsage: true,
+		},
+		{
+			// 客户端自行索取用量帧：用量帧正常转发。
+			name:             "openai_chat_include_usage",
+			protocol:         domain.ProtocolOpenAIChat,
+			clientBody:       `{"model":"alias","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
 			upstreamBody:     chatSSE,
 			wantUsage:        metrics,
 			wantIncludeUsage: true,
@@ -214,8 +237,8 @@ func assertUsageRow(t *testing.T, row store.UsageRow, wantModel string, want map
 	}
 }
 
-// TestStreamingUsagePersistedThreeDialects 覆盖三方言的流式端到端：
-// 逐帧透传、用量索取开关注入、usage 落 billing_usage。
+// TestStreamingUsagePersistedThreeDialects 覆盖三方言与两种索取形态的流式端到端：
+// 逐帧透传或用量帧抑制、用量索取开关注入、usage 落 billing_usage。
 func TestStreamingUsagePersistedThreeDialects(t *testing.T) {
 	for _, tt := range streamUsageCases() {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,9 +249,14 @@ func TestStreamingUsagePersistedThreeDialects(t *testing.T) {
 			if result.status != http.StatusOK {
 				t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
 			}
-			// 同协议透传要求字节序一致：客户端收到的就是上游逐帧原样字节。
-			if string(result.body) != tt.upstreamBody {
-				t.Errorf("响应体应与上游逐帧字节一致：\n实际 %s\n期望 %s", result.body, tt.upstreamBody)
+			// 同协议透传下客户端收到的就是上游逐帧字节；客户端未索取用量帧时，
+			// 只承载用量的那一帧被抑制，因此期望体由 wantClientBody 单独给出。
+			wantBody := tt.wantClientBody
+			if wantBody == "" {
+				wantBody = tt.upstreamBody
+			}
+			if string(result.body) != wantBody {
+				t.Errorf("客户端响应体不符：\n实际 %s\n期望 %s", result.body, wantBody)
 			}
 			if !strings.HasPrefix(result.contentType, "text/event-stream") {
 				t.Errorf("Content-Type = %q，期望 text/event-stream", result.contentType)
