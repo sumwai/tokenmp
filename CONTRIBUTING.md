@@ -32,6 +32,9 @@ make check          # 编译、单测（-race）、静态检查、格式检查
 
 ## 协作
 
+- 所有改动走分支 → PR → squash 合并。`main` 受分支保护：禁止 force push、禁止删除、
+  禁止直接推送，管理员同样受限。
+- 分支命名为 `<type>/<短描述>`，如 `feat/upstream-retry`。
 - 缺陷与需求用 Issue 承载，模板位于 `.github/ISSUE_TEMPLATE/`。
 - PR 模板位于 `.github/PULL_REQUEST_TEMPLATE.md`，门禁清单需勾选。
 - PR 标题同样使用 Conventional Commits 格式，`pr-title` 工作流会校验：
