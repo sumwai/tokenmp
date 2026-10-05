@@ -70,6 +70,11 @@ const (
 	flagSince         = "since"
 	flagReason        = "reason"
 	flagOperator      = "operator"
+	flagWindow        = "window"
+	flagPeriod        = "period"
+	flagLimit         = "limit"
+	flagAction        = "action"
+	flagBaseline      = "baseline"
 )
 
 // 管理动作名集中声明：同一动作名在多个组里出现。
@@ -89,6 +94,7 @@ const (
 	actionCredit        = "credit"
 	actionSetMultiplier = "set-multiplier"
 	actionSetMerchant   = "set-merchant"
+	actionReset         = "reset"
 )
 
 // 表格列名里出现三次以上的取值。
@@ -187,6 +193,7 @@ var adminGroups = []adminGroupSpec{
 	{"calendar", []string{actionImport, actionList}},
 	{usageName, []string{actionList}},
 	{"adjust", []string{actionAdd, actionList}},
+	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
 }
 
 // lookupGroup 按名字找组声明。
@@ -296,6 +303,8 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminUsage(ctx, rest, env)
 	case "adjust":
 		return adminAdjust(ctx, rest, env)
+	case "quota":
+		return adminQuota(ctx, rest, env)
 	case helpName, helpShortFlag, helpLongFlag:
 		_, _ = io.WriteString(env.stdout, adminUsageText())
 		return exitOK

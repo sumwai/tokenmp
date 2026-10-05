@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -76,6 +77,13 @@ type Store interface {
 	// 日历。
 	UpsertCalendarDays(ctx context.Context, calendar string, days []store.CalendarDay) error
 	ListCalendarDays(ctx context.Context, calendar string) ([]store.CalendarDay, error)
+
+	// 窗口限额。
+	InsertQuota(ctx context.Context, q store.Quota) (uint64, error)
+	InsertQuotaEvent(ctx context.Context, e store.QuotaEvent) (uint64, error)
+	DeleteQuota(ctx context.Context, id uint64) error
+	// quota.Repo 提供限额定义读取与窗口用量聚合，与判定路径共用同一口径。
+	quota.Repo
 
 	// 用量流水。
 	ListUsage(ctx context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error)

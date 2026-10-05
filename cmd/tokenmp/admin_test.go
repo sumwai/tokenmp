@@ -78,6 +78,8 @@ func TestAdminUsageExitCodes(t *testing.T) {
 		{name: "未知组", args: []string{"frobnicate"}, wantCode: exitUsage, wantErr: "未知管理组"},
 		{name: "缺动作", args: []string{"merchant"}, wantCode: exitUsage, wantErr: "merchant 需要动作"},
 		{name: "未知动作", args: []string{"merchant", "frobnicate"}, wantCode: exitUsage, wantErr: "merchant 未知动作"},
+		{name: "限额缺动作", args: []string{"quota"}, wantCode: exitUsage, wantErr: "quota 需要动作"},
+		{name: "限额未知动作", args: []string{"quota", "frobnicate"}, wantCode: exitUsage, wantErr: "quota 未知动作"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

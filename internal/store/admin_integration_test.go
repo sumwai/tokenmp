@@ -203,4 +203,47 @@ func TestAdminFullChainIntegration(t *testing.T) {
 	if grantBucket.UnitRate != nil {
 		t.Errorf("充值账本不应带折算率，得到 %q", *grantBucket.UnitRate)
 	}
+
+	// 窗口限额：写定义、按日窗口列已用量、重置后已用量归零、删除。
+	if _, err := s.InsertUsage(ctx, store.UsageRow{
+		MerchantID: merchantID, AccountID: accountID, ChannelID: channelID, Model: "up-model",
+		Usage: map[billing.Metric]int{billing.MetricRequest: 3},
+	}); err != nil {
+		t.Fatalf("写入用量失败：%v", err)
+	}
+	quotaID, err := svc.CreateQuota(ctx, admin.QuotaInput{
+		Scope: billing.ScopeAccount, ScopeID: accountID, Metric: billing.MetricRequest,
+		WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+		LimitAmount: "2", Action: billing.ActionReject,
+	})
+	if err != nil {
+		t.Fatalf("写入限额失败：%v", err)
+	}
+	views, err := svc.ListQuotas(ctx, billing.ScopeAccount, accountID)
+	if err != nil || len(views) != 1 {
+		t.Fatalf("限额列表应有一条，得到 %d（err=%v）", len(views), err)
+	}
+	if views[0].Used == nil || !decimalEqual(*views[0].Used, "3") {
+		t.Fatalf("当前窗口已用量 = %v，期望 3", views[0].Used)
+	}
+	// 重置基准推到远期：聚合下界随之前移，已用量归零。远离现在是为了避开
+	// 数据库 CURRENT_TIMESTAMP 与测试进程时钟之间可能的时区偏移。
+	if _, err := svc.ResetQuota(ctx, admin.ResetQuotaInput{
+		QuotaID: quotaID, BaselineAt: now.AddDate(10, 0, 0), Reason: "集成测试重置", Operator: "ops",
+	}); err != nil {
+		t.Fatalf("重置限额失败：%v", err)
+	}
+	views, err = svc.ListQuotas(ctx, billing.ScopeAccount, accountID)
+	if err != nil {
+		t.Fatalf("重置后列限额失败：%v", err)
+	}
+	if views[0].Used == nil || !decimalEqual(*views[0].Used, "0") {
+		t.Errorf("重置后已用量 = %v，期望 0", views[0].Used)
+	}
+	if err := svc.DeleteQuota(ctx, quotaID); err != nil {
+		t.Fatalf("删除限额失败：%v", err)
+	}
+	if remaining, err := svc.ListQuotas(ctx, billing.ScopeAccount, accountID); err != nil || len(remaining) != 0 {
+		t.Errorf("删除后限额列表应为空，得到 %d 条（err=%v）", len(remaining), err)
+	}
 }

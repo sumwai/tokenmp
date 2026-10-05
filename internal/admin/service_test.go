@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -58,6 +60,11 @@ type fakeStore struct {
 	listUsage            func(context.Context, uint64, time.Time) ([]store.UsageListRow, error)
 	insertAdjustment     func(context.Context, store.Adjustment) (uint64, error)
 	listAdjustments      func(context.Context, uint64) ([]store.Adjustment, error)
+	insertQuota          func(context.Context, store.Quota) (uint64, error)
+	insertQuotaEvent     func(context.Context, store.QuotaEvent) (uint64, error)
+	deleteQuota          func(context.Context, uint64) error
+	quotas               func(context.Context, billing.Scope, uint64) ([]quota.Limit, error)
+	quotaUsage           func(context.Context, quota.UsageQuery) (decimal.Decimal, error)
 }
 
 // record 记下一次调用并返回调用名是否已记录。
@@ -357,6 +364,46 @@ func (f *fakeStore) ListAdjustments(ctx context.Context, accountID uint64) ([]st
 		return f.listAdjustments(ctx, accountID)
 	}
 	return nil, nil
+}
+
+func (f *fakeStore) InsertQuota(ctx context.Context, q store.Quota) (uint64, error) {
+	f.record("InsertQuota")
+	if f.insertQuota != nil {
+		return f.insertQuota(ctx, q)
+	}
+	return 1, nil
+}
+
+func (f *fakeStore) InsertQuotaEvent(ctx context.Context, e store.QuotaEvent) (uint64, error) {
+	f.record("InsertQuotaEvent")
+	if f.insertQuotaEvent != nil {
+		return f.insertQuotaEvent(ctx, e)
+	}
+	return 1, nil
+}
+
+func (f *fakeStore) DeleteQuota(ctx context.Context, id uint64) error {
+	f.record("DeleteQuota")
+	if f.deleteQuota != nil {
+		return f.deleteQuota(ctx, id)
+	}
+	return nil
+}
+
+func (f *fakeStore) Quotas(ctx context.Context, scope billing.Scope, scopeID uint64) ([]quota.Limit, error) {
+	f.record("Quotas")
+	if f.quotas != nil {
+		return f.quotas(ctx, scope, scopeID)
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) Usage(ctx context.Context, q quota.UsageQuery) (decimal.Decimal, error) {
+	f.record("Usage")
+	if f.quotaUsage != nil {
+		return f.quotaUsage(ctx, q)
+	}
+	return decimal.Zero, nil
 }
 
 // called 报告某动作是否被调用过。
@@ -952,5 +999,152 @@ func TestListUsagePassesFilters(t *testing.T) {
 	}
 	if gotAccount != 9 || !gotSince.Equal(since) {
 		t.Errorf("过滤条件未透传：account=%d since=%v", gotAccount, gotSince)
+	}
+}
+
+func TestCreateQuotaValidates(t *testing.T) {
+	f := &fakeStore{}
+	s := newService(f)
+	base := QuotaInput{
+		Scope: billing.ScopeAccount, ScopeID: 2, Metric: billing.MetricRequest,
+		WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+		LimitAmount: "100", Action: billing.ActionReject,
+	}
+	tests := []struct {
+		name string
+		give QuotaInput
+	}{
+		{name: "未知范围", give: func() QuotaInput { in := base; in.Scope = "tenant"; return in }()},
+		{name: "范围 id 为零", give: func() QuotaInput { in := base; in.ScopeID = 0; return in }()},
+		{name: "未知指标", give: func() QuotaInput { in := base; in.Metric = "watts"; return in }()},
+		{name: "窗口组合非法", give: func() QuotaInput { in := base; in.WindowKind = billing.WindowKindRolling; return in }()},
+		{name: "限额为零", give: func() QuotaInput { in := base; in.LimitAmount = "0"; return in }()},
+		{name: "未知处置", give: func() QuotaInput { in := base; in.Action = "queue"; return in }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := s.CreateQuota(context.Background(), tt.give); err == nil {
+				t.Fatal("应当被拒绝")
+			}
+		})
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("非法输入不应触达存储层，实际 %v", f.calls)
+	}
+
+	var got store.Quota
+	f.insertQuota = func(_ context.Context, q store.Quota) (uint64, error) {
+		got = q
+		return 5, nil
+	}
+	id, err := s.CreateQuota(context.Background(), base)
+	if err != nil {
+		t.Fatalf("合法输入不应报错：%v", err)
+	}
+	if id != 5 || got.Metric != billing.MetricRequest || got.Period != billing.PeriodDay {
+		t.Errorf("写入内容不符：%+v", got)
+	}
+}
+
+func TestListQuotasComputesUsedAndRemaining(t *testing.T) {
+	limit := quota.Limit{
+		ID: 1, Scope: billing.ScopeAccount, ScopeID: 2, Metric: billing.MetricRequest,
+		WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+		LimitAmount: decimal.NewFromInt(100), Action: billing.ActionReject,
+	}
+	f := &fakeStore{}
+	f.quotas = func(context.Context, billing.Scope, uint64) ([]quota.Limit, error) {
+		return []quota.Limit{limit}, nil
+	}
+	f.quotaUsage = func(context.Context, quota.UsageQuery) (decimal.Decimal, error) {
+		return decimal.NewFromInt(40), nil
+	}
+	s := newService(f)
+	views, err := s.ListQuotas(context.Background(), billing.ScopeAccount, 2)
+	if err != nil {
+		t.Fatalf("列出失败：%v", err)
+	}
+	if len(views) != 1 || views[0].Used == nil || *views[0].Used != "40" {
+		t.Fatalf("已用量不符：%+v", views)
+	}
+	if views[0].Remaining == nil || *views[0].Remaining != "60" {
+		t.Errorf("剩余额度不符：%+v", views[0])
+	}
+
+	// 已用量超过限额时剩余额度不显示负数。
+	f.quotaUsage = func(context.Context, quota.UsageQuery) (decimal.Decimal, error) {
+		return decimal.NewFromInt(150), nil
+	}
+	views, err = s.ListQuotas(context.Background(), billing.ScopeAccount, 2)
+	if err != nil {
+		t.Fatalf("列出失败：%v", err)
+	}
+	if views[0].Remaining == nil || *views[0].Remaining != "0" {
+		t.Errorf("超限时剩余额度应为 0：%+v", views[0])
+	}
+}
+
+func TestListQuotasToleratesUnresolvableRows(t *testing.T) {
+	f := &fakeStore{}
+	f.quotas = func(context.Context, billing.Scope, uint64) ([]quota.Limit, error) {
+		return []quota.Limit{{
+			ID: 1, Scope: billing.ScopeAccount, ScopeID: 2, Metric: billing.MetricRequest,
+			WindowKind: billing.WindowKindRolling, Period: billing.PeriodDay,
+			LimitAmount: decimal.NewFromInt(1), Action: billing.ActionReject,
+		}}, nil
+	}
+	s := newService(f)
+	views, err := s.ListQuotas(context.Background(), billing.ScopeAccount, 2)
+	if err != nil {
+		t.Fatalf("列出失败：%v", err)
+	}
+	if views[0].Used != nil || views[0].Remaining != nil {
+		t.Errorf("不可判定的行应留空：%+v", views[0])
+	}
+	if f.called("Usage") {
+		t.Error("不可判定的行不应发起聚合查询")
+	}
+}
+
+func TestResetQuotaRequiresAudit(t *testing.T) {
+	f := &fakeStore{}
+	s := newService(f)
+	if _, err := s.ResetQuota(context.Background(), ResetQuotaInput{QuotaID: 1, Reason: "r"}); err == nil {
+		t.Fatal("缺 operator 应当被拒绝")
+	}
+	if _, err := s.ResetQuota(context.Background(), ResetQuotaInput{QuotaID: 1, Operator: "ops"}); err == nil {
+		t.Fatal("缺 reason 应当被拒绝")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("非法输入不应触达存储层：%v", f.calls)
+	}
+
+	var got store.QuotaEvent
+	f.insertQuotaEvent = func(_ context.Context, e store.QuotaEvent) (uint64, error) {
+		got = e
+		return 3, nil
+	}
+	if _, err := s.ResetQuota(context.Background(), ResetQuotaInput{QuotaID: 7, Reason: "误计重置", Operator: "ops"}); err != nil {
+		t.Fatalf("合法输入不应报错：%v", err)
+	}
+	if got.QuotaID != 7 || got.Event != billing.QuotaEventReset || !got.BaselineAt.Equal(fixedNow) {
+		t.Errorf("重置事件不符：%+v", got)
+	}
+}
+
+func TestDeleteQuotaRequiresID(t *testing.T) {
+	f := &fakeStore{}
+	s := newService(f)
+	if err := s.DeleteQuota(context.Background(), 0); err == nil {
+		t.Fatal("id=0 应当被拒绝")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("非法输入不应触达存储层：%v", f.calls)
+	}
+	if err := s.DeleteQuota(context.Background(), 4); err != nil {
+		t.Fatalf("删除失败：%v", err)
+	}
+	if !f.called("DeleteQuota") {
+		t.Error("应调用 DeleteQuota")
 	}
 }
