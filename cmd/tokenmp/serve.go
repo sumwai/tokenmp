@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/access"
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
@@ -238,13 +239,13 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		return nil, err
 	}
 
-	auth := newAuthenticator(st, opts.Now)
+	auth := access.NewAuthenticator(st, opts.Now)
 	mux := http.NewServeMux()
 	// 健康检查独立于转发与鉴权：探活只关心进程是否在线，不应因密钥配置而失败。
 	mux.HandleFunc(healthzPath, healthz)
 	// 三个端点各自注册精确路径并套上鉴权；其余路径一律走下面的 JSON 404。
 	for _, protocol := range supportedProtocols {
-		mux.Handle(protocol.EndpointPath(), auth.middleware(handler))
+		mux.Handle(protocol.EndpointPath(), auth.Middleware(handler))
 	}
 	mux.HandleFunc("/", notFoundJSON)
 
@@ -287,7 +288,7 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 // 不走 transport 的原因是那里需要按协议编码错误体，而未注册路径没有可归的协议；
 // 这里只能给一个与协议无关的统一错误体。
 func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
-	writeJSONError(w, http.StatusNotFound, domain.CodeNotFound, "路径不存在")
+	access.WriteJSONError(w, http.StatusNotFound, domain.CodeNotFound, "路径不存在")
 }
 
 // storeRouteResolver 是按数据库选路的 domain.RouteResolver。
@@ -309,16 +310,16 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 	if req == nil {
 		return nil, nil
 	}
-	id, ok := identityFromContext(ctx)
+	id, ok := access.IdentityFromContext(ctx)
 	if !ok {
 		// 未鉴权不应走到这里；没有生效商家时按无候选处理，由流水线统一回「无可用渠道」。
 		return nil, nil
 	}
-	sameProtocol, err := r.store.RouteCandidates(ctx, store.ChannelType(req.Protocol), req.Model, id.merchantID)
+	sameProtocol, err := r.store.RouteCandidates(ctx, store.ChannelType(req.Protocol), req.Model, id.MerchantID)
 	if err != nil {
 		return nil, err
 	}
-	crossProtocol, err := r.store.RouteCandidatesAnyType(ctx, req.Model, id.merchantID)
+	crossProtocol, err := r.store.RouteCandidatesAnyType(ctx, req.Model, id.MerchantID)
 	if err != nil {
 		return nil, err
 	}
@@ -338,11 +339,11 @@ type storeCredentialGroupLoader struct {
 // 而「双行轮换期间旧行格式变了」正是本功能要兼顾的场景。全部行都不可用时返回空组，
 // 由轮换器报出「分组没有可用凭据」。
 func (l storeCredentialGroupLoader) LoadGroup(ctx context.Context, route domain.Route) (credential.Group, error) {
-	id, ok := identityFromContext(ctx)
+	id, ok := access.IdentityFromContext(ctx)
 	if !ok {
 		return credential.Group{}, domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法读取上游凭据")
 	}
-	rows, err := l.store.CredentialsByGroup(ctx, route.CredentialRef, id.merchantID)
+	rows, err := l.store.CredentialsByGroup(ctx, route.CredentialRef, id.MerchantID)
 	if err != nil {
 		return credential.Group{}, err
 	}
@@ -354,7 +355,7 @@ func (l storeCredentialGroupLoader) LoadGroup(ctx context.Context, route domain.
 		}
 		entries = append(entries, credential.NamedCredential{Name: row.Name, APIKey: apiKey})
 	}
-	return credential.Group{Scope: strconv.FormatUint(id.merchantID, 10), Entries: entries}, nil
+	return credential.Group{Scope: strconv.FormatUint(id.MerchantID, 10), Entries: entries}, nil
 }
 
 // upstreamCredentialSecret 是 upstream_credential.secret 里本网关认识的字段。

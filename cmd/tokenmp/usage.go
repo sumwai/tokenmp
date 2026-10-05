@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/access"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/settlement"
@@ -72,7 +73,7 @@ func newUsageRecorder(st gatewayStore, settler usageSettler, writeTimeout time.D
 // 落库路径共用同一份分量，不会一条有 request、另一条没有。
 // 落库失败返回错误，同时记日志；流水线忽略返回值，不影响已写给客户端的响应。
 func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRecord) error {
-	id, ok := identityFromContext(ctx)
+	id, ok := access.IdentityFromContext(ctx)
 	if !ok {
 		// 未鉴权不应走到这里；按无归属处理而不写一行 account_id=0 的脏流水。
 		return domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法归属用量")
@@ -95,10 +96,10 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 	if r.settler != nil {
 		err := r.settler.Settle(writeCtx, settlement.Input{
 			RequestID:      rec.RequestID,
-			MerchantID:     id.merchantID,
-			AccountID:      id.accountID,
+			MerchantID:     id.MerchantID,
+			AccountID:      id.AccountID,
 			ChannelID:      rec.ChannelID,
-			APIKeyID:       id.apiKeyID,
+			APIKeyID:       id.APIKeyID,
 			Model:          rec.Model,
 			RequestedModel: rec.RequestedModel,
 			Usage:          metrics,
@@ -110,10 +111,10 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 	}
 
 	if _, err := r.store.InsertUsage(writeCtx, store.UsageRow{
-		MerchantID: id.merchantID,
-		AccountID:  id.accountID,
+		MerchantID: id.MerchantID,
+		AccountID:  id.AccountID,
 		ChannelID:  rec.ChannelID,
-		APIKeyID:   id.apiKeyID,
+		APIKeyID:   id.APIKeyID,
 		Model:      rec.Model,
 		Usage:      metrics,
 	}); err != nil {
