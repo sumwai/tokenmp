@@ -41,7 +41,7 @@ make tools          # 按 .mise.toml 装齐工具链
 | `README.md` | 项目定位与已存在事实：命令、子命令、目录结构、版本行为 |
 | `CONTRIBUTING.md` | 开发门禁与提交规范 |
 | `RELEASE.md` | 发布链路、所需 secret、本地验证 |
-| `CHANGELOG.md` | 由 release-please 自动维护，不手工编辑版本条目 |
+| `CHANGELOG.md` | 由 release-please 创建并维护，不手工编辑 |
 | `AGENTS.md` | 本文件：工作规则 |
 
 规则：
