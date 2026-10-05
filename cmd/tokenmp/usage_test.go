@@ -50,6 +50,21 @@ const (
 		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
 		"event: message_stop\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
+
+	// anthropicTieredSSE 是带 cache_creation 分档明细的 Anthropic 上游流：
+	// 缓存写合计 9 拆为 5 分钟档 6 与 1 小时档 3，落库时应分别入两档计费分量。
+	anthropicTieredSSE = "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"model\":\"up-model\",\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":9,\"cache_creation\":{\"ephemeral_5m_input_tokens\":6,\"ephemeral_1h_input_tokens\":3}}}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
 )
 
 // streamUsageCase 是一个方言的流式用量用例。
@@ -102,6 +117,20 @@ func streamUsageCases() []streamUsageCase {
 			clientBody:   `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`,
 			upstreamBody: anthropicSSE,
 			wantUsage:    anthropicMetrics,
+		},
+		{
+			// 分档缓存写：两档分别落 cache_write_5m / cache_write_1h，不分档分量不落。
+			name:         "anthropic_messages_tiered_cache_write",
+			protocol:     domain.ProtocolAnthropicMessages,
+			clientBody:   `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamBody: anthropicTieredSSE,
+			wantUsage: map[billing.Metric]int{
+				billing.MetricInputToken:     16,
+				billing.MetricOutputToken:    3,
+				billing.MetricCacheReadToken: 2,
+				billing.MetricCacheWrite5m:   6,
+				billing.MetricCacheWrite1h:   3,
+			},
 		},
 	}
 }
@@ -270,6 +299,22 @@ func TestNonStreamingUsagePersistedThreeDialects(t *testing.T) {
 			responseBody: `{"id":"msg_1","type":"message","role":"assistant","model":"up-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",` +
 				`"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}`,
 			wantUsage: anthropicMetrics,
+		},
+		{
+			// 非流式分档缓存写：同样分别落 cache_write_5m / cache_write_1h。
+			name:       "anthropic_messages_tiered_cache_write",
+			protocol:   domain.ProtocolAnthropicMessages,
+			clientBody: `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"msg_1","type":"message","role":"assistant","model":"up-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",` +
+				`"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":9,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":3}}}`,
+			wantUsage: map[billing.Metric]int{
+				billing.MetricInputToken:     16,
+				billing.MetricOutputToken:    3,
+				billing.MetricCacheReadToken: 2,
+				billing.MetricCacheWrite5m:   6,
+				billing.MetricCacheWrite1h:   3,
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -447,6 +492,43 @@ func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 	}
 	if rows[0].Usage[billing.MetricInputToken] != 5 {
 		t.Errorf("input_token = %d，期望 5", rows[0].Usage[billing.MetricInputToken])
+	}
+}
+
+// TestUsageRecorderLogsCacheWriteConflict 验证两套缓存写口径同时非零时记日志、以分档为准落库。
+func TestUsageRecorderLogsCacheWriteConflict(t *testing.T) {
+	st := &fakeGatewayStore{}
+	var logged []string
+	recorder := newUsageRecorder(st, 0, func(msg string, args ...any) {
+		logged = append(logged, msg)
+	})
+	ctx := withIdentity(context.Background(), identity{accountID: 2, merchantID: 1})
+	err := recorder.RecordUsage(ctx, domain.UsageRecord{
+		RequestID: "req-1",
+		ChannelID: 10,
+		Model:     "up-model",
+		Usage: domain.Usage{
+			Source:             domain.UsageSourceUpstream,
+			InputTokens:        100,
+			CacheWriteTokens:   7,
+			CacheWrite5mTokens: 6,
+		},
+	})
+	if err != nil {
+		t.Fatalf("记账失败：%v", err)
+	}
+	if len(logged) != 1 || logged[0] != "缓存写口径冲突，已按分档为准" {
+		t.Fatalf("应记一条口径冲突日志，得到 %v", logged)
+	}
+	rows := st.usageSnapshot()
+	if len(rows) != 1 {
+		t.Fatalf("流水行数 = %d，期望 1", len(rows))
+	}
+	if rows[0].Usage[billing.MetricCacheWrite5m] != 6 {
+		t.Errorf("cache_write_5m = %d，期望 6", rows[0].Usage[billing.MetricCacheWrite5m])
+	}
+	if _, ok := rows[0].Usage[billing.MetricCacheWriteToken]; ok {
+		t.Errorf("冲突时不应落不分档分量，得到 %#v", rows[0].Usage)
 	}
 }
 

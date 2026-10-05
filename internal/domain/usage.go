@@ -43,12 +43,17 @@ func combineUsageSource(a, b UsageSource) UsageSource {
 //
 // 计数口径统一为「子项 ⊆ 主计数」：
 //
-//   - InputTokens：输入 token 总数，包含 CacheReadTokens 与 CacheWriteTokens；
+//   - InputTokens：输入 token 总数，包含缓存读写子项；
 //   - OutputTokens：输出 token 总数，包含 ReasoningTokens；
 //   - CacheReadTokens：命中缓存的输入 token 子项；
-//   - CacheWriteTokens：写入缓存的输入 token 子项；
+//   - CacheWriteTokens：写入缓存的输入 token 子项，承载上游只报单一数量的不分档口径；
+//   - CacheWrite5mTokens / CacheWrite1hTokens：写入缓存的输入 token 子项，按 TTL 分档；
 //   - ReasoningTokens：用于推理的输出 token 子项；
 //   - ServerToolUses：服务端工具（如 web_search）的执行次数（按次计费，非 token）。
+//
+// 缓存写的不分档字段与两个分档字段是同一件事的两种口径，互斥使用：上游能分档时只填分档字段、
+// 不分档字段留 0；上游只报单一数量时才填不分档字段。两者同时非零属异常（例如合并了两种口径的用量），
+// 消费方以分档为准并记日志。
 //
 // 该口径以 OpenAI 侧线格式为准；Anthropic Messages 的线格式（input_tokens 不含缓存 token）
 // 由其适配器在解码边界换算对齐。
@@ -64,8 +69,13 @@ type Usage struct {
 	OutputTokens int `json:"output_tokens"`
 	// CacheReadTokens 是 InputTokens 中命中缓存的子项。
 	CacheReadTokens int `json:"cache_read_tokens"`
-	// CacheWriteTokens 是 InputTokens 中写入缓存的子项。
+	// CacheWriteTokens 是 InputTokens 中写入缓存的子项，承载上游只报单一数量的不分档口径。
+	// 上游能按 TTL 分档时用 CacheWrite5mTokens / CacheWrite1hTokens，本字段保持 0。
 	CacheWriteTokens int `json:"cache_write_tokens"`
+	// CacheWrite5mTokens 是 InputTokens 中写入缓存的子项，TTL 为 5 分钟。
+	CacheWrite5mTokens int `json:"cache_write_5m_tokens"`
+	// CacheWrite1hTokens 是 InputTokens 中写入缓存的子项，TTL 为 1 小时。
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens"`
 	// ReasoningTokens 是 OutputTokens 中用于推理的子项。
 	ReasoningTokens int `json:"reasoning_tokens"`
 	// ServerToolUses 是本次调用中上游服务端工具（如 web_search）的执行次数。
@@ -107,13 +117,15 @@ func (u Usage) Total() int {
 // 不完整的用量伪装成完整的。
 func (u Usage) Add(other Usage) Usage {
 	return Usage{
-		Source:           combineUsageSource(u.Source, other.Source),
-		InputTokens:      u.InputTokens + other.InputTokens,
-		OutputTokens:     u.OutputTokens + other.OutputTokens,
-		CacheReadTokens:  u.CacheReadTokens + other.CacheReadTokens,
-		CacheWriteTokens: u.CacheWriteTokens + other.CacheWriteTokens,
-		ReasoningTokens:  u.ReasoningTokens + other.ReasoningTokens,
-		ServerToolUses:   u.ServerToolUses + other.ServerToolUses,
+		Source:             combineUsageSource(u.Source, other.Source),
+		InputTokens:        u.InputTokens + other.InputTokens,
+		OutputTokens:       u.OutputTokens + other.OutputTokens,
+		CacheReadTokens:    u.CacheReadTokens + other.CacheReadTokens,
+		CacheWriteTokens:   u.CacheWriteTokens + other.CacheWriteTokens,
+		CacheWrite5mTokens: u.CacheWrite5mTokens + other.CacheWrite5mTokens,
+		CacheWrite1hTokens: u.CacheWrite1hTokens + other.CacheWrite1hTokens,
+		ReasoningTokens:    u.ReasoningTokens + other.ReasoningTokens,
+		ServerToolUses:     u.ServerToolUses + other.ServerToolUses,
 	}
 }
 
@@ -124,14 +136,17 @@ func (u Usage) Add(other Usage) Usage {
 // 这里只抬高主计数、不削减子项，既不丢弃上游给出的子项，也不让用量凭空变小：
 //
 //   - OutputTokens 抬到不小于 ReasoningTokens；
-//   - InputTokens 抬到不小于 CacheReadTokens 与 CacheWriteTokens 之和。
+//   - InputTokens 抬到不小于 CacheReadTokens、CacheWriteTokens 与两个分档字段之和。
+//     分档与不分档在正常数据里互斥，这里按全部相加守护：异常数据同时给出两组时，
+//     抬高主计数既不削减子项，也不让落库违反「子项不得大于主计数」。
 //
 // 方法为值接收者，返回新值、不改动接收者，且幂等：对已满足不变量的用量重复调用结果不变。
 func (u Usage) BoundSubitemsToMain() Usage {
 	if u.ReasoningTokens > u.OutputTokens {
 		u.OutputTokens = u.ReasoningTokens
 	}
-	if cacheTotal := u.CacheReadTokens + u.CacheWriteTokens; cacheTotal > u.InputTokens {
+	cacheTotal := u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite5mTokens + u.CacheWrite1hTokens
+	if cacheTotal > u.InputTokens {
 		u.InputTokens = cacheTotal
 	}
 	return u
@@ -146,6 +161,8 @@ func (u Usage) IsZero() bool {
 		u.OutputTokens == 0 &&
 		u.CacheReadTokens == 0 &&
 		u.CacheWriteTokens == 0 &&
+		u.CacheWrite5mTokens == 0 &&
+		u.CacheWrite1hTokens == 0 &&
 		u.ReasoningTokens == 0
 }
 
@@ -155,5 +172,7 @@ func (u Usage) NonNegative() bool {
 		u.OutputTokens >= 0 &&
 		u.CacheReadTokens >= 0 &&
 		u.CacheWriteTokens >= 0 &&
+		u.CacheWrite5mTokens >= 0 &&
+		u.CacheWrite1hTokens >= 0 &&
 		u.ReasoningTokens >= 0
 }

@@ -58,10 +58,14 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 		// 未鉴权不应走到这里；按无归属处理而不写一行 account_id=0 的脏流水。
 		return domain.NewError(domain.CodeInternal, "缺少鉴权上下文，无法归属用量")
 	}
-	metrics, dropped := billing.UsageFromDomain(rec.Usage)
+	metrics, dropped, conflicts := billing.UsageFromDomain(rec.Usage)
 	for _, name := range dropped {
 		r.logf("用量分量没有对应的计费指标，已丢弃",
 			"component", name, "request_id", rec.RequestID)
+	}
+	for _, conflict := range conflicts {
+		r.logf("缓存写口径冲突，已按分档为准",
+			"detail", conflict, "request_id", rec.RequestID)
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeTimeout)
 	defer cancel()
