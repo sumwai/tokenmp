@@ -22,13 +22,22 @@ import (
 // 上游用 httptest 模拟，流水记录用内存假存储；不连数据库、不依赖测试夹具。
 
 const (
+	// chatSSEContent 是 Chat Completions 上游流的内容帧部分。
+	chatSSEContent = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+
+	// chatSSEUsageFrame 是只承载用量的帧：choices 为空、usage 非空。
+	// 它是 include_usage 生效后上游追加的帧，客户端未索取时不应收到。
+	chatSSEUsageFrame = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n"
+
 	// chatSSE 是一段完整的 Chat Completions 上游流：结束原因与用量分两帧下发，
 	// 用量帧的 choices 为空，是 include_usage 生效后的标准形态。
-	chatSSE = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"up-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n" +
-		"data: [DONE]\n\n"
+	chatSSE = chatSSEContent + chatSSEUsageFrame + "data: [DONE]\n\n"
+
+	// chatSSEWithoutUsage 是客户端未索取用量时网关应当写回的内容：去掉用量帧，
+	// [DONE] 与内容帧原样保留。
+	chatSSEWithoutUsage = chatSSEContent + "data: [DONE]\n\n"
 
 	// responsesSSE 是 Responses 上游流：用量随 response.completed 事件下发。
 	responsesSSE = "event: response.output_text.delta\n" +
@@ -50,6 +59,21 @@ const (
 		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
 		"event: message_stop\n" +
 		"data: {\"type\":\"message_stop\"}\n\n"
+
+	// anthropicTieredSSE 是带 cache_creation 分档明细的 Anthropic 上游流：
+	// 缓存写合计 9 拆为 5 分钟档 6 与 1 小时档 3，落库时应分别入两档计费分量。
+	anthropicTieredSSE = "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"model\":\"up-model\",\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":9,\"cache_creation\":{\"ephemeral_5m_input_tokens\":6,\"ephemeral_1h_input_tokens\":3}}}}\n\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
 )
 
 // streamUsageCase 是一个方言的流式用量用例。
@@ -58,6 +82,9 @@ type streamUsageCase struct {
 	protocol     domain.Protocol
 	clientBody   string
 	upstreamBody string
+	// wantClientBody 是期望客户端收到的响应体；为空时取 upstreamBody。
+	// 客户端未索取用量帧时，上游额外的用量帧被抑制，二者因此不同。
+	wantClientBody string
 	// wantUsage 是期望落库的分量。三个方言的上游计数形状不同，但内部口径归一后
 	// 落库分量一致：Anthropic 的 input_tokens 不含缓存，由适配器换算进 input_token。
 	wantUsage map[billing.Metric]int
@@ -82,9 +109,20 @@ func streamUsageCases() []streamUsageCase {
 	}
 	return []streamUsageCase{
 		{
+			// 客户端未索取用量帧：上游的用量帧被抑制，用量仍照常落库。
 			name:             "openai_chat",
 			protocol:         domain.ProtocolOpenAIChat,
 			clientBody:       `{"model":"alias","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamBody:     chatSSE,
+			wantClientBody:   chatSSEWithoutUsage,
+			wantUsage:        metrics,
+			wantIncludeUsage: true,
+		},
+		{
+			// 客户端自行索取用量帧：用量帧正常转发。
+			name:             "openai_chat_include_usage",
+			protocol:         domain.ProtocolOpenAIChat,
+			clientBody:       `{"model":"alias","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
 			upstreamBody:     chatSSE,
 			wantUsage:        metrics,
 			wantIncludeUsage: true,
@@ -102,6 +140,20 @@ func streamUsageCases() []streamUsageCase {
 			clientBody:   `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`,
 			upstreamBody: anthropicSSE,
 			wantUsage:    anthropicMetrics,
+		},
+		{
+			// 分档缓存写：两档分别落 cache_write_5m / cache_write_1h，不分档分量不落。
+			name:         "anthropic_messages_tiered_cache_write",
+			protocol:     domain.ProtocolAnthropicMessages,
+			clientBody:   `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			upstreamBody: anthropicTieredSSE,
+			wantUsage: map[billing.Metric]int{
+				billing.MetricInputToken:     16,
+				billing.MetricOutputToken:    3,
+				billing.MetricCacheReadToken: 2,
+				billing.MetricCacheWrite5m:   6,
+				billing.MetricCacheWrite1h:   3,
+			},
 		},
 	}
 }
@@ -185,8 +237,8 @@ func assertUsageRow(t *testing.T, row store.UsageRow, wantModel string, want map
 	}
 }
 
-// TestStreamingUsagePersistedThreeDialects 覆盖三方言的流式端到端：
-// 逐帧透传、用量索取开关注入、usage 落 billing_usage。
+// TestStreamingUsagePersistedThreeDialects 覆盖三方言与两种索取形态的流式端到端：
+// 逐帧透传或用量帧抑制、用量索取开关注入、usage 落 billing_usage。
 func TestStreamingUsagePersistedThreeDialects(t *testing.T) {
 	for _, tt := range streamUsageCases() {
 		t.Run(tt.name, func(t *testing.T) {
@@ -197,9 +249,14 @@ func TestStreamingUsagePersistedThreeDialects(t *testing.T) {
 			if result.status != http.StatusOK {
 				t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
 			}
-			// 同协议透传要求字节序一致：客户端收到的就是上游逐帧原样字节。
-			if string(result.body) != tt.upstreamBody {
-				t.Errorf("响应体应与上游逐帧字节一致：\n实际 %s\n期望 %s", result.body, tt.upstreamBody)
+			// 同协议透传下客户端收到的就是上游逐帧字节；客户端未索取用量帧时，
+			// 只承载用量的那一帧被抑制，因此期望体由 wantClientBody 单独给出。
+			wantBody := tt.wantClientBody
+			if wantBody == "" {
+				wantBody = tt.upstreamBody
+			}
+			if string(result.body) != wantBody {
+				t.Errorf("客户端响应体不符：\n实际 %s\n期望 %s", result.body, wantBody)
 			}
 			if !strings.HasPrefix(result.contentType, "text/event-stream") {
 				t.Errorf("Content-Type = %q，期望 text/event-stream", result.contentType)
@@ -270,6 +327,22 @@ func TestNonStreamingUsagePersistedThreeDialects(t *testing.T) {
 			responseBody: `{"id":"msg_1","type":"message","role":"assistant","model":"up-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",` +
 				`"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":1}}`,
 			wantUsage: anthropicMetrics,
+		},
+		{
+			// 非流式分档缓存写：同样分别落 cache_write_5m / cache_write_1h。
+			name:       "anthropic_messages_tiered_cache_write",
+			protocol:   domain.ProtocolAnthropicMessages,
+			clientBody: `{"model":"alias","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			responseBody: `{"id":"msg_1","type":"message","role":"assistant","model":"up-model","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",` +
+				`"usage":{"input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":9,` +
+				`"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":3}}}`,
+			wantUsage: map[billing.Metric]int{
+				billing.MetricInputToken:     16,
+				billing.MetricOutputToken:    3,
+				billing.MetricCacheReadToken: 2,
+				billing.MetricCacheWrite5m:   6,
+				billing.MetricCacheWrite1h:   3,
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -447,6 +520,43 @@ func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 	}
 	if rows[0].Usage[billing.MetricInputToken] != 5 {
 		t.Errorf("input_token = %d，期望 5", rows[0].Usage[billing.MetricInputToken])
+	}
+}
+
+// TestUsageRecorderLogsCacheWriteConflict 验证两套缓存写口径同时非零时记日志、以分档为准落库。
+func TestUsageRecorderLogsCacheWriteConflict(t *testing.T) {
+	st := &fakeGatewayStore{}
+	var logged []string
+	recorder := newUsageRecorder(st, 0, func(msg string, args ...any) {
+		logged = append(logged, msg)
+	})
+	ctx := withIdentity(context.Background(), identity{accountID: 2, merchantID: 1})
+	err := recorder.RecordUsage(ctx, domain.UsageRecord{
+		RequestID: "req-1",
+		ChannelID: 10,
+		Model:     "up-model",
+		Usage: domain.Usage{
+			Source:             domain.UsageSourceUpstream,
+			InputTokens:        100,
+			CacheWriteTokens:   7,
+			CacheWrite5mTokens: 6,
+		},
+	})
+	if err != nil {
+		t.Fatalf("记账失败：%v", err)
+	}
+	if len(logged) != 1 || logged[0] != "缓存写口径冲突，已按分档为准" {
+		t.Fatalf("应记一条口径冲突日志，得到 %v", logged)
+	}
+	rows := st.usageSnapshot()
+	if len(rows) != 1 {
+		t.Fatalf("流水行数 = %d，期望 1", len(rows))
+	}
+	if rows[0].Usage[billing.MetricCacheWrite5m] != 6 {
+		t.Errorf("cache_write_5m = %d，期望 6", rows[0].Usage[billing.MetricCacheWrite5m])
+	}
+	if _, ok := rows[0].Usage[billing.MetricCacheWriteToken]; ok {
+		t.Errorf("冲突时不应落不分档分量，得到 %#v", rows[0].Usage)
 	}
 }
 

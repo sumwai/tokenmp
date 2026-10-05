@@ -291,6 +291,14 @@ type Request struct {
 	MaxTokens   int        `json:"max_tokens,omitempty"`
 	Temperature *float64   `json:"temperature,omitempty"`
 	Stream      bool       `json:"stream"`
+	// UsageFramesRequested 报告客户端是否显式索取流式响应里的用量帧。
+	//
+	// 只有带该开关的协议会置位（当前是 OpenAI Chat Completions 的
+	// stream_options.include_usage）；用量随流固有下发的协议（OpenAI Responses 与
+	// Anthropic Messages）恒为 false，其用量事件是协议固有部分，客户端本就预期收到。
+	// 同协议透传写回据此决定是否抑制只承载用量的帧：网关为计费注入索取开关后，
+	// 未索取的客户端不该收到上游因此多发的那一帧。
+	UsageFramesRequested bool `json:"-"`
 	// RawBody 保留客户端原始请求体，供协议回退时按原协议重放。
 	RawBody []byte `json:"-"`
 }

@@ -265,6 +265,8 @@ type wireUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	// OutputTokensDetails 是输出计数的子项嵌套对象；为零时不写出。
 	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details,omitempty"`
+	// CacheCreation 是缓存写计数的分档明细；上游不分档时不给出。
+	CacheCreation *cacheCreationDetail `json:"cache_creation,omitempty"`
 }
 
 // outputTokensDetails 是 usage.output_tokens_details 的解码结构，内层只含 thinking_tokens。
@@ -272,7 +274,7 @@ type wireUsage struct {
 // 官方该对象的形状在仓库内没有可核对的文档快照（未核实），故宽容解析：整体不是JSON 对象时把自身清成
 // 「未给出」并返回 nil 错误，不让上游的一次字段扩展把整帧或整个响应判为解码失败。
 type outputTokensDetails struct {
-	ThinkingTokens thinkingTokens `json:"thinking_tokens"`
+	ThinkingTokens tokenCount `json:"thinking_tokens"`
 }
 
 // UnmarshalJSON 宽容解析嵌套对象：非 JSON 对象一律降级为「未给出」。
@@ -293,34 +295,79 @@ func (d *outputTokensDetails) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// thinkingTokens 是 usage.output_tokens_details.thinking_tokens 的解码类型。
+// cacheCreationDetail 是 usage.cache_creation 的分档明细：5 分钟与 1 小时两档。
 //
-// 叶子形状同样未核实，故宽容解析：非 JSON 数字（数组、字符串、对象等）时把自身清成
-// 「未给出」并返回 nil 错误。valid 区分「上游给出 0」与「上游未给出该叶子」：
-// 流式累计只在前者为真时覆盖已累计的子项，后者保留已有值不清零。
-type thinkingTokens struct {
+// 官方该对象的形状在仓库内没有可核对的文档快照（未核实），故与 output_tokens_details
+// 同一宽容口径：整体不是 JSON 对象时降级为「未给出」，不把上游的字段扩展判成整个响应
+// 或整帧解码失败。叶子用 tokenCount，保留「上游给出 0」与「上游未给出该档」的区分，
+// 流式累计才不至于把缺失的一档清零。
+type cacheCreationDetail struct {
+	Ephemeral5mInputTokens tokenCount `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens tokenCount `json:"ephemeral_1h_input_tokens"`
+}
+
+// UnmarshalJSON 宽容解析嵌套对象：非 JSON 对象一律降级为「未给出」。
+func (d *cacheCreationDetail) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		*d = cacheCreationDetail{}
+		return nil
+	}
+	type plain cacheCreationDetail
+	var parsed plain
+	if err := json.Unmarshal(trimmed, &parsed); err != nil {
+		*d = cacheCreationDetail{}
+		return nil //nolint:nilerr // 宽容解码：形状非预期时降级为「未给出」，不把错误上抛给调用方。
+	}
+	*d = cacheCreationDetail(parsed)
+	return nil
+}
+
+// applyCacheCreation 把 usage.cache_creation 的已给出档位写入用量。
+//
+// 叶子未给出（valid 为假）时保留 usage 里的已有值，不得当成 0 清零；detail 为 nil 时不做任何事。
+// 非流式用量从零值构造，流式用量跨 message_start / message_delta 累计，同一函数服务两处。
+func applyCacheCreation(usage *domain.Usage, detail *cacheCreationDetail) {
+	if detail == nil {
+		return
+	}
+	if detail.Ephemeral5mInputTokens.valid {
+		usage.CacheWrite5mTokens = detail.Ephemeral5mInputTokens.value
+	}
+	if detail.Ephemeral1hInputTokens.valid {
+		usage.CacheWrite1hTokens = detail.Ephemeral1hInputTokens.value
+	}
+}
+
+// tokenCount 是宽容解析的整数 token 计数叶子，用于 usage 内嵌的计数字段
+// （output_tokens_details.thinking_tokens 与 cache_creation 的两档）。
+//
+// 这些叶子的形状在仓库内没有可核对的文档快照（未核实），故宽容解析：非 JSON 数字
+// （数组、字符串、对象等）时把自身清成「未给出」并返回 nil 错误。valid 区分「上游给出 0」
+// 与「上游未给出该叶子」：流式累计只在前者为真时覆盖已累计的子项，后者保留已有值不清零。
+type tokenCount struct {
 	value int
 	valid bool
 }
 
 // UnmarshalJSON 解析叶子：只有 JSON 数字算「已给出」；其它形状降级为「未给出」。
-func (t *thinkingTokens) UnmarshalJSON(data []byte) error {
+func (t *tokenCount) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || string(trimmed) == jsonNullLiteral {
-		*t = thinkingTokens{}
+		*t = tokenCount{}
 		return nil
 	}
 	var n int
 	if err := json.Unmarshal(trimmed, &n); err != nil {
-		*t = thinkingTokens{}
+		*t = tokenCount{}
 		return nil //nolint:nilerr // 宽容解码：叶子类型不符时降级为「未给出」，不把错误上抛给调用方。
 	}
-	*t = thinkingTokens{value: n, valid: true}
+	*t = tokenCount{value: n, valid: true}
 	return nil
 }
 
 // MarshalJSON 把叶子写回 JSON 数字，供跨协议重建的编码方向回填该子项。
-func (t thinkingTokens) MarshalJSON() ([]byte, error) {
+func (t tokenCount) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t.value)
 }
 
@@ -789,8 +836,12 @@ func (a *Adapter) EncodeResponse(resp *domain.Response) ([]byte, error) {
 // usageFromWire 把上游 usage 归一化为内部用量。
 //
 // Anthropic 的线格式 input_tokens 不含缓存 token，一次调用的输入总量是 input_tokens、
-// cache_read_input_tokens 与 cache_creation_input_tokens 三者之和。内部统一口径是
-// 「子项 ⊆ 主计数」，因此这里做加法，两个缓存计数同时作为子项保留。
+// cache_read_input_tokens 与缓存写合计三者之和。内部统一口径是「子项 ⊆ 主计数」，
+// 因此这里做加法，缓存计数同时作为子项保留。
+//
+// 缓存写有两套口径，互斥填入：上游给出 cache_creation 分档明细时只填 CacheWrite5mTokens
+// 与 CacheWrite1hTokens，不分档字段保持 0；上游不分档时才填 CacheWriteTokens。输入总数
+// 取线格式合计与分档之和中的较大者，上游只给其一时不会漏计。
 //
 // `output_tokens_details.thinking_tokens` 是 output_tokens 的子项：写入 ReasoningTokens，
 // OutputTokens 仍取线格式 output_tokens 原值、**不相加**。
@@ -805,11 +856,17 @@ func usageFromWire(u *wireUsage) domain.Usage {
 		return domain.Usage{}
 	}
 	usage := domain.Usage{
-		Source:           domain.UsageSourceUpstream,
-		InputTokens:      u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens,
-		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  u.CacheReadInputTokens,
-		CacheWriteTokens: u.CacheCreationInputTokens,
+		Source:          domain.UsageSourceUpstream,
+		OutputTokens:    u.OutputTokens,
+		CacheReadTokens: u.CacheReadInputTokens,
+	}
+	if u.CacheCreation != nil {
+		applyCacheCreation(&usage, u.CacheCreation)
+	}
+	cacheWriteTotal := cacheWriteQuantity(u.CacheCreationInputTokens, usage)
+	usage.InputTokens = u.InputTokens + u.CacheReadInputTokens + cacheWriteTotal
+	if !hasCacheWriteTiers(usage) {
+		usage.CacheWriteTokens = cacheWriteTotal
 	}
 	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ThinkingTokens.valid {
 		usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens.value
@@ -817,13 +874,30 @@ func usageFromWire(u *wireUsage) domain.Usage {
 	return usage.BoundSubitemsToMain()
 }
 
+// hasCacheWriteTiers 报告用量是否带分档缓存写计数。
+func hasCacheWriteTiers(usage domain.Usage) bool {
+	return usage.CacheWrite5mTokens != 0 || usage.CacheWrite1hTokens != 0
+}
+
+// cacheWriteQuantity 返回本次调用写入缓存的权威总量：线格式合计与分档之和取较大者。
+//
+// 上游正常会同时给出两者且相等；只给其一时取较大者，使输入总数不会漏计。
+func cacheWriteQuantity(wireTotal int, usage domain.Usage) int {
+	if tiered := usage.CacheWrite5mTokens + usage.CacheWrite1hTokens; tiered > wireTotal {
+		return tiered
+	}
+	return wireTotal
+}
+
 // wireUsageFromDomain 把内部用量还原为 Anthropic 线格式。
 //
-// 线格式的 input_tokens 不含缓存 token，故由内部输入总数减去两个缓存子项得到。
+// 线格式的 input_tokens 不含缓存 token，故由内部输入总数减去缓存读与缓存写合计得到。
 // 内部计数与子项不一致（子项之和大于主计数）时差值落负，钳制为 0。
-// 输出与两个缓存字段原样写出；思考 token 子项非零时回填 output_tokens_details，为零时省略该嵌套对象。
+// 缓存写按互斥口径回填：分档字段非零时写 cache_creation 明细与合计，否则写不分档合计。
+// 思考 token 子项非零时回填 output_tokens_details，为零时省略该嵌套对象。
 func wireUsageFromDomain(usage domain.Usage) wireUsage {
-	inputTokens := usage.InputTokens - usage.CacheReadTokens - usage.CacheWriteTokens
+	cacheWriteTotal := cacheWriteQuantity(usage.CacheWriteTokens, usage)
+	inputTokens := usage.InputTokens - usage.CacheReadTokens - cacheWriteTotal
 	if inputTokens < 0 {
 		inputTokens = 0
 	}
@@ -831,11 +905,17 @@ func wireUsageFromDomain(usage domain.Usage) wireUsage {
 		InputTokens:              inputTokens,
 		OutputTokens:             usage.OutputTokens,
 		CacheReadInputTokens:     usage.CacheReadTokens,
-		CacheCreationInputTokens: usage.CacheWriteTokens,
+		CacheCreationInputTokens: cacheWriteTotal,
+	}
+	if hasCacheWriteTiers(usage) {
+		wire.CacheCreation = &cacheCreationDetail{
+			Ephemeral5mInputTokens: tokenCount{value: usage.CacheWrite5mTokens, valid: true},
+			Ephemeral1hInputTokens: tokenCount{value: usage.CacheWrite1hTokens, valid: true},
+		}
 	}
 	if usage.ReasoningTokens != 0 {
 		wire.OutputTokensDetails = &outputTokensDetails{
-			ThinkingTokens: thinkingTokens{value: usage.ReasoningTokens, valid: true},
+			ThinkingTokens: tokenCount{value: usage.ReasoningTokens, valid: true},
 		}
 	}
 	return wire

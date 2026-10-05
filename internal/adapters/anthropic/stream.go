@@ -29,6 +29,8 @@ type deltaUsage struct {
 	OutputTokens             *int `json:"output_tokens"`
 	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	// CacheCreation 是缓存写的分档明细；叶子用 tokenCount 保留「给出 0」与「未给出」的区分。
+	CacheCreation *cacheCreationDetail `json:"cache_creation"`
 	// OutputTokensDetails 指向与响应侧同一内层类型：nil、叶子缺失或形状非预期都表示「未给出」。
 	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details"`
 }
@@ -90,6 +92,10 @@ type streamDecoder struct {
 	// 之后都经 syncInputTokens 重算 usage.InputTokens，
 	// 不得把线格式的 input_tokens 直接写进 usage.InputTokens。
 	inputTokens int
+	// cacheWriteTotal 保存 Anthropic 线格式的 cache_creation_input_tokens 合计。
+	// 它与 usage.CacheWriteTokens 分开保存：合计既用于重算输入总数，也用于在分档字段全零时
+	// 回填不分档口径；上游给出分档明细时不分档字段保持 0，两个口径互斥。
+	cacheWriteTotal int
 	// finishReason 是 message_delta 累积的结束原因，由 message_stop 处的结束分片一并产出。
 	// 该协议可以有多个 message_delta，后一次给出非空 stop_reason 时覆盖前一次。
 	finishReason domain.FinishReason
@@ -109,17 +115,30 @@ func (d *streamDecoder) reportedUsage() (domain.Usage, bool) {
 		return domain.Usage{}, false
 	}
 	return domain.Usage{
-		Source:           domain.UsageSourceUpstream,
-		InputTokens:      d.usage.InputTokens,
-		CacheReadTokens:  d.usage.CacheReadTokens,
-		CacheWriteTokens: d.usage.CacheWriteTokens,
+		Source:             domain.UsageSourceUpstream,
+		InputTokens:        d.usage.InputTokens,
+		CacheReadTokens:    d.usage.CacheReadTokens,
+		CacheWriteTokens:   d.usage.CacheWriteTokens,
+		CacheWrite5mTokens: d.usage.CacheWrite5mTokens,
+		CacheWrite1hTokens: d.usage.CacheWrite1hTokens,
 	}.BoundSubitemsToMain(), true
 }
 
-// syncInputTokens 按「线格式 input_tokens + 两个缓存计数」重算内部输入总数。
+// syncInputTokens 按「线格式 input_tokens + 缓存读 + 缓存写合计」重算内部输入总数。
 // 内部统一口径是「子项 ⊆ 主计数」，Anthropic 的线格式是并列相加，差异收敛在此。
 func (d *streamDecoder) syncInputTokens() {
-	d.usage.InputTokens = d.inputTokens + d.usage.CacheReadTokens + d.usage.CacheWriteTokens
+	d.usage.InputTokens = d.inputTokens + d.usage.CacheReadTokens + cacheWriteQuantity(d.cacheWriteTotal, d.usage)
+}
+
+// syncCacheWrite 按互斥口径回填不分档字段：上游给出任一档明细时用分档，分档字段全零时用合计。
+// 分档与合计同时出现是 Anthropic 的正常形态（两者都给），互斥只在内部表示上强制：
+// 分档能表达更细的计价口径，不分档字段因此保持 0。
+func (d *streamDecoder) syncCacheWrite() {
+	if hasCacheWriteTiers(d.usage) {
+		d.usage.CacheWriteTokens = 0
+		return
+	}
+	d.usage.CacheWriteTokens = d.cacheWriteTotal
 }
 
 // applyDeltaUsage 用 message_delta 的累计用量覆盖已累计状态。
@@ -128,30 +147,31 @@ func (d *streamDecoder) syncInputTokens() {
 // 而不是累加，并在此时才把来源标为上游。该事件可能只带部分字段或完全不带 usage：
 // 只有上游明确给出的字段才覆盖 message_start 的基准值，字段缺失时保留基准值，不得把
 // 「未给出」当成 0 清空。同一轮出现多个 message_delta 时，后一次覆盖前一次。
-// 思考 token 子项只在嵌套对象与叶子都按预期形状给出时才覆盖。对象缺失、叶子缺失或
-// 形状非预期都保留已有值，不清零。
+// 思考 token 子项与缓存写分档明细只在嵌套对象与叶子都按预期形状给出时才覆盖。
+// 对象缺失、叶子缺失或形状非预期都保留已有值，不清零。
 func (d *streamDecoder) applyDeltaUsage(u *deltaUsage) {
 	d.usage.Source = domain.UsageSourceUpstream
 	if u.InputTokens != nil {
 		d.inputTokens = *u.InputTokens
 	}
-	if u.InputTokens != nil || u.CacheReadInputTokens != nil || u.CacheCreationInputTokens != nil {
+	if u.InputTokens != nil || u.CacheReadInputTokens != nil || u.CacheCreationInputTokens != nil || u.CacheCreation != nil {
 		// 上游在 message_delta 里明确给出输入或缓存字段，即视为已陈述输入侧事实。
 		d.inputStated = true
 	}
 	if u.OutputTokens != nil {
 		d.usage.OutputTokens = *u.OutputTokens
 	}
-	if u.CacheReadInputTokens != nil {
-		d.usage.CacheReadTokens = *u.CacheReadInputTokens
-	}
 	if u.CacheCreationInputTokens != nil {
-		d.usage.CacheWriteTokens = *u.CacheCreationInputTokens
+		d.cacheWriteTotal = *u.CacheCreationInputTokens
+	}
+	if u.CacheCreation != nil {
+		applyCacheCreation(&d.usage, u.CacheCreation)
 	}
 	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ThinkingTokens.valid {
 		d.usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens.value
 	}
-	// 每次覆盖之后都按三者之和重算输入总数，保证内部口径恒成立。
+	// 每次覆盖之后都重算缓存写口径与输入总数，保证内部口径恒成立。
+	d.syncCacheWrite()
 	d.syncInputTokens()
 	// 度量倒挂防护：上游把 reasoned 或缓存的子项报得比主计数还大时，抬高主计数后再交付，
 	// 否则落库会违反「子项不得大于主计数」的检查约束。
@@ -198,6 +218,7 @@ func (d *streamDecoder) decode(event string, data []byte) ([]domain.Chunk, error
 		d.ignored = nil
 		d.usage = domain.Usage{}
 		d.inputTokens = 0
+		d.cacheWriteTotal = 0
 		d.finishReason = ""
 		d.model = ""
 		d.inputStated = false
@@ -212,10 +233,12 @@ func (d *streamDecoder) decode(event string, data []byte) ([]domain.Chunk, error
 				d.inputStated = true
 				d.inputTokens = ev.Message.Usage.InputTokens
 				d.usage.CacheReadTokens = ev.Message.Usage.CacheReadInputTokens
-				d.usage.CacheWriteTokens = ev.Message.Usage.CacheCreationInputTokens
+				d.cacheWriteTotal = ev.Message.Usage.CacheCreationInputTokens
+				applyCacheCreation(&d.usage, ev.Message.Usage.CacheCreation)
 			}
 		}
-		// 输入总量按线格式 input_tokens 与两个缓存计数之和重算。
+		// 按互斥口径回填缓存写不分档字段，再按线格式与缓存计数之和重算输入总量。
+		d.syncCacheWrite()
 		d.syncInputTokens()
 		return nil, nil
 
