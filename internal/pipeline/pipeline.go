@@ -45,7 +45,8 @@ type Options struct {
 	Usage domain.UsageRecorder
 	// Breaker 是渠道熔断器；可为 nil（不熔断，候选渠道按解析顺序逐个尝试）。
 	// 非 nil 时，遍历候选时跳过处于熔断打开态的渠道，并在每条渠道尝试（含凭据轮换）结束后
-	// 按最终结果上报。
+	// 按最终结果上报。实现同时满足 BreakerProber 时，全部候选被拒的请求会放行第一条做探测，
+	// 而不是直接返回「所有候选渠道均处于熔断状态」。
 	Breaker Breaker
 	// Credentials 在渠道尝试内按序切换组内凭据；可为 nil（不轮换，每次尝试只用一份凭据）。
 	// 非 nil 时，凭据类失败不消耗尝试预算，改为在同一次渠道尝试内换下一条凭据；
@@ -301,12 +302,26 @@ func (p *Pipeline) forward(
 	// upstreamCalls 统计本请求实际发出的上游调用次数，供尝试记录编号；
 	// 它对凭据切换同样递增，因此同一条渠道上的多次凭据试用在记录里各占一条。
 	upstreamCalls := 0
+	// breakerProbe 标记本次迭代是「全部候选被熔断拒绝」后放行的探测：跳过熔断检查。
+	breakerProbe := false
 	for i := 0; i < len(candidateRoutes) && attemptsMade < attemptLimit; i++ {
 		route := candidateRoutes[i]
 		// 熔断跳过：打开态渠道不参与调度，不计入尝试次数。
-		if !p.allowRoute(route) {
+		if !breakerProbe && !p.allowRoute(route) {
+			p.recordBreakerSkip(ctx, req, route, attemptsMade+1)
+			// 走到最后一条候选仍无一放行，说明全部候选都处于熔断打开态：放行第一条候选做一次
+			// 探测（宁可试一次），而不是直接把整条链路判为不可用。Allow 会推进半开状态，
+			// 无法预先扫描候选集合，只能在遍历到末尾时确认，再把游标拨回第一条并绕过熔断检查。
+			// 探测位已满时 Probe 返回 false，此时维持既有的失败封闭。
+			if attemptsMade == 0 && i == len(candidateRoutes)-1 {
+				if prober, ok := p.breaker.(BreakerProber); ok && prober.Probe(candidateRoutes[0].UpstreamID) {
+					breakerProbe = true
+					i = -1
+				}
+			}
 			continue
 		}
+		breakerProbe = false
 		body, requestParts, finalizeErr := p.finalizeRequest(req, route)
 		if finalizeErr != nil {
 			return finalizeErr
@@ -478,6 +493,28 @@ func (p *Pipeline) recordRouteOutcome(route domain.Route, err error) {
 		return
 	}
 	p.breaker.Record(route.UpstreamID, err)
+}
+
+// recordBreakerSkip 把一次因熔断打开而被跳过的候选写进尝试记录；未配置观测器时不做任何事。
+//
+// 跳过的候选没有发起上游调用，因此结果记为 skipped、用量与错误码为空；attempt 取「本来会
+// 排到的尝试序号」，使同一请求内被跳过的候选与真实尝试在时间线上可排序。
+func (p *Pipeline) recordBreakerSkip(ctx context.Context, req *domain.Request, route domain.Route, attempt int) {
+	if p.observer == nil {
+		return
+	}
+	_ = p.observer.RecordAttempt(ctx, domain.AttemptRecord{
+		RequestID:        req.RequestID,
+		Attempt:          attempt,
+		ClientProtocol:   req.Protocol,
+		UpstreamProtocol: route.Protocol,
+		CrossProtocol:    route.Protocol != req.Protocol,
+		RequestedModel:   req.Model,
+		UpstreamID:       route.UpstreamID,
+		ChannelID:        route.ChannelID,
+		UpstreamModel:    route.UpstreamModel,
+		Outcome:          domain.AttemptSkipped,
+	})
 }
 
 // recordAttempt 把一次上游尝试写入观测记录；未配置观测器时不做任何事。

@@ -411,12 +411,19 @@ type UpstreamAttemptSink interface {
 }
 
 // AttemptOutcome 是一次上游尝试的结果分类。
+//
+// AttemptSkipped 用于被熔断器过滤、未发起上游调用的候选：它占一条尝试记录的位置，
+// 但不代表发生过上游调用，用量与耗时都是零值。
 type AttemptOutcome string
 
 const (
 	AttemptOK        AttemptOutcome = "ok"
 	AttemptFailed    AttemptOutcome = "failed"
 	AttemptCancelled AttemptOutcome = "cancelled"
+	// AttemptSkipped 表示该候选因熔断打开被跳过，没有发起上游调用。
+	// 与 failed 的区别是：failed 代表一次真实的上游调用失败，skipped 只说明候选在调度阶段
+	// 就被熔断器过滤，排障时据此区分「上游真的坏了」与「网关主动不再打它」。
+	AttemptSkipped AttemptOutcome = "skipped"
 )
 
 // AttemptRecord 是一次上游尝试的可观测记录。
@@ -426,9 +433,13 @@ const (
 // 本类型是「这次尝试到底发了什么、上游回了什么」的完整事实来源：没有数据库之后，
 // 排查只能依靠这些字段，因此协议两侧、模型名两侧与上游用量都要照实记录，
 // 而不是只留一个笼统的结果。
+//
+// Outcome 为 AttemptSkipped 的记录代表候选在调度阶段就被熔断器过滤，没有发起上游调用；
+// 这类记录的用量、耗时与上游状态码都是零值，其存在只为回答「网关为什么没有打这条渠道」。
 type AttemptRecord struct {
 	RequestID string
-	Attempt   int
+	// Attempt 是本次尝试的序号；被跳过的候选取「本来会排到的序号」。
+	Attempt int
 	// ClientProtocol 是客户端使用的线协议，UpstreamProtocol 是本次尝试发往上游的线协议。
 	// 两者不同即表示网关做了跨协议重建，使用方据此判定「这次转发转换过协议」。
 	ClientProtocol   Protocol

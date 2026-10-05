@@ -1202,6 +1202,153 @@ func TestGatewayRateLimitTimeoutFallsBackToNextChannel(t *testing.T) {
 	}
 }
 
+// TestGatewayBreakerSkipsFailingChannel 覆盖端到端熔断：故障渠道连续 5 次上游 500 后
+// 进入打开态，第 6 个请求不再打到它，由健康渠道服务，且被跳过的候选在尝试日志里留下
+// skipped 结果。
+func TestGatewayBreakerSkipsFailingChannel(t *testing.T) {
+	const (
+		successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+		threshold   = 5
+	)
+	var failingCalls, healthyCalls int64
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&failingCalls, 1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
+	}))
+	defer failing.Close()
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&healthyCalls, 1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer healthy.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		// 优先级不同即无需随机：故障渠道先试，回退到健康渠道。
+		routes: []store.RouteCandidate{
+			{ChannelID: 10, BaseURL: failing.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 10},
+			{ChannelID: 20, BaseURL: healthy.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 5},
+		},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	var buf bytes.Buffer
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout:  5 * time.Second,
+		BreakerThreshold: threshold,
+		BreakerCooldown:  time.Minute,
+		Observer:         newAttemptObserver(newJSONLogger(&buf)),
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	request := `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`
+	endpoint := server.URL + domain.ProtocolOpenAIChat.EndpointPath()
+
+	// 前 5 个请求各自在故障渠道上失败一次后回退到健康渠道，客户端无感。
+	for i := 0; i < threshold; i++ {
+		if result := doPost(t, endpoint, authSchemePrefix+testAPIKey, request); result.status != http.StatusOK {
+			t.Fatalf("第 %d 个请求状态码 = %d，期望 200，响应体 %s", i+1, result.status, result.body)
+		}
+	}
+	// 第 6 个请求：故障渠道已打开，直接由健康渠道服务。
+	if result := doPost(t, endpoint, authSchemePrefix+testAPIKey, request); result.status != http.StatusOK {
+		t.Fatalf("熔断后请求状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+	if got := atomic.LoadInt64(&failingCalls); got != threshold {
+		t.Errorf("故障渠道被调用 = %d 次，期望停在 %d", got, threshold)
+	}
+	if got := atomic.LoadInt64(&healthyCalls); got != threshold+1 {
+		t.Errorf("健康渠道被调用 = %d 次，期望 %d", got, threshold+1)
+	}
+
+	skipped := 0
+	for _, line := range attemptLogLines(t, &buf) {
+		var outcome string
+		if err := json.Unmarshal(line["outcome"], &outcome); err != nil {
+			t.Fatalf("解析 outcome 失败：%v", err)
+		}
+		if outcome == string(domain.AttemptSkipped) {
+			skipped++
+		}
+	}
+	if skipped != 1 {
+		t.Errorf("熔断跳过的尝试日志 = %d 条，期望 1 条：%s", skipped, buf.String())
+	}
+}
+
+// TestGatewayBreakerProbesWhenAllChannelsOpen 覆盖「全部候选被熔断时放行一个探测」：
+// 唯一候选打开后，下一个请求仍会绕过剩余冷却期探测一次，而不是直接返回失败。
+func TestGatewayBreakerProbesWhenAllChannelsOpen(t *testing.T) {
+	var calls int64
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"message":"boom"}}`)
+	}))
+	defer failing.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		routes: []store.RouteCandidate{
+			{ChannelID: 10, BaseURL: failing.URL, CredGroup: "group-a", UpstreamModel: "up-model"},
+		},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	var buf bytes.Buffer
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout:  5 * time.Second,
+		BreakerThreshold: 1,
+		BreakerCooldown:  time.Minute,
+		Observer:         newAttemptObserver(newJSONLogger(&buf)),
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	request := `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`
+	endpoint := server.URL + domain.ProtocolOpenAIChat.EndpointPath()
+
+	// 首个请求把唯一候选打到打开态。
+	if result := doPost(t, endpoint, authSchemePrefix+testAPIKey, request); result.status != http.StatusBadGateway {
+		t.Fatalf("首个请求状态码 = %d，期望 502，响应体 %s", result.status, result.body)
+	}
+	// 第二个请求在冷却期未满时仍探测一次，而不是直接回 502「所有候选熔断」。
+	if result := doPost(t, endpoint, authSchemePrefix+testAPIKey, request); result.status != http.StatusBadGateway {
+		t.Fatalf("探测请求状态码 = %d，期望 502，响应体 %s", result.status, result.body)
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Errorf("故障渠道被调用 = %d 次，期望 2（第 1 次失败打开、第 2 次探测）", got)
+	}
+
+	// 第二个请求的尝试日志先记熔断跳过，再记一次真实探测失败。
+	lines := attemptLogLines(t, &buf)
+	if len(lines) != 3 {
+		t.Fatalf("尝试日志行数 = %d，期望 3：%s", len(lines), buf.String())
+	}
+	last := lines[len(lines)-1]
+	var outcome string
+	if err := json.Unmarshal(last["outcome"], &outcome); err != nil {
+		t.Fatalf("解析 outcome 失败：%v", err)
+	}
+	if outcome != string(domain.AttemptFailed) {
+		t.Errorf("末条日志 outcome = %q，期望 %q", outcome, domain.AttemptFailed)
+	}
+}
+
 // TestGatewayConcurrencyLimitSerializesRequests 覆盖并发上限 1 的渠道上两个并发请求：
 //
 // 上游任一时刻只应看到 1 个在途请求，两个请求都完成，且并发位不泄漏——

@@ -88,6 +88,15 @@ func TestLoadServeDefaults(t *testing.T) {
 	if got.RateLimitWait != defaultRateLimitWait {
 		t.Errorf("RateLimitWait = %s，期望 %s", got.RateLimitWait, defaultRateLimitWait)
 	}
+	if got.BreakerThreshold != defaultBreakerThreshold {
+		t.Errorf("BreakerThreshold = %d，期望 %d", got.BreakerThreshold, defaultBreakerThreshold)
+	}
+	if got.BreakerCooldown != defaultBreakerCooldown {
+		t.Errorf("BreakerCooldown = %s，期望 %s", got.BreakerCooldown, defaultBreakerCooldown)
+	}
+	if got.BreakerProbes != defaultBreakerProbes {
+		t.Errorf("BreakerProbes = %d，期望 %d", got.BreakerProbes, defaultBreakerProbes)
+	}
 }
 
 // TestLoadServeExplicitTimeoutsAndPool 断言显式给出的超时与连接池取值原样生效。
@@ -103,6 +112,9 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 		envUsageWriteTimeout:           "3s",
 		envCredentialCooldown:          "45s",
 		envRateLimitWait:               "750ms",
+		envBreakerThreshold:            "9",
+		envBreakerCooldown:             "1m",
+		envBreakerProbes:               "3",
 	}))
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
@@ -131,6 +143,15 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 	if got.RateLimitWait != 750*time.Millisecond {
 		t.Errorf("RateLimitWait = %s，期望 750ms", got.RateLimitWait)
 	}
+	if got.BreakerThreshold != 9 {
+		t.Errorf("BreakerThreshold = %d，期望 9", got.BreakerThreshold)
+	}
+	if got.BreakerCooldown != time.Minute {
+		t.Errorf("BreakerCooldown = %s，期望 1m", got.BreakerCooldown)
+	}
+	if got.BreakerProbes != 3 {
+		t.Errorf("BreakerProbes = %d，期望 3", got.BreakerProbes)
+	}
 }
 
 // TestLoadServeRejectsInvalidTimeoutsAndPool 断言非正数与非法时长在启动前报错。
@@ -154,6 +175,13 @@ func TestLoadServeRejectsInvalidTimeoutsAndPool(t *testing.T) {
 		{name: "限流等待为零", key: envRateLimitWait, val: "0s"},
 		{name: "限流等待为负", key: envRateLimitWait, val: "-1s"},
 		{name: "限流等待格式错", key: envRateLimitWait, val: "2"},
+		{name: "熔断阈值为零", key: envBreakerThreshold, val: "0"},
+		{name: "熔断阈值为负", key: envBreakerThreshold, val: "-1"},
+		{name: "熔断阈值格式错", key: envBreakerThreshold, val: "five"},
+		{name: "熔断冷却为零", key: envBreakerCooldown, val: "0s"},
+		{name: "熔断冷却格式错", key: envBreakerCooldown, val: "30"},
+		{name: "熔断探测并发为零", key: envBreakerProbes, val: "0"},
+		{name: "熔断探测并发为负", key: envBreakerProbes, val: "-2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
