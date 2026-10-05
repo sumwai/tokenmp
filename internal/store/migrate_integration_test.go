@@ -7,18 +7,31 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"math/big"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
 // envTestDSN 指向一个可丢弃的库：本测试会先删掉已知表再重建。
 const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 
-// knownTables 与 migrations/0001_init.sql 对应，删除顺序无关紧要（全库无外键）。
+// knownTables 与 migrations/0001_init.sql、0002_billing.sql 对应，
+// 删除顺序无关紧要（全库无外键）。
 var knownTables = []string{
+	"billing_adjustment",
+	"account_quota_event",
+	"account_quota",
+	"account_purchase",
+	"merchant_product",
+	"sys_calendar",
+	"billing_price_rule",
+	"billing_price_component",
+	"billing_pricing",
 	"billing_usage",
 	"account_bucket",
 	"account_api_key",
@@ -74,7 +87,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 1)
+	assertMigrationVersionCount(ctx, t, s.DB(), 2)
 	assertPlatformMerchantCount(ctx, t, s.DB(), 1)
 }
 
@@ -141,4 +154,214 @@ func TestValidateChannelTypeIntegration(t *testing.T) {
 	if err := store.ValidateChannelType(store.ChannelTypeFromDB("not_a_protocol")); err == nil {
 		t.Error("未知协议应当被拒绝")
 	}
+}
+
+// decimalEqual 按数值比较两个 DECIMAL 文本。数据库会把写入值补到列标度
+// （写入 "0.27" 读回 "0.27000000"），字符串相等判断会误报。
+func decimalEqual(a, b string) bool {
+	ra, okA := new(big.Rat).SetString(a)
+	rb, okB := new(big.Rat).SetString(b)
+	return okA && okB && ra.Cmp(rb) == 0
+}
+
+// TestBillingStoreRoundTrip 在真实 MySQL 上把 0002 的新表走一遍写读回环。
+// 无数据库时不跑；无此验证的 store 方法只能在集成环境里暴露参数顺序、
+// DECIMAL / DATETIME 扫描这类只在真实驱动下才暴露的问题。
+func TestBillingStoreRoundTrip(t *testing.T) {
+	dsn := os.Getenv(envTestDSN)
+	if dsn == "" {
+		t.Skipf("未设置 %s，跳过计费表写读回环", envTestDSN)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	s, err := store.Open(ctx, store.Config{DSN: dsn})
+	if err != nil {
+		t.Fatalf("打开数据库失败：%v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("关闭连接失败：%v", err)
+		}
+	})
+
+	dropKnownTables(ctx, t, s.DB())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cleanupCancel()
+		dropKnownTables(cleanupCtx, t, s.DB())
+	})
+
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+
+	// 定价版本与分量。
+	pricingID, err := s.InsertPricing(ctx, store.Pricing{
+		MerchantID: 1, Model: "gpt-test", Version: 1, EffectiveAt: now,
+	})
+	if err != nil {
+		t.Fatalf("写入定价失败：%v", err)
+	}
+	if err := s.InsertPriceComponents(ctx, []store.PriceComponent{
+		{
+			PricingID:  pricingID,
+			Metric:     billing.MetricInputToken,
+			UnitSettle: billing.UnitSettleCurrency,
+			UnitPrice:  "0.27",
+			BasisQty:   "1000000",
+		},
+		{
+			PricingID:  pricingID,
+			Metric:     billing.MetricOutputToken,
+			UnitSettle: billing.UnitSettleCurrency,
+			UnitPrice:  "1.10",
+			BasisQty:   "1000000",
+			TierFrom:   "1000",
+			TierTo:     "5000",
+			TierBasis:  "request_input",
+		},
+	}); err != nil {
+		t.Fatalf("写入计价分量失败：%v", err)
+	}
+	components, err := s.PriceComponents(ctx, pricingID)
+	if err != nil {
+		t.Fatalf("读取计价分量失败：%v", err)
+	}
+	if len(components) != 2 {
+		t.Fatalf("计价分量行数 = %d，期望 2", len(components))
+	}
+	if !decimalEqual(components[0].UnitPrice, "0.27") || !decimalEqual(components[1].TierTo, "5000") || components[1].TierBasis != "request_input" {
+		t.Errorf("计价分量回读内容不符：%+v", components)
+	}
+
+	active, err := s.ActivePricing(ctx, 1, "gpt-test", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("查询生效定价失败：%v", err)
+	}
+	if active.ID != pricingID || active.Version != 1 {
+		t.Errorf("生效定价 = (%d, v%d)，期望 (%d, v1)", active.ID, active.Version, pricingID)
+	}
+
+	// 改价 = 置位旧版 + 插新版；置位后旧版不再是 active。
+	if err := s.RetireActivePricing(ctx, 1, "gpt-test", now); err != nil {
+		t.Fatalf("置位 retired_at 失败：%v", err)
+	}
+	if _, err := s.ActivePricing(ctx, 1, "gpt-test", now.Add(time.Hour)); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("置位后应查不到 active 定价，得到 %v", err)
+	}
+
+	// 规则：增、查、删。
+	mask := uint8(1 << 6) // 仅周日
+	validFrom := now.Add(-24 * time.Hour)
+	ruleID, err := s.InsertPriceRule(ctx, store.PriceRule{
+		Scope:       billing.ScopePricing,
+		ScopeID:     pricingID,
+		Metric:      billing.MetricInputToken,
+		Multiplier:  "0.5",
+		ValidFrom:   &validFrom,
+		TimeFrom:    "22:00:00",
+		WeekdayMask: &mask,
+		Priority:    200,
+	})
+	if err != nil {
+		t.Fatalf("写入规则失败：%v", err)
+	}
+	rules, err := s.PriceRulesByScope(ctx, billing.ScopePricing, pricingID)
+	if err != nil {
+		t.Fatalf("读取规则失败：%v", err)
+	}
+	if len(rules) != 1 || rules[0].ID != ruleID || rules[0].WeekdayMask == nil || *rules[0].WeekdayMask != mask {
+		t.Errorf("规则回读内容不符：%+v", rules)
+	}
+	if rules[0].TimeFrom != "22:00:00" {
+		t.Errorf("规则时段回读不符：%q", rules[0].TimeFrom)
+	}
+	if rules[0].ValidFrom == nil || !rules[0].ValidFrom.Equal(validFrom) || rules[0].ValidTo != nil {
+		t.Errorf("规则有效期回读不符：%+v", rules[0])
+	}
+	if err := s.DeletePriceRule(ctx, ruleID); err != nil {
+		t.Fatalf("删除规则失败：%v", err)
+	}
+	if rules, err = s.PriceRulesByScope(ctx, billing.ScopePricing, pricingID); err != nil || len(rules) != 0 {
+		t.Errorf("删除后规则应为空，得到 %v（err=%v）", rules, err)
+	}
+
+	// 日历：批量 upsert 后回读，重复 upsert 覆盖同一日期。
+	if err := s.UpsertCalendarDays(ctx, "cn", []store.CalendarDay{
+		{Date: "2026-10-01", DayKind: billing.DayKindHoliday},
+		{Date: "2026-09-27", DayKind: billing.DayKindMakeupWorkday},
+	}); err != nil {
+		t.Fatalf("写入日历失败：%v", err)
+	}
+	if err := s.UpsertCalendarDays(ctx, "cn", []store.CalendarDay{
+		{Date: "2026-10-01", DayKind: billing.DayKindWeekend},
+	}); err != nil {
+		t.Fatalf("覆盖日历失败：%v", err)
+	}
+	days, err := s.CalendarDays(ctx, "cn", "2026-09-01", "2026-10-31")
+	if err != nil {
+		t.Fatalf("读取日历失败：%v", err)
+	}
+	if len(days) != 2 {
+		t.Fatalf("日历行数 = %d，期望 2（%+v）", len(days), days)
+	}
+	if days[0].Date != "2026-09-27" || days[0].DayKind != billing.DayKindMakeupWorkday {
+		t.Errorf("日历首行不符：%+v", days[0])
+	}
+	if days[1].Date != "2026-10-01" || days[1].DayKind != billing.DayKindWeekend {
+		t.Errorf("日历覆盖未生效：%+v", days[1])
+	}
+
+	// 商品与购买。
+	productID, err := s.InsertProduct(ctx, store.Product{
+		MerchantID: 1, Name: "10 元 100M", Unit: billing.UnitSettleToken,
+		Qty: "100000000", Price: "10", ModelScope: []byte(`["gpt-test"]`), ValidityDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("写入商品失败：%v", err)
+	}
+	product, err := s.Product(ctx, productID)
+	if err != nil {
+		t.Fatalf("读取商品失败：%v", err)
+	}
+	if product.Unit != billing.UnitSettleToken || !decimalEqual(product.Qty, "100000000") || product.ValidityDays != 30 {
+		t.Errorf("商品回读内容不符：%+v", product)
+	}
+	if _, err := s.InsertPurchase(ctx, store.Purchase{
+		AccountID: 1, MerchantID: 1, ProductID: productID, Qty: "1", PricePaid: "10", PurchasedAt: now,
+	}); err != nil {
+		t.Fatalf("写入购买记录失败：%v", err)
+	}
+
+	// 限额与重置事件。
+	quotaID, err := s.InsertQuota(ctx, store.Quota{
+		Scope: billing.ScopeAccount, ScopeID: 1, Metric: billing.MetricRequest,
+		WindowKind: billing.WindowKindRolling, Period: billing.Period5h,
+		LimitAmount: "1000", Action: billing.ActionReject,
+	})
+	if err != nil {
+		t.Fatalf("写入限额失败：%v", err)
+	}
+	if _, err := s.InsertQuotaEvent(ctx, store.QuotaEvent{
+		QuotaID: quotaID, Event: billing.QuotaEventReset, BaselineAt: now, Reason: "运营重置", Operator: "ops",
+	}); err != nil {
+		t.Fatalf("写入重置事件失败：%v", err)
+	}
+
+	// 调账。
+	if _, err := s.InsertAdjustment(ctx, store.Adjustment{
+		AccountID: 1, DeltaAmount: "-1.5", Reason: "误扣补偿", Operator: "ops", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入调账失败：%v", err)
+	}
+
+	// 迁移幂等：写完数据后重跑迁移不应失败，也不应重复建表或清数据。
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("重复迁移失败：%v", err)
+	}
+	assertMigrationVersionCount(ctx, t, s.DB(), 2)
 }

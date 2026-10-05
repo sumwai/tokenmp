@@ -2,6 +2,7 @@ package store
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -104,6 +105,69 @@ func TestSplitStatementsKeepsActualMigrationWhole(t *testing.T) {
 	// 初始迁移包含 8 张业务表、1 张版本表之外的种子插入，语句数至少应是表数加一。
 	if len(statements) < 9 {
 		t.Errorf("真实迁移只解析出 %d 条语句，疑似被切碎", len(statements))
+	}
+}
+
+// TestBillingMigrationContent 锁定 0002 的形状：新表建全、DDL 里不出现
+// 被本次枚举减法删掉的列，且沿用 IF NOT EXISTS 与无外键的约定。
+//
+// 断言前先用 splitStatements 去掉注释：注释里会出现「刻意没有 status 列」
+// 这类说明文字，直接扫描原文会把说明当成列定义。
+func TestBillingMigrationContent(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0002_billing.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	script := strings.Join(statements, "\n")
+
+	billingTables := []string{
+		"billing_pricing",
+		"billing_price_component",
+		"billing_price_rule",
+		"sys_calendar",
+		"account_quota",
+		"account_quota_event",
+		"billing_adjustment",
+		"merchant_product",
+		"account_purchase",
+	}
+	for _, table := range billingTables {
+		if !strings.Contains(script, "CREATE TABLE IF NOT EXISTS "+table) {
+			t.Errorf("0002 缺少 CREATE TABLE IF NOT EXISTS %s", table)
+		}
+	}
+
+	// 全库不建外键：一致性由应用层事务保证。
+	if strings.Contains(strings.ToUpper(script), "FOREIGN KEY") {
+		t.Error("0002 不应建外键")
+	}
+
+	// 枚举减法：这些列不再以列定义的形态出现。列名后面跟类型，故用
+	// 行首 + 名字 + 空白的模式；被删除列的说明文字可能留在 COMMENT 字符串里，
+	// 那种出现不算列定义。
+	forbiddenColumns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^\s*status\s`),
+		regexp.MustCompile(`(?m)^\s*reset_policy\s`),
+		regexp.MustCompile(`(?m)^\s*currency\s`),
+	}
+	for _, re := range forbiddenColumns {
+		if loc := re.FindString(script); loc != "" {
+			t.Errorf("0002 不应出现列定义 %q", strings.TrimSpace(loc))
+		}
+	}
+
+	// 定价版本用 retired_at IS NULL 表达 active。
+	if !strings.Contains(script, "retired_at") {
+		t.Error("billing_pricing 缺少 retired_at")
+	}
+	// 窗口类型拆成两列，不是组合串。
+	if !strings.Contains(script, "window_kind") || !strings.Contains(script, "period") {
+		t.Error("account_quota 缺少 window_kind / period 拆分列")
+	}
+	// 计价分量不带 currency 列，结算单位由 unit_settle 表达。
+	if !strings.Contains(script, "unit_settle") {
+		t.Error("billing_price_component 缺少 unit_settle")
 	}
 }
 
