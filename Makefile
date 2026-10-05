@@ -1,7 +1,7 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 
-.PHONY: build build-binary test lint fmt fmt-check check check-integration tools
+.PHONY: build build-binary test lint fmt fmt-check check check-integration e2e tools
 
 # 编译检查。刻意把产物导到临时目录并在退出时删除，而不是裸跑 `go build ./...`：
 # 当模块里只有一个 main 包时（本仓库当前就是），`go build ./...` 会把可执行文件
@@ -97,6 +97,17 @@ check: build test lint fmt-check
 # 迁移涉及的表再重建。未设置该变量时测试跳过而非失败。
 check-integration:
 	$(GO) test -tags=integration -race -count=1 ./internal/store/...
+
+# 端到端运营剧本：真实 MySQL、真实监听端口与进程内假上游，一条贯穿入驻到对账的验证。
+#
+# 刻意不加入 check：与 check-integration 同一理由 —— check 的契约是无外部依赖。
+# DSN 同样经 TOKENMP_TEST_MYSQL_DSN 传入，须指向可丢弃的库；未设置该变量时测试跳过而非失败。
+# 剧本自带数据清理（开跑前与跑完各清一次全库），连跑两次不会因残留冲突。
+#
+# 构建标签把剧本文件与 make check 隔离；-run '^TestE2E' 再把本次执行限定在剧本本身 ——
+# cmd/tokenmp 下还有一批不依赖数据库的单测，它们不在本目标的验证范围内。
+e2e:
+	$(GO) test -tags=e2e -race -count=1 -run '^TestE2E' ./cmd/tokenmp/...
 
 # 按 .mise.toml 装齐本机工具链。
 tools:

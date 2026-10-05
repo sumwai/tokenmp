@@ -33,9 +33,12 @@ jobs:
       # 不会出现「本地能过、CI 报另一个 lint 规则」这类版本漂移。
       - run: make check
 
-  # 真实 MySQL 上的迁移与事务验证。check 的契约是无外部依赖，
-  # 所以结算事务、FOR UPDATE 锁、JSON 聚合这些只能在数据库上验的路径
-  # 放在独立 job：CI 强制跑，本机仍可不装 MySQL。
+  # 真实 MySQL 上的迁移、事务与端到端运营剧本验证。check 的契约是无外部依赖，
+  # 所以结算事务、FOR UPDATE 锁、JSON 聚合以及「入驻→调用→扣费→对账」全链
+  # 只能在数据库上验的路径放在独立 job：CI 强制跑，本机仍可不装 MySQL。
+  #
+  # 剧本并入本 job 而不是另开一个：两者都需要一份 MySQL service，合并后只声明一份，
+  # 两个 make 目标串行执行、各自跑前跑后清库，不会互相打扰；任一失败同样阻断合并。
   integration:
     runs-on: ubuntu-latest
     services:
@@ -60,4 +63,10 @@ jobs:
       - run: make check-integration
         env:
           # 指向 service 起的可丢弃库：测试会先删表再重建。
+          TOKENMP_TEST_MYSQL_DSN: root:tokenmp-ci@tcp(127.0.0.1:3306)/tokenmp_test?parseTime=true
+
+      # 端到端运营剧本。与上一步共用同一份 MySQL service 与 DSN 口径；
+      # 剧本用独立的构建标签与目标，跑前跑后都清库，因此两步串行不会互相影响。
+      - run: make e2e
+        env:
           TOKENMP_TEST_MYSQL_DSN: root:tokenmp-ci@tcp(127.0.0.1:3306)/tokenmp_test?parseTime=true

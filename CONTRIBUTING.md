@@ -15,6 +15,7 @@ make check          # 编译、单测（-race）、静态检查、格式检查
 ```
 
 `make check` 只依赖 Go 与 golangci-lint，不需要 docker、数据库或 node。
+CI 另外在真实 MySQL 上执行 `make check-integration` 与 `make e2e`，两者都需 `TOKENMP_TEST_MYSQL_DSN`。
 
 ## 提交规范
 
