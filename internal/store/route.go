@@ -130,8 +130,12 @@ func (s *Store) LookupAPIKey(ctx context.Context, keyHash string, now time.Time)
 // Config 与 RequestOverrides 是原始 JSON，存储层不解释其结构。
 type RouteCandidate struct {
 	ChannelID uint64
-	BaseURL   string
-	CredGroup string
+	// ChannelType 是该渠道自身的协议方言。同协议查询下它恒等于查询用的方言；
+	// 不限协议查询下它就是本条候选实际使用的上游协议，装配层据此判定是否需要重建。
+	// 取值经 ChannelTypeFromDB 宽容转换：读到本版本不认识的方言时原样返回，由上层决定跳过。
+	ChannelType ChannelType
+	BaseURL     string
+	CredGroup   string
 	// Priority 是渠道的路由排序值，值大者优先；同优先级内由选路策略决定顺序。
 	// 存储层按它降序返回，但同优先级内的加权随机不在存储层完成，故把取值交给调用方。
 	Priority             int
@@ -143,10 +147,20 @@ type RouteCandidate struct {
 	RequestOverrides     []byte
 }
 
-const routeCandidatesSQL = `SELECT c.id, c.base_url, c.cred_group, c.priority, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
+// routeCandidateColumns 是两条候选查询共用的列清单与连接条件。
+//
+// 同协议查询与不限协议查询只差一个 type 谓词：共用同一段前缀使两条查询的列序、
+// 排序口径与扫描目标必然一致，跨协议补段时的行解析不必另写一份。
+const routeCandidateColumns = `SELECT c.id, c.type, c.base_url, c.cred_group, c.priority, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
 FROM upstream_channel c
 JOIN upstream_model_map m ON m.channel_id = c.id
-WHERE c.type = ? AND c.enabled = 1 AND c.merchant_id = ? AND m.model = ? AND m.enabled = 1
+WHERE `
+
+const routeCandidatesSQL = routeCandidateColumns + `c.type = ? AND c.enabled = 1 AND c.merchant_id = ? AND m.model = ? AND m.enabled = 1
+ORDER BY c.priority DESC, c.id`
+
+// routeCandidatesAnyTypeSQL 不限制渠道协议方言，供跨协议补段使用。
+const routeCandidatesAnyTypeSQL = routeCandidateColumns + `c.enabled = 1 AND c.merchant_id = ? AND m.model = ? AND m.enabled = 1
 ORDER BY c.priority DESC, c.id`
 
 // routeCandidates 查某商家下、某协议方言与某模型命中的候选渠道。
@@ -157,25 +171,57 @@ func routeCandidates(ctx context.Context, q querier, channelType ChannelType, mo
 	if err := ValidateChannelType(channelType); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(model) == "" {
-		return nil, errors.New("store: upstream_model_map.model 不能为空")
-	}
-	if merchantID == 0 {
-		return nil, errors.New("store: upstream_channel.merchant_id 不能为 0")
+	if err := validateRouteQuery(model, merchantID); err != nil {
+		return nil, err
 	}
 	rows, err := q.QueryContext(ctx, routeCandidatesSQL, channelType, merchantID, model)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 upstream_channel 失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	return scanRouteCandidates(rows)
+}
 
+// routeCandidatesAnyType 查某商家下、任意协议方言与某模型命中的候选渠道。
+//
+// 除不限定 c.type 外与 routeCandidates 完全同构：列清单、过滤项与排序都来自同一份定义，
+// 因此同一商家同一模型下两条查询的结果集只差协议方言这一维，调用方可以按渠道 id 直接去重。
+func routeCandidatesAnyType(ctx context.Context, q querier, model string, merchantID uint64) ([]RouteCandidate, error) {
+	if err := validateRouteQuery(model, merchantID); err != nil {
+		return nil, err
+	}
+	rows, err := q.QueryContext(ctx, routeCandidatesAnyTypeSQL, merchantID, model)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 upstream_channel 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanRouteCandidates(rows)
+}
+
+// validateRouteQuery 校验两条候选查询共用的入参：模型名与商家。
+func validateRouteQuery(model string, merchantID uint64) error {
+	if strings.TrimSpace(model) == "" {
+		return errors.New("store: upstream_model_map.model 不能为空")
+	}
+	if merchantID == 0 {
+		return errors.New("store: upstream_channel.merchant_id 不能为 0")
+	}
+	return nil
+}
+
+// scanRouteCandidates 解析候选查询的行集。
+func scanRouteCandidates(rows rowIter) ([]RouteCandidate, error) {
 	var candidates []RouteCandidate
 	for rows.Next() {
-		var c RouteCandidate
-		if err := rows.Scan(&c.ChannelID, &c.BaseURL, &c.CredGroup, &c.Priority, &c.Weight,
+		var (
+			c           RouteCandidate
+			channelType string
+		)
+		if err := rows.Scan(&c.ChannelID, &channelType, &c.BaseURL, &c.CredGroup, &c.Priority, &c.Weight,
 			&c.RateLimitQPS, &c.RateLimitConcurrency, &c.Config, &c.UpstreamModel, &c.RequestOverrides); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
 		}
+		c.ChannelType = ChannelTypeFromDB(channelType)
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -187,6 +233,14 @@ func routeCandidates(ctx context.Context, q querier, channelType ChannelType, mo
 // RouteCandidates 查某商家下、某协议方言与某模型命中的候选渠道。
 func (s *Store) RouteCandidates(ctx context.Context, channelType ChannelType, model string, merchantID uint64) ([]RouteCandidate, error) {
 	return routeCandidates(ctx, dbQuerier{db: s.db}, channelType, model, merchantID)
+}
+
+// RouteCandidatesAnyType 查某商家下、任意协议方言与某模型命中的候选渠道。
+//
+// 结果里同一渠道的协议方言由 RouteCandidate.ChannelType 给出；本方法不按方言过滤，
+// 是否把某条候选当作跨协议回退由装配层的选路决定。
+func (s *Store) RouteCandidatesAnyType(ctx context.Context, model string, merchantID uint64) ([]RouteCandidate, error) {
+	return routeCandidatesAnyType(ctx, dbQuerier{db: s.db}, model, merchantID)
 }
 
 // Credential 是 upstream_credential 的一行：同组内用于轮换的一份上游凭据。

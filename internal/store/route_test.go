@@ -176,8 +176,8 @@ func TestResolveMerchantID(t *testing.T) {
 
 func TestRouteCandidates(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(11), "https://up.example.com/api/v3", "group-a", 200, 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
-		{uint64(12), "https://up.example.com", "group-b", 100, 100, 0, 0, nil, "glm-4", nil},
+		{uint64(11), "openai_chat", "https://up.example.com/api/v3", "group-a", 200, 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
+		{uint64(12), "openai_chat", "https://up.example.com", "group-b", 100, 100, 0, 0, nil, "glm-4", nil},
 	}}
 
 	got, err := routeCandidates(context.Background(), fake, ChannelTypeOpenAIChat, "alias", 7)
@@ -196,13 +196,15 @@ func TestRouteCandidates(t *testing.T) {
 	}
 	want := []RouteCandidate{
 		{
-			ChannelID: 11, BaseURL: "https://up.example.com/api/v3", CredGroup: "group-a",
+			ChannelID: 11, ChannelType: ChannelTypeOpenAIChat,
+			BaseURL: "https://up.example.com/api/v3", CredGroup: "group-a",
 			Priority: 200, Weight: 200, RateLimitQPS: 10, RateLimitConcurrency: 4,
 			Config: []byte(`{"headers":{"x":"y"}}`), UpstreamModel: "glm-5",
 			RequestOverrides: []byte(`{"temperature":0.2}`),
 		},
 		{
-			ChannelID: 12, BaseURL: "https://up.example.com", CredGroup: "group-b",
+			ChannelID: 12, ChannelType: ChannelTypeOpenAIChat,
+			BaseURL: "https://up.example.com", CredGroup: "group-b",
 			Priority: 100, Weight: 100, UpstreamModel: "glm-4",
 		},
 	}
@@ -232,6 +234,84 @@ func TestRouteCandidatesRejectsBadInput(t *testing.T) {
 				t.Errorf("校验失败不应触达驱动，实际调用 %d 次", fake.calls)
 			}
 		})
+	}
+}
+
+// TestRouteCandidatesAnyType 覆盖不限协议候选查询：SQL 不得出现 type 谓词，
+// 并如实给出每行的协议方言。
+func TestRouteCandidatesAnyType(t *testing.T) {
+	fake := &recordedQuery{rows: [][]any{
+		{uint64(21), "anthropic_messages", "https://claude.example.com", "group-c", 300, 100, 0, 0, nil, "claude-sonnet", nil},
+		{uint64(22), "openai_chat", "https://up.example.com", "group-a", 200, 100, 5, 2, nil, "glm-5", nil},
+	}}
+
+	got, err := routeCandidatesAnyType(context.Background(), fake, "alias", 7)
+	if err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if fake.query != routeCandidatesAnyTypeSQL {
+		t.Errorf("SQL = %q，期望 %q", fake.query, routeCandidatesAnyTypeSQL)
+	}
+	if strings.Contains(fake.query, "c.type = ?") {
+		t.Errorf("不限协议查询不应限定 type：%s", fake.query)
+	}
+	wantArgs := []any{uint64(7), "alias"}
+	if !reflect.DeepEqual(fake.args, wantArgs) {
+		t.Errorf("参数 = %#v，期望 %#v", fake.args, wantArgs)
+	}
+	want := []RouteCandidate{
+		{
+			ChannelID: 21, ChannelType: ChannelTypeAnthropicMessages,
+			BaseURL: "https://claude.example.com", CredGroup: "group-c",
+			Priority: 300, Weight: 100, UpstreamModel: "claude-sonnet",
+		},
+		{
+			ChannelID: 22, ChannelType: ChannelTypeOpenAIChat,
+			BaseURL: "https://up.example.com", CredGroup: "group-a",
+			Priority: 200, Weight: 100, RateLimitQPS: 5, RateLimitConcurrency: 2, UpstreamModel: "glm-5",
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("结果 = %#v，期望 %#v", got, want)
+	}
+}
+
+// TestRouteCandidatesAnyTypeRejectsBadInput 守护不限协议查询同样校验模型与商家。
+func TestRouteCandidatesAnyTypeRejectsBadInput(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		merchantID uint64
+	}{
+		{name: "模型为空", model: "  ", merchantID: 1},
+		{name: "商家为零", model: "m", merchantID: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &recordedQuery{}
+			if _, err := routeCandidatesAnyType(context.Background(), fake, tt.model, tt.merchantID); err == nil {
+				t.Fatal("应当被拒绝")
+			}
+			if fake.calls != 0 {
+				t.Errorf("校验失败不应触达驱动，实际调用 %d 次", fake.calls)
+			}
+		})
+	}
+}
+
+// TestRouteCandidatesAnyTypeKeepsUnknownChannelType 守护读方向的宽容：
+// 库表出现本版本不认识的协议方言时原样带出，由上层跳过该行而不是让整批查询失败。
+func TestRouteCandidatesAnyTypeKeepsUnknownChannelType(t *testing.T) {
+	fake := &recordedQuery{rows: [][]any{
+		{uint64(31), "gemini_generate", "https://gemini.example.com", "group-d", 100, 100, 0, 0, nil, "gemini-2", nil},
+	}}
+
+	got, err := routeCandidatesAnyType(context.Background(), fake, "alias", 1)
+	if err != nil {
+		t.Fatalf("未知方言不应让整批查询失败：%v", err)
+	}
+	if len(got) != 1 || got[0].ChannelType != ChannelType("gemini_generate") {
+		t.Fatalf("未知方言应原样保留，实际 %#v", got)
 	}
 }
 
