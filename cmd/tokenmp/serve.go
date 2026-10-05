@@ -24,6 +24,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/quota"
+	"github.com/sumwai/tokenmp/internal/ratelimit"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/transport"
@@ -102,6 +103,9 @@ type gatewayOptions struct {
 	MaxAttempts int
 	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；非正时取凭据包的默认值。
 	CredentialCooldown time.Duration
+	// RateLimitWait 是渠道限流下等待令牌的最长时间；非正时取限流包的默认值。
+	// 等待超时的渠道尝试按可重试失败换下一条候选，不直接回给客户端报错。
+	RateLimitWait time.Duration
 	// CredentialLogger 记录凭据冷却与切换；nil 时不记录。
 	CredentialLogger *slog.Logger
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
@@ -192,6 +196,8 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Observer:    opts.Observer,
 		Usage:       newUsageRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
+		// 限流器按渠道 id 缓存：同一渠道的所有请求共享一个令牌桶与一个并发信号量。
+		Limiter:     ratelimit.NewManager(ratelimit.Options{MaxWait: opts.RateLimitWait}),
 		MaxAttempts: attempts,
 	})
 	if err != nil {
@@ -301,6 +307,9 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 			BaseURL:          endpointURL(c.BaseURL, req.Protocol),
 			CredentialRef:    c.CredGroup,
 			RequestOverrides: sanitizeRequestOverrides(c),
+			// 限流上限随候选一并带上：限流器按渠道 id 缓存，取值变化时重建。
+			RateLimitQPS:         c.RateLimitQPS,
+			RateLimitConcurrency: c.RateLimitConcurrency,
 		})
 	}
 	return routes, nil
@@ -403,6 +412,7 @@ func cmdServe(stderr io.Writer) int {
 		UpstreamIdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
 		UsageWriteTimeout:           cfg.UsageWriteTimeout,
 		CredentialCooldown:          cfg.CredentialCooldown,
+		RateLimitWait:               cfg.RateLimitWait,
 		CredentialLogger:            newJSONLogger(os.Stdout),
 		Logger:                      newAccessLogger(os.Stdout),
 		Observer:                    newAttemptObserver(newJSONLogger(os.Stdout)),

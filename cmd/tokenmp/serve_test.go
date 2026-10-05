@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1077,5 +1078,175 @@ func TestGatewaySettlementEndToEnd(t *testing.T) {
 	st.mu.Unlock()
 	if remaining.String() != "0.99877" {
 		t.Errorf("账本余量 = %s，期望 0.99877（1 - 0.00123）", remaining)
+	}
+}
+
+// postForConcurrency 在 goroutine 中发一次转发请求，只回状态码与错误。
+//
+// 并发用例不能在子 goroutine 里调 t.Fatalf，故不复用 doPost。
+func postForConcurrency(url string) (int, error) {
+	body := `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(authorizationHeader, authSchemePrefix+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, nil
+}
+
+// TestGatewayRateLimitTimeoutFallsBackToNextChannel 覆盖限流等待超时走渠道回退。
+//
+// 等待上限取 1ns：令牌不足时在第一次判定就超时，用例不依赖真实等待。
+func TestGatewayRateLimitTimeoutFallsBackToNextChannel(t *testing.T) {
+	const successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+
+	var primaryCalls, fallbackCalls int64
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&primaryCalls, 1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&fallbackCalls, 1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer fallback.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		// 优先级不同即无需随机：受限渠道先试，超时后换低优先级渠道。
+		routes: []store.RouteCandidate{
+			{ChannelID: 10, BaseURL: primary.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 10, RateLimitQPS: 1},
+			{ChannelID: 5, BaseURL: fallback.URL, CredGroup: "group-a", UpstreamModel: "up-model", Priority: 5},
+		},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	var buf bytes.Buffer
+	gw, err := newGateway(st, gatewayOptions{
+		CompleteTimeout: 5 * time.Second,
+		RateLimitWait:   time.Nanosecond,
+		Observer:        newAttemptObserver(newJSONLogger(&buf)),
+	})
+	if err != nil {
+		t.Fatalf("装配网关失败：%v", err)
+	}
+	defer gw.Close()
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+
+	request := `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`
+	endpoint := server.URL + domain.ProtocolOpenAIChat.EndpointPath()
+	// 首个请求消耗受限渠道的令牌，走受限渠道成功。
+	if first := doPost(t, endpoint, authSchemePrefix+testAPIKey, request); first.status != http.StatusOK {
+		t.Fatalf("首个请求状态码 = %d，期望 200，响应体 %s", first.status, first.body)
+	}
+	// 第二个请求令牌不足，等待超时后换下一条候选。
+	second := doPost(t, endpoint, authSchemePrefix+testAPIKey, request)
+	if second.status != http.StatusOK {
+		t.Fatalf("回退后状态码 = %d，期望 200，响应体 %s", second.status, second.body)
+	}
+	if got := atomic.LoadInt64(&primaryCalls); got != 1 {
+		t.Errorf("受限渠道上游调用 = %d，期望 1（第二次应被限流拦下）", got)
+	}
+	if got := atomic.LoadInt64(&fallbackCalls); got != 1 {
+		t.Errorf("回退渠道上游调用 = %d，期望 1", got)
+	}
+
+	lines := attemptLogLines(t, &buf)
+	if len(lines) != 3 {
+		t.Fatalf("尝试日志行数 = %d，期望 3：%s", len(lines), buf.String())
+	}
+	var code string
+	if err := json.Unmarshal(lines[1]["error_code"], &code); err != nil {
+		t.Fatalf("解析 error_code 失败：%v", err)
+	}
+	if code != string(domain.CodeUpstreamRateLimited) {
+		t.Errorf("第二条日志错误码 = %q，期望 %q", code, domain.CodeUpstreamRateLimited)
+	}
+	if got := string(lines[2]["channel_switched"]); got != "true" {
+		t.Errorf("第三条日志 channel_switched = %s，期望 true", got)
+	}
+}
+
+// TestGatewayConcurrencyLimitSerializesRequests 覆盖并发上限 1 的渠道上两个并发请求：
+//
+// 上游任一时刻只应看到 1 个在途请求，两个请求都完成，且并发位不泄漏——
+// 第三个请求仍能正常完成。
+func TestGatewayConcurrencyLimitSerializesRequests(t *testing.T) {
+	const successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+
+	var active, maxActive int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := atomic.AddInt64(&active, 1)
+		for {
+			observed := atomic.LoadInt64(&maxActive)
+			if current <= observed || atomic.CompareAndSwapInt64(&maxActive, observed, current) {
+				break
+			}
+		}
+		// 留出重叠窗口：没有并发位约束时第二个请求会同时进入本处理器。
+		time.Sleep(20 * time.Millisecond)
+		atomic.AddInt64(&active, -1)
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer upstream.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		routes: []store.RouteCandidate{{
+			ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+			RateLimitConcurrency: 1,
+		}},
+		credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		wantMerchantID: 1,
+	}
+	gw := newTestGateway(t, st)
+	server := httptest.NewServer(gw.handler)
+	defer server.Close()
+	endpoint := server.URL + domain.ProtocolOpenAIChat.EndpointPath()
+
+	statuses := make([]int, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range statuses {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			statuses[i], errs[i] = postForConcurrency(endpoint)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个请求失败：%v", i+1, err)
+		}
+		if statuses[i] != http.StatusOK {
+			t.Errorf("第 %d 个请求状态码 = %d，期望 200", i+1, statuses[i])
+		}
+	}
+	if got := atomic.LoadInt64(&maxActive); got > 1 {
+		t.Errorf("上游并发峰值 = %d，期望不超过 1", got)
+	}
+
+	// 并发位已全部归还：第三个请求不得因残留占用而超时。
+	if third := doPost(t, endpoint, authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`); third.status != http.StatusOK {
+		t.Errorf("第三个请求状态码 = %d，期望 200，响应体 %s", third.status, third.body)
 	}
 }
