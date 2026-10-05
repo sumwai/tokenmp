@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.4](https://github.com/sumwai/tokenmp/compare/v0.1.3...v0.1.4) (2026-10-05)
+
+
+### Features
+
+* **credential:** 上游凭据轮换与失败切换 ([#25](https://github.com/sumwai/tokenmp/issues/25)) ([7b401be](https://github.com/sumwai/tokenmp/commit/7b401beb54de8ab97e860dfcf88e4d7ee599c311))
+* 尝试级观测接入生产装配 ([#28](https://github.com/sumwai/tokenmp/issues/28)) ([6ced34d](https://github.com/sumwai/tokenmp/commit/6ced34d9e4590869eb59408d4b0a7478e879908f))
+* 用量分档承载与 usage 帧抑制 ([#27](https://github.com/sumwai/tokenmp/issues/27)) ([8a643e6](https://github.com/sumwai/tokenmp/commit/8a643e60f19c96ef564bed4c60fa0fffbd7053c9))
+
 ## [0.1.3](https://github.com/sumwai/tokenmp/compare/v0.1.2...v0.1.3) (2026-10-05)
 
 
