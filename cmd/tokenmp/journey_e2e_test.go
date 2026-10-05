@@ -7,7 +7,8 @@
 //  1. 迁移就位 + admin 服务层全链（商家→渠道→凭据→模型映射→定价→开户→发 key→充值→买 token 包）
 //  2. 启动 serve（真实监听端口）+ 进程内假上游
 //  3. 三方言 × 流式/非流式调用：200、流水落库、结算五字段、账本可复算
-//  4. 限额演练：超限 429 quota_exceeded → reset → 放行
+//  4. 限额演练：input_token 超限 429 quota_exceeded → reset → 放行；
+//     request 计数限额前 3 次放行、第 4 次 429
 //  5. 凭据轮换：第一把 401、第二把成功，流水仅一行
 //  6. 跨协议：客户端方言与渠道方言不一致时成功转换
 //  7. admin 回读：usage list 与 bucket list 数值与剧本断言一致
@@ -86,9 +87,9 @@ const (
 	e2eTokenPackageQty = "1000000"
 	e2eRechargeAmount  = "100"
 	// 限额演练的额度：等于单次请求的输入 token 数，故一次即用满、第二次被拦。
-	// 用 input_token 而不是 request 计数：限额聚合读的是 billing_usage.usage 的 JSON 键，
-	// 而 request 计数不写入该 JSON（见 billing.UsageFromDomain），按它设限永远不会超限。
 	e2eQuotaLimit = "12"
+	// request 维度限额演练的额度：前 3 次放行、第 4 次被拦。
+	e2eRequestQuotaLimit = "3"
 	// 假上游回答的正文，用于确认客户端拿到的是本次上游应答而不是空响应。
 	e2eUpstreamText = "e2e-response"
 	// http.StatusOK 一类的字面量不在此重复，直接用标准库取值。
@@ -811,6 +812,9 @@ func e2eAssertSettledRow(t *testing.T, row e2eUsageRow, index int) {
 	if got := metrics[string(billing.MetricOutputToken)]; got != e2eOutputTokens {
 		t.Errorf("第 %d 行 output_token = %d，期望 %d", index, got, e2eOutputTokens)
 	}
+	if got := metrics[string(billing.MetricRequest)]; got != 1 {
+		t.Errorf("第 %d 行 request = %d，期望 1（一次请求一行）", index, got)
+	}
 }
 
 // assertTokenLedger 断言 token 包账本按「单次 39 token × 流水行数」下降。
@@ -835,9 +839,12 @@ func (j *e2eJourney) assertTokenLedger(t *testing.T, settled int) {
 
 // step4Quota 覆盖运营路径第 4 步：限额演练。
 //
-// 用专用密钥 + key 维度限额，避免污染主密钥的用量口径：第一次放行、第二次 429、
-// reset 后第三次放行。限额是「达到即拦截」，所以 limit 取单次输入 token 数时
-// 第一次 used=0 放行、第二次 used=12 拦截。
+// 两段演练都用 key 维度限额，避免污染主密钥的用量口径：
+//
+//   - input_token：第一次放行、第二次 429、reset 后放行。限额是「达到即拦截」，
+//     所以 limit 取单次输入 token 数时第一次 used=0 放行、第二次 used=12 拦截。
+//   - request：另一把密钥上按请求次数设限，前 3 次放行、第 4 次 429。request 分量由
+//     落库路径生成（一次请求一行），这段同时验证 usage JSON 逐行写了 request=1。
 func (j *e2eJourney) step4Quota(t *testing.T) {
 	ctx := j.ctx
 	var err error
@@ -884,6 +891,42 @@ func (j *e2eJourney) step4Quota(t *testing.T) {
 
 	// 配额密钥放行 2 次（被拒的那次不落流水），账本按累计行数复算。
 	j.settledRequests += 2
+	j.assertTokenLedger(t, j.settledRequests)
+
+	// 第二段：request 计数限额。另发一把密钥，使 request 聚合从 0 起算，
+	// 不与上面 input_token 限额留下的流水混在一起。
+	requestKey, err := j.svc.IssueKey(ctx, admin.IssueKeyInput{
+		AccountID: j.accountID, MerchantID: &j.merchantID, Name: "e2e-quota-request",
+	})
+	e2eMust(t, err)
+	_, err = j.svc.CreateQuota(ctx, admin.QuotaInput{
+		Scope:       billing.ScopeAPIKey,
+		ScopeID:     requestKey.ID,
+		Metric:      billing.MetricRequest,
+		WindowKind:  billing.WindowKindCalendar,
+		Period:      billing.PeriodDay,
+		LimitAmount: e2eRequestQuotaLimit,
+		Action:      billing.ActionReject,
+	})
+	e2eMust(t, err)
+
+	// 前 3 次已用量分别为 0/1/2，放行；第 4 次 used=3，达到限额即拦截。
+	for i := 1; i <= 3; i++ {
+		allowed := e2ePost(t, endpoint, requestKey.Plaintext, request)
+		if allowed.status != http.StatusOK {
+			t.Fatalf("request 限额内第 %d 次请求状态码 = %d，期望 200，响应体 %s", i, allowed.status, allowed.body)
+		}
+	}
+	fourth := e2ePost(t, endpoint, requestKey.Plaintext, request)
+	if fourth.status != http.StatusTooManyRequests {
+		t.Fatalf("request 限额第 4 次请求状态码 = %d，期望 429，响应体 %s", fourth.status, fourth.body)
+	}
+	if code := e2eErrorCode(t, fourth.body); code != string(domain.CodeQuotaExceeded) {
+		t.Fatalf("request 超限错误码 = %q，期望 %q", code, domain.CodeQuotaExceeded)
+	}
+
+	// 被拒的那次不落流水，只有放行的 3 次计入账本。
+	j.settledRequests += 3
 	j.assertTokenLedger(t, j.settledRequests)
 }
 
