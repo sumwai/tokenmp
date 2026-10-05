@@ -37,7 +37,9 @@ CI 另外在真实 MySQL 上执行 `make check-integration` 与 `make e2e`，两
 
 - 端点路径、请求/响应字段、状态码、错误码、SSE 事件形态变更 → 更新 [docs/openapi.yaml](docs/openapi.yaml)；
 - 参数处理、模型名替换、跨协议降级、用量与计费口径变更 → 更新 [docs/compatibility.md](docs/compatibility.md)；
-- 命令、目录、环境变量或版本行为的变更 → 更新 [README.md](README.md)。
+- 命令、目录或版本行为的变更 → 更新 [README.md](README.md)；
+- 环境变量、启动与迁移、优雅关闭等部署行为的变更 → 更新 [docs/deploy.md](docs/deploy.md)；
+- 运营动作命令序列的变更 → 更新 [docs/operations.md](docs/operations.md)。
 
 规范只写已经存在的事实：功能先落地，再改规范；不写计划、进度与待办。
 新增根目录文档前先确认职责不与上表及 [AGENTS.md](AGENTS.md) 的文档职责表重叠。
