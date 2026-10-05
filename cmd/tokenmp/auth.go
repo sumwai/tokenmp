@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/settlement"
 )
 
 // 本文件是客户端鉴权与共享 JSON 错误体。
@@ -95,6 +96,8 @@ func newAuthenticator(store gatewayStore, now func() time.Time) *authenticator {
 // 三类失败合并为 401：头缺失或格式非法、密钥查不到或已过期、账户不可用。
 // 分开回不同状态码会把「这个密钥是否存在」「这个账户是否被停用」暴露给未授权调用方。
 // 存储层报出的是查询失败（非无匹配）时回 500，与鉴权失败区分开。
+//
+// 鉴权通过后做一次粗粒度额度预检：账户无任何可用额度时回 402 JSON，不做用量估算。
 func (a *authenticator) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get(authorizationHeader))
@@ -102,7 +105,8 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, domain.CodeUnauthorized, "缺少或非法的 Authorization 头")
 			return
 		}
-		auth, err := a.store.LookupAPIKey(r.Context(), hashAPIKey(token), a.now())
+		now := a.now()
+		auth, err := a.store.LookupAPIKey(r.Context(), hashAPIKey(token), now)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeJSONError(w, http.StatusUnauthorized, domain.CodeUnauthorized, "API key 无效或已过期")
@@ -113,6 +117,17 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 		}
 		if auth.AccountStatus != accountStatusActive {
 			writeJSONError(w, http.StatusUnauthorized, domain.CodeUnauthorized, "账户不可用")
+			return
+		}
+		// 402 预检：粗粒度地拦住「彻底没钱」的账户，不做用量估算。
+		// 预检失败回 500 而不是放行：放行会让无额度账户照样产生流水与欠额。
+		buckets, err := a.store.AccountBuckets(r.Context(), auth.AccountID)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, domain.CodeInternal, "额度预检失败")
+			return
+		}
+		if !settlement.Fundable(buckets, now) {
+			writeJSONError(w, http.StatusPaymentRequired, domain.CodeForbidden, "账户无可用额度")
 			return
 		}
 		ctx := withIdentity(r.Context(), identity{
