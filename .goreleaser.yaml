@@ -24,12 +24,14 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X main.version={{.Version}}
+      # 用 {{.Tag}} 而不是 {{.Version}}：后者会去掉 v 前缀，而本机构建走 git describe
+      # 拿到的是带 v 的 tag 名（v0.1.0）。两者口径不同会让产物报出的版本号与
+      # 本地构建、tag、Release 名对不上 —— 口径统一在带 v 一侧。
+      - -X main.version={{.Tag}}
       - -X main.commit={{.Commit}}
       # 用 {{.CommitDate}} 而不是 {{.Date}}：前者取提交时间，同一提交重复构建产出相同；
       # 后者是墙上时钟，每次构建都不同，破坏构建可复现性。
       - -X main.date={{.CommitDate}}
-      - -X main.builtBy=goreleaser
 
 archives:
   - id: tokenmp
