@@ -150,6 +150,27 @@ func classify(code Code) (ErrorClass, bool, int) {
 	}
 }
 
+// CredentialRejection 是上游错误可选实现的能力：明确表示「本次凭据未被上游接受」。
+//
+// 接口就地声明为消费者契约（同 pipeline 的 retryAfterHint）：生产者是上游客户端里
+// 拿到状态码与响应体的一方，domain 只提供结构匹配的读取入口，
+// 不要求本包感知 HTTP 状态码或响应体形状。
+type CredentialRejection interface {
+	CredentialRejected() bool
+}
+
+// CredentialRejected 报告错误是否明确属于凭据类失败（上游不接受本次凭据）。
+//
+// 判据宁窄勿宽：只有生产者能确认「这把 key 不被接受」，未被确认的错误一律返回 false，
+// 调用方按渠道回退而不是换凭据处理。
+func CredentialRejected(err error) bool {
+	var rejection CredentialRejection
+	if !errors.As(err, &rejection) {
+		return false
+	}
+	return rejection.CredentialRejected()
+}
+
 // AsError 从任意 error 中提取统一错误；不是统一错误时返回 nil。
 func AsError(err error) *Error {
 	var target *Error

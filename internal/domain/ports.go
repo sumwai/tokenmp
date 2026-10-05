@@ -232,6 +232,23 @@ type UpstreamCaller interface {
 	Stream(ctx context.Context, route Route, req *Request, body []byte, sink ChunkSink) error
 }
 
+// CredentialRotation 在一次渠道尝试内按序取用组内凭据，并在凭据类失败后推进到下一条。
+//
+// 之所以把这件事抽成端口而不是让流水线直接管凭据：组内有哪些凭据、轮换起点、冷却与
+// 试用上限都是装配层（凭据来源 + 进程内状态）的事实，流水线只消费两个结果——
+// 本次尝试该在哪个上下文里发请求、失败后能否原地再试一条。流水线因此不导入凭据包，
+// 也不感知凭据来源（数据库、内存表或密钥管理）。
+type CredentialRotation interface {
+	// Begin 开始一次渠道尝试的轮换，返回携带本次尝试所选凭据的上下文。
+	// 后续的凭据解析与上游请求都必须使用该上下文。
+	Begin(ctx context.Context, route Route) context.Context
+	// Advance 在本次尝试失败后推进到组内下一条可用凭据，返回携带新选择的上下文。
+	//
+	// 返回 false 表示该失败不属凭据类，或组内已无未试过的可用凭据；
+	// 两种情形调用方都按「本次渠道尝试失败」处理，不得原地重试。
+	Advance(ctx context.Context, route Route, failure error) (context.Context, bool)
+}
+
 // UpstreamRequestBuilder 把内部统一请求转换为上游协议请求体。
 //
 // 之所以新增独立接口而不继续给 Adapter 加方法：Adapter 的方法集合是三个协议实现

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -246,6 +247,65 @@ func TestGatewayForwardingThreeDialects(t *testing.T) {
 				t.Errorf("openai 不应带 x-api-key，实际 %q", got)
 			}
 		})
+	}
+}
+
+// TestGatewayRotatesCredentialOnAuthFailure 覆盖「第一把 key 401、第二把成功」的凭据切换。
+//
+// 断言三件事：上游按序收到两把 key、客户端拿到正常响应、billing_usage 只产生一行成功流水。
+func TestGatewayRotatesCredentialOnAuthFailure(t *testing.T) {
+	const successBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	var (
+		mu      sync.Mutex
+		gotKeys []string
+	)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		gotKeys = append(gotKeys, key)
+		mu.Unlock()
+		w.Header().Set("Content-Type", jsonContentType)
+		if key != "sk-second" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"type":"authentication_error","message":"invalid api key"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, successBody)
+	}))
+	defer upstreamServer.Close()
+
+	st := &fakeGatewayStore{
+		auth: activeAuth(),
+		routes: []store.RouteCandidate{{
+			ChannelID: 10, BaseURL: upstreamServer.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+		}},
+		credentials: []store.Credential{
+			{Name: "old", Secret: []byte(`{"api_key":"sk-first"}`)},
+			{Name: "new", Secret: []byte(`{"api_key":"sk-second"}`)},
+		},
+		wantMerchantID: 1,
+	}
+	server := httptest.NewServer(newTestGateway(t, st).handler)
+	defer server.Close()
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+	if string(result.body) != successBody {
+		t.Errorf("客户端应拿到成功的上游响应：\n实际 %s\n期望 %s", result.body, successBody)
+	}
+
+	mu.Lock()
+	keys := append([]string(nil), gotKeys...)
+	mu.Unlock()
+	if want := []string{"sk-first", "sk-second"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("上游收到的 key = %v，期望 %v", keys, want)
+	}
+	if rows := st.usageSnapshot(); len(rows) != 1 {
+		t.Fatalf("billing_usage 行数 = %d，期望 1", len(rows))
 	}
 }
 

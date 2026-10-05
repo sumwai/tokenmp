@@ -19,9 +19,14 @@ type accessLogger struct {
 // 编译期断言：本实现满足入口层的访问日志接口。
 var _ transport.AccessLogger = (*accessLogger)(nil)
 
+// newJSONLogger 构造写到 w 的 JSON 行式结构化日志；访问日志与凭据轮换日志共用同一形态。
+func newJSONLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, nil))
+}
+
 // newAccessLogger 构造写到 w 的 JSON 行式访问日志实现。
 func newAccessLogger(w io.Writer) *accessLogger {
-	return &accessLogger{logger: slog.New(slog.NewJSONHandler(w, nil))}
+	return &accessLogger{logger: newJSONLogger(w)}
 }
 
 // LogAccess 写一条请求日志。字段取访问记录里与协议无关的那些，

@@ -44,8 +44,13 @@ type Options struct {
 	// 流水线忽略其返回值，不改变对客户端的响应。
 	Usage domain.UsageRecorder
 	// Breaker 是渠道熔断器；可为 nil（不熔断，候选渠道按解析顺序逐个尝试）。
-	// 非 nil 时，遍历候选时跳过处于熔断打开态的渠道，并在每次上游尝试结束后上报结果。
+	// 非 nil 时，遍历候选时跳过处于熔断打开态的渠道，并在每条渠道尝试（含凭据轮换）结束后
+	// 按最终结果上报。
 	Breaker Breaker
+	// Credentials 在渠道尝试内按序切换组内凭据；可为 nil（不轮换，每次尝试只用一份凭据）。
+	// 非 nil 时，凭据类失败不消耗尝试预算，改为在同一次渠道尝试内换下一条凭据；
+	// 组内试遍后本次渠道尝试才算失败，再按 MaxAttempts 走渠道回退。
+	Credentials domain.CredentialRotation
 	// MaxAttempts 是单请求最多发起的上游尝试次数；<= 0 时取 maxAttemptsDefault。
 	MaxAttempts int
 	// Backoff 是换下一候选前的退避策略；零值字段取对应默认值。
@@ -60,6 +65,7 @@ type Pipeline struct {
 	observer    domain.Observer
 	usage       domain.UsageRecorder
 	breaker     Breaker
+	credentials domain.CredentialRotation
 	maxAttempts int
 	backoff     backoff
 }
@@ -106,6 +112,7 @@ func New(opts Options) (*Pipeline, error) {
 		observer:    opts.Observer,
 		usage:       opts.Usage,
 		breaker:     opts.Breaker,
+		credentials: opts.Credentials,
 		maxAttempts: maxAttempts,
 		backoff:     newBackoff(opts.Backoff),
 	}, nil
@@ -249,7 +256,8 @@ func writeStreamError(client domain.Adapter, out io.Writer, err error) {
 //
 //  1. 请求校验；
 //  2. 解析候选渠道；
-//  3. 按候选顺序执行尝试，可重试失败换下一个候选，不可重试或已向客户端写出字节立即进入终态。
+//  3. 每条候选渠道内先按序试遍组内凭据（凭据类失败时切换，不消耗尝试预算），
+//     该渠道尝试失败后可重试再换下一个候选，不可重试或已向客户端写出字节立即进入终态。
 //
 // 每次尝试的具体动作由 doAttempt 执行。out 实现 domain.RoutedModelSink 时被注入本次尝试
 // 实际使用的事由模型名，使客户端能读到网关最终履约的模型。
@@ -277,6 +285,9 @@ func (p *Pipeline) forward(
 	var lastRoute domain.Route
 	var lastResult attemptResult
 	attemptsMade := 0
+	// upstreamCalls 统计本请求实际发出的上游调用次数，供尝试记录编号；
+	// 它对凭据切换同样递增，因此同一条渠道上的多次凭据试用在记录里各占一条。
+	upstreamCalls := 0
 	for i := 0; i < len(candidateRoutes) && attemptsMade < attemptLimit; i++ {
 		route := candidateRoutes[i]
 		// 熔断跳过：打开态渠道不参与调度，不计入尝试次数。
@@ -289,13 +300,33 @@ func (p *Pipeline) forward(
 		}
 		attemptsMade++
 		p.markRoutedModel(out, route)
-		attempt := doAttempt(ctx, route, body, requestParts)
-		// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
-		// 请求结束时保留的是最终履约（或最终失败）的那次。
-		p.recordAttemptInfo(out, route, attempt)
+		attemptCtx := ctx
+		if p.credentials != nil {
+			attemptCtx = p.credentials.Begin(ctx, route)
+		}
+		// 内层按序试遍组内凭据：凭据类失败原地换下一条，不消耗换渠道的尝试预算。
+		// 上下文取消或已向客户端写出字节时不再切换，与「流式开写后不重试」同一判据。
+		var attempt attemptResult
+		for {
+			upstreamCalls++
+			attempt = doAttempt(attemptCtx, route, body, requestParts)
+			// 在尝试结束后立即回流渠道 id 与上游状态码：重试时后一次覆盖前一次，
+			// 请求结束时保留的是最终履约（或最终失败）的那次。
+			p.recordAttemptInfo(out, route, attempt)
+			attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
+			p.recordAttempt(ctx, req, route, upstreamCalls, attempt)
+			if attempt.Err == nil || ctx.Err() != nil || attempt.WroteBytes {
+				break
+			}
+			nextCtx, switched := p.advanceCredential(attemptCtx, route, attempt.Err)
+			if !switched {
+				break
+			}
+			attemptCtx = nextCtx
+		}
+		// 熔断按渠道尝试的最终结果上报：中间那几次凭据类失败不单独计入，
+		// 否则一把失效 key 会先把渠道判成故障。
 		p.recordRouteOutcome(route, attempt.Err)
-		attempt.ResponseParts = mergeParts(requestParts, attempt.ResponseParts)
-		p.recordAttempt(ctx, req, route, attemptsMade, attempt)
 		if attempt.Err == nil {
 			p.recordStreamUsage(ctx, req, route, attempt)
 			return nil
@@ -303,7 +334,7 @@ func (p *Pipeline) forward(
 		lastErr = attempt.Err
 		lastRoute = route
 		lastResult = attempt
-		if !domain.Retryable(attempt.Err) || ctx.Err() != nil || attempt.WroteBytes {
+		if !retryableFailure(attempt.Err) || ctx.Err() != nil || attempt.WroteBytes {
 			// 本次尝试已是终态（不可重试、上下文取消或已向客户端写出字节），
 			// 流式在此落库；可重试且未写出的失败尝试会换渠道，不产生流水。
 			p.recordStreamUsage(ctx, req, route, attempt)
@@ -330,6 +361,24 @@ func (p *Pipeline) forward(
 	// 候选耗尽或退避等待被取消：最后一次尝试已是终态，流式在此落库。
 	p.recordStreamUsage(ctx, req, lastRoute, lastResult)
 	return lastErr
+}
+
+// retryableFailure 报告一次渠道尝试失败能不能换下一条候选。
+//
+// 上游错误分级给出可重试，或该失败已被标注为凭据类时就换：凭据类失败走完渠道内的凭据轮换
+// 后（Advance 返回 false），换一条候选意味着换一组凭据，可能成功；而分级里 4xx 一律不可重试的
+// 口径只描述「同一组凭据下重试无益」，不适用于跨渠道。未被标注的 4xx 仍按不可重试处理，
+// 免把一次参数错误放大成对候选渠道的逐个试探。
+func retryableFailure(err error) bool {
+	return domain.Retryable(err) || domain.CredentialRejected(err)
+}
+
+// advanceCredential 询问凭据轮换器能否在本次渠道尝试内换下一条凭据；未装配轮换器时恒为否。
+func (p *Pipeline) advanceCredential(ctx context.Context, route domain.Route, failure error) (context.Context, bool) {
+	if p.credentials == nil {
+		return ctx, false
+	}
+	return p.credentials.Advance(ctx, route, failure)
 }
 
 // markRoutedModel 把本次尝试实际使用的事由模型名注入客户端写出目标；目标不支持该能力时为空操作。
