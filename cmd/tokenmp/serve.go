@@ -19,6 +19,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
+	"github.com/sumwai/tokenmp/internal/circuit"
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -87,6 +88,13 @@ type gatewayStore interface {
 // 编译期断言：真实存储层满足装配层的依赖面。
 var _ gatewayStore = (*store.Store)(nil)
 
+// 编译期断言：熔断器同时满足流水线的熔断端口与「全部候选被拒时放行探测」的兜底能力。
+// 兜底能力经类型断言检测，缺失时不会编译报错，因此在这里固定住。
+var (
+	_ pipeline.Breaker       = (*circuit.Breaker)(nil)
+	_ pipeline.BreakerProber = (*circuit.Breaker)(nil)
+)
+
 // gatewayOptions 是装配的可调参数；零值字段取对应默认值。
 type gatewayOptions struct {
 	// CompleteTimeout 是非流式请求的整段超时：既是 handler 侧整体 deadline，
@@ -108,6 +116,14 @@ type gatewayOptions struct {
 	// RateLimitWait 是渠道限流下等待令牌的最长时间；非正时取限流包的默认值。
 	// 等待超时的渠道尝试按可重试失败换下一条候选，不直接回给客户端报错。
 	RateLimitWait time.Duration
+	// BreakerThreshold 是渠道连续失败多少次后熔断打开；非正时取熔断包的默认值。
+	BreakerThreshold int
+	// BreakerCooldown 是渠道熔断打开后多久允许一笔探测；非正时取熔断包的默认值。
+	BreakerCooldown time.Duration
+	// BreakerProbes 是半开态同时放行的探测条数；非正时取熔断包的默认值。
+	BreakerProbes int
+	// BreakerLogger 记录熔断状态迁移；nil 时不记录。
+	BreakerLogger *slog.Logger
 	// CredentialLogger 记录凭据冷却与切换；nil 时不记录。
 	CredentialLogger *slog.Logger
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
@@ -199,7 +215,14 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Usage:       newUsageRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
 		// 限流器按渠道 id 缓存：同一渠道的所有请求共享一个令牌桶与一个并发信号量。
-		Limiter:     ratelimit.NewManager(ratelimit.Options{MaxWait: opts.RateLimitWait}),
+		Limiter: ratelimit.NewManager(ratelimit.Options{MaxWait: opts.RateLimitWait}),
+		// 熔断器按渠道标识统计连续上游硬故障，状态只存进程内。
+		Breaker: circuit.NewBreaker(circuit.Options{
+			FailureThreshold: opts.BreakerThreshold,
+			Cooldown:         opts.BreakerCooldown,
+			ProbeConcurrency: opts.BreakerProbes,
+			Logger:           opts.BreakerLogger,
+		}),
 		MaxAttempts: attempts,
 	})
 	if err != nil {
@@ -401,7 +424,11 @@ func cmdServe(stderr io.Writer) int {
 		UsageWriteTimeout:           cfg.UsageWriteTimeout,
 		CredentialCooldown:          cfg.CredentialCooldown,
 		RateLimitWait:               cfg.RateLimitWait,
+		BreakerThreshold:            cfg.BreakerThreshold,
+		BreakerCooldown:             cfg.BreakerCooldown,
+		BreakerProbes:               cfg.BreakerProbes,
 		CredentialLogger:            newJSONLogger(os.Stdout),
+		BreakerLogger:               newJSONLogger(os.Stdout),
 		Logger:                      newAccessLogger(os.Stdout),
 		Observer:                    newAttemptObserver(newJSONLogger(os.Stdout)),
 	})
