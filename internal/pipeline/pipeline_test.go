@@ -129,6 +129,13 @@ func chatRouteWithID(id uint64) domain.Route {
 	return route
 }
 
+// crossProtocolRouteWithID 返回指定渠道 id 的跨协议候选：客户端说 openai_chat、上游说 anthropic。
+func crossProtocolRouteWithID(id uint64) domain.Route {
+	route := chatRouteWithID(id)
+	route.Protocol = domain.ProtocolAnthropicMessages
+	return route
+}
+
 // TestForwardRecordsUsageBeforeClientWrite 断言非流式路径「先落 billing_usage、再回写客户端」。
 //
 // 流水是扣费与对账的事实来源，客户端拿到响应时它必须已经存在；
@@ -781,5 +788,156 @@ func TestForwardStreamHoldsLimiterUntilStreamEnds(t *testing.T) {
 	}
 	if limiter.releasedCount() != 1 {
 		t.Errorf("流结束后释放次数 = %d，期望 1", limiter.releasedCount())
+	}
+}
+
+// TestForwardCrossProtocolAttemptAfterSameProtocolSegmentExhausted 断言同协议段预算耗尽后
+// 仍会尝试跨协议段的候选：预算按段计量，同协议段的多条候选不会挤掉跨协议降级的机会。
+func TestForwardCrossProtocolAttemptAfterSameProtocolSegmentExhausted(t *testing.T) {
+	var calls []domain.Protocol
+	caller := fakeCaller{complete: func(_ context.Context, route domain.Route, _ *domain.Request, _ []byte) (*domain.UpstreamResult, error) {
+		calls = append(calls, route.Protocol)
+		if route.Protocol == domain.ProtocolOpenAIChat {
+			return nil, errRetryable
+		}
+		return successResult(), nil
+	}}
+	observer := &recordingObserver{}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters: crossProtocolAdapterLookup(),
+		Upstream: caller,
+		Routes: fakeRouteResolver{routes: []domain.Route{
+			chatRouteWithID(7), chatRouteWithID(8), crossProtocolRouteWithID(9),
+		}},
+		Observer:    observer,
+		MaxAttempts: 2,
+		Backoff:     fastBackoff(),
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("跨协议候选应被尝试并成功：%v", err)
+	}
+	want := []domain.Protocol{domain.ProtocolOpenAIChat, domain.ProtocolOpenAIChat, domain.ProtocolAnthropicMessages}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("上游协议序列 = %v，期望 %v", calls, want)
+	}
+	records := observer.snapshot()
+	if len(records) != 3 {
+		t.Fatalf("尝试记录数 = %d，期望 3", len(records))
+	}
+	// 用既有字段区分「段切换」与「预算耗尽」：末条标记换渠道且跨协议。
+	if last := records[2]; !last.CrossProtocol || !last.ChannelSwitched {
+		t.Errorf("末条记录应标记段切换：%+v", last)
+	}
+}
+
+// TestForwardCrossProtocolAttemptKeptWithSingleSameProtocolBudget 断言同协议段预算为 1 时，
+// 跨协议段仍保有独立的一次尝试，两段预算互不挤占。
+func TestForwardCrossProtocolAttemptKeptWithSingleSameProtocolBudget(t *testing.T) {
+	var calls []domain.Protocol
+	caller := fakeCaller{complete: func(_ context.Context, route domain.Route, _ *domain.Request, _ []byte) (*domain.UpstreamResult, error) {
+		calls = append(calls, route.Protocol)
+		if route.Protocol == domain.ProtocolOpenAIChat {
+			return nil, errRetryable
+		}
+		return successResult(), nil
+	}}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    crossProtocolAdapterLookup(),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRouteWithID(7), crossProtocolRouteWithID(9)}},
+		MaxAttempts: 1,
+		Backoff:     fastBackoff(),
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err != nil {
+		t.Fatalf("跨协议候选应被尝试并成功：%v", err)
+	}
+	want := []domain.Protocol{domain.ProtocolOpenAIChat, domain.ProtocolAnthropicMessages}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("上游协议序列 = %v，期望 %v", calls, want)
+	}
+}
+
+// TestForwardSegmentBudgetWithoutCrossProtocolCandidate 断言跨协议段无候选时不空转：
+// 同协议段预算用尽即结束遍历，不产生额外上游调用，也不出现跨协议尝试。
+func TestForwardSegmentBudgetWithoutCrossProtocolCandidate(t *testing.T) {
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		return nil, errRetryable
+	}}
+	observer := &recordingObserver{}
+	adapter := openaichat.New()
+	p, err := New(Options{
+		Adapters:    chatAdapterLookup(adapter),
+		Upstream:    caller,
+		Routes:      fakeRouteResolver{routes: []domain.Route{chatRouteWithID(7), chatRouteWithID(8), chatRouteWithID(9)}},
+		Observer:    observer,
+		MaxAttempts: 2,
+		Backoff:     fastBackoff(),
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err == nil {
+		t.Fatal("全部候选失败应返回错误")
+	}
+	if calls != 2 {
+		t.Fatalf("上游调用次数 = %d，期望 2（同协议段预算用尽，第三条不再试）", calls)
+	}
+	for _, rec := range observer.snapshot() {
+		if rec.CrossProtocol {
+			t.Errorf("无跨协议候选时不应出现跨协议尝试：%+v", rec)
+		}
+	}
+}
+
+// TestForwardTotalAttemptCap 断言总次数防御性上限生效：段预算被调大也不能让一次请求打穿整条候选链。
+func TestForwardTotalAttemptCap(t *testing.T) {
+	calls := 0
+	caller := fakeCaller{complete: func(context.Context, domain.Route, *domain.Request, []byte) (*domain.UpstreamResult, error) {
+		calls++
+		return nil, errRetryable
+	}}
+	observer := &recordingObserver{}
+	adapter := openaichat.New()
+	routes := make([]domain.Route, 0, 10)
+	for id := uint64(1); id <= 5; id++ {
+		routes = append(routes, chatRouteWithID(id))
+	}
+	for id := uint64(6); id <= 10; id++ {
+		routes = append(routes, crossProtocolRouteWithID(id))
+	}
+	p, err := New(Options{
+		Adapters:              crossProtocolAdapterLookup(),
+		Upstream:              caller,
+		Routes:                fakeRouteResolver{routes: routes},
+		Observer:              observer,
+		MaxAttempts:           10,
+		CrossProtocolAttempts: 10,
+		Backoff:               fastBackoff(),
+	})
+	if err != nil {
+		t.Fatalf("构造流水线失败：%v", err)
+	}
+
+	if err := p.Forward(context.Background(), adapter, newChatRequest(false), &recordingWriter{events: &[]string{}}); err == nil {
+		t.Fatal("全部候选失败应返回错误")
+	}
+	if calls != maxTotalAttempts {
+		t.Fatalf("上游调用次数 = %d，期望总上限 %d", calls, maxTotalAttempts)
+	}
+	if got := len(observer.snapshot()); got != maxTotalAttempts {
+		t.Fatalf("尝试记录数 = %d，期望 %d", got, maxTotalAttempts)
 	}
 }

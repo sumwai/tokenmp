@@ -40,9 +40,6 @@ import (
 const (
 	// healthzPath 是健康检查的固定路径。
 	healthzPath = "/healthz"
-	// defaultUpstreamAttempts 是单请求最多发起的上游尝试次数（含首次）。
-	// 取值 2 对应本轮口径：首次失败后至多换下一条候选一次。
-	defaultUpstreamAttempts = 2
 	// defaultCompleteTimeout 是未配置非流式整体超时时的兜底值。
 	defaultCompleteTimeout = 120 * time.Second
 	// 上游连接池里与 DefaultTransport 对齐的基本超时。
@@ -109,8 +106,11 @@ type gatewayOptions struct {
 	UpstreamMaxIdleConns        int
 	UpstreamMaxIdleConnsPerHost int
 	UpstreamIdleConnTimeout     time.Duration
-	// MaxAttempts 是单请求最多发起的上游尝试次数（含首次）。
+	// MaxAttempts 是同协议段的尝试上限（含首次）；<= 0 时取流水线默认值。
 	MaxAttempts int
+	// CrossProtocolAttempts 是跨协议段的尝试上限；<= 0 时取流水线默认值。
+	// 预算语义（含两段各自的默认值与总上限）只在流水线内定义一处，此处只做覆盖。
+	CrossProtocolAttempts int
 	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；非正时取凭据包的默认值。
 	CredentialCooldown time.Duration
 	// RateLimitWait 是渠道限流下等待令牌的最长时间；非正时取限流包的默认值。
@@ -153,10 +153,6 @@ func (g *gateway) Close() {
 func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 	if st == nil {
 		return nil, domain.NewError(domain.CodeInternal, "缺少存储层")
-	}
-	attempts := opts.MaxAttempts
-	if attempts <= 0 {
-		attempts = defaultUpstreamAttempts
 	}
 	completeTimeout := opts.CompleteTimeout
 	if completeTimeout <= 0 {
@@ -223,7 +219,8 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 			ProbeConcurrency: opts.BreakerProbes,
 			Logger:           opts.BreakerLogger,
 		}),
-		MaxAttempts: attempts,
+		MaxAttempts:           opts.MaxAttempts,
+		CrossProtocolAttempts: opts.CrossProtocolAttempts,
 	})
 	if err != nil {
 		return nil, err

@@ -20,8 +20,20 @@ import (
 	"github.com/sumwai/tokenmp/internal/domain"
 )
 
-// maxAttemptsDefault 是单请求最多发起的上游尝试次数默认上限。
-const maxAttemptsDefault = 3
+const (
+	// maxAttemptsDefault 是同协议段（上游协议与客户端协议一致）的默认尝试上限。
+	// 生产装配与直接构造流水线都取这一个默认值，不再各自维护一份。
+	maxAttemptsDefault = 2
+	// crossProtocolAttemptsDefault 是跨协议段（上游协议与客户端协议不一致）的默认尝试上限。
+	// 跨协议重建的保真度与延迟都不如同协议透传，取值 1 表示「同协议段耗尽后给跨协议候选一次机会」，
+	// 不在此之上继续扩大重试。
+	crossProtocolAttemptsDefault = 1
+	// maxTotalAttempts 是单请求尝试次数的防御性上限。
+	//
+	// 按段预算已让总次数有界；本常量再封一层，避免候选链异常增长或段预算被调大后一次请求打穿整条链。
+	// 取值 4 = 两段默认预算之和（2 + 1）再加一条余量：既覆盖默认行为，也允许其中一段预算被上调一级。
+	maxTotalAttempts = 4
+)
 
 // AdapterLookup 按协议返回适配器，用于按上游协议取请求定稿能力。
 //
@@ -55,8 +67,12 @@ type Options struct {
 	// Limiter 在进入渠道尝试前获取该渠道的令牌与并发位；可为 nil（不限流）。
 	// 未装配时与「渠道未配置上限」同义，流水线不引入任何等待。
 	Limiter domain.ChannelLimiter
-	// MaxAttempts 是单请求最多发起的上游尝试次数；<= 0 时取 maxAttemptsDefault。
+	// MaxAttempts 是同协议段的尝试上限；<= 0 时取 maxAttemptsDefault。
 	MaxAttempts int
+	// CrossProtocolAttempts 是跨协议段的尝试上限；<= 0 时取 crossProtocolAttemptsDefault。
+	// 两段预算独立计量，跨协议候选存在时该段至少有一次尝试，
+	// 使同协议候选全部失败后仍能降到跨协议候选。
+	CrossProtocolAttempts int
 	// Backoff 是换下一候选前的退避策略；零值字段取对应默认值。
 	Backoff BackoffOptions
 }
@@ -71,8 +87,46 @@ type Pipeline struct {
 	breaker     Breaker
 	credentials domain.CredentialRotation
 	limiter     domain.ChannelLimiter
-	maxAttempts int
+	budget      attemptBudget
 	backoff     backoff
+}
+
+// attemptBudget 是一次请求的按段尝试预算。
+//
+// 预算按候选段分别计量：同协议段与跨协议段各有自己的额度，因此同协议候选全部失败
+// 不会挤掉跨协议降级的机会。总次数另设防御性上限，见 maxTotalAttempts。
+// 预算语义在这里一次定义，forward 只消费 allows 的结论，不自行推算还能不能试。
+type attemptBudget struct {
+	sameProtocol  int
+	crossProtocol int
+	total         int
+}
+
+// allows 报告同协议段已试 sameMade 次、跨协议段已试 crossMade 次、合计 totalMade 次后，
+// 本段还能不能再发起一次尝试。
+func (b attemptBudget) allows(cross bool, sameMade, crossMade, totalMade int) bool {
+	if totalMade >= b.total {
+		return false
+	}
+	if cross {
+		return crossMade < b.crossProtocol
+	}
+	return sameMade < b.sameProtocol
+}
+
+// hasCandidateWithin 报告从 from 起的剩余候选里是否至少有一条仍在预算内可试。
+// 退避只在确实还有下一次尝试时等待，避免为空转的遍历白等。
+func (b attemptBudget) hasCandidateWithin(candidates []domain.Route, from int, client domain.Protocol, sameMade, crossMade, totalMade int) bool {
+	if totalMade >= b.total {
+		return false
+	}
+	for i := from; i < len(candidates); i++ {
+		cross := candidates[i].Protocol != client
+		if b.allows(cross, sameMade, crossMade, totalMade) {
+			return true
+		}
+	}
+	return false
 }
 
 // attemptResult 是一次上游尝试的结果。Err 为 nil 表示成功。
@@ -108,9 +162,13 @@ func New(opts Options) (*Pipeline, error) {
 	case opts.Routes == nil:
 		return nil, domain.NewError(domain.CodeInternal, "缺少候选渠道解析器")
 	}
-	maxAttempts := opts.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = maxAttemptsDefault
+	sameAttempts := opts.MaxAttempts
+	if sameAttempts <= 0 {
+		sameAttempts = maxAttemptsDefault
+	}
+	crossAttempts := opts.CrossProtocolAttempts
+	if crossAttempts <= 0 {
+		crossAttempts = crossProtocolAttemptsDefault
 	}
 	return &Pipeline{
 		adapters:    opts.Adapters,
@@ -121,8 +179,12 @@ func New(opts Options) (*Pipeline, error) {
 		breaker:     opts.Breaker,
 		credentials: opts.Credentials,
 		limiter:     opts.Limiter,
-		maxAttempts: maxAttempts,
-		backoff:     newBackoff(opts.Backoff),
+		budget: attemptBudget{
+			sameProtocol:  sameAttempts,
+			crossProtocol: crossAttempts,
+			total:         maxTotalAttempts,
+		},
+		backoff: newBackoff(opts.Backoff),
 	}, nil
 }
 
@@ -294,18 +356,27 @@ func (p *Pipeline) forward(
 		return domain.NewError(domain.CodeModelNotFound, fmt.Sprintf("模型 %q 没有可用渠道", req.Model))
 	}
 
-	attemptLimit := p.maxAttempts
 	var lastErr error
 	var lastRoute domain.Route
 	var lastResult attemptResult
 	attemptsMade := 0
+	// sameAttempts / crossAttempts 分别是同协议段与跨协议段已发起的尝试次数。
+	// 两段各自计量，使同协议候选失败耗尽时仍保留跨协议降级的额度。
+	sameAttempts := 0
+	crossAttempts := 0
 	// upstreamCalls 统计本请求实际发出的上游调用次数，供尝试记录编号；
 	// 它对凭据切换同样递增，因此同一条渠道上的多次凭据试用在记录里各占一条。
 	upstreamCalls := 0
 	// breakerProbe 标记本次迭代是「全部候选被熔断拒绝」后放行的探测：跳过熔断检查。
 	breakerProbe := false
-	for i := 0; i < len(candidateRoutes) && attemptsMade < attemptLimit; i++ {
+	for i := 0; i < len(candidateRoutes); i++ {
 		route := candidateRoutes[i]
+		cross := route.Protocol != req.Protocol
+		// 总上限是唯一终止遍历的预算判断；段预算耗尽只跳过该段候选，遍历继续推进，
+		// 同协议段用尽后仍能走到跨协议段。
+		if attemptsMade >= p.budget.total {
+			break
+		}
 		// 熔断跳过：打开态渠道不参与调度，不计入尝试次数。
 		if !breakerProbe && !p.allowRoute(route) {
 			p.recordBreakerSkip(ctx, req, route, attemptsMade+1)
@@ -322,11 +393,20 @@ func (p *Pipeline) forward(
 			continue
 		}
 		breakerProbe = false
+		// 段预算耗尽：跳过该候选，不记录尝试，也不占用另一段的额度。
+		if !p.budget.allows(cross, sameAttempts, crossAttempts, attemptsMade) {
+			continue
+		}
 		body, requestParts, finalizeErr := p.finalizeRequest(req, route)
 		if finalizeErr != nil {
 			return finalizeErr
 		}
 		attemptsMade++
+		if cross {
+			crossAttempts++
+		} else {
+			sameAttempts++
+		}
 		p.markRoutedModel(out, route)
 		attemptCtx := ctx
 		if p.credentials != nil {
@@ -374,7 +454,7 @@ func (p *Pipeline) forward(
 			}
 			return attempt.Err
 		}
-		if i+1 < len(candidateRoutes) && attemptsMade < attemptLimit {
+		if p.budget.hasCandidateWithin(candidateRoutes, i+1, req.Protocol, sameAttempts, crossAttempts, attemptsMade) {
 			if delay, ok := p.backoff.delay(attemptsMade, attempt.Err); ok {
 				if waitErr := p.backoff.wait(ctx, delay); waitErr != nil {
 					break
