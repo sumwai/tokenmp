@@ -20,8 +20,9 @@ const defaultUsageWriteTimeout = 5 * time.Second
 
 // 本文件把流水线交出的用量事实写成 billing_usage 流水。
 //
-// 归属（商家、账户）取自鉴权上下文，不来自请求体：用量必须记在密钥所属的账户上，
-// 否则一个账户的请求会记到另一个账户的流水里。流水线只交出事由渠道、履约模型与用量。
+// 归属（商家、账户、API key）取自鉴权上下文，不来自请求体：用量必须记在密钥所属的
+// 账户与 key 上，否则一个账户的请求会记到另一个账户或另一把 key 的流水里。流水线
+// 只交出事由渠道、履约模型与用量，它不感知鉴权，因此 key 维度在记账这一层补上。
 //
 // 结算与落库是同一件事：结算器在事务里写结算字段并扣账本，结算失败时退回占位口径
 // 只落用量。这样「流水已写」与「已扣费」不会出现两套时序。
@@ -92,6 +93,7 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 			MerchantID:     id.merchantID,
 			AccountID:      id.accountID,
 			ChannelID:      rec.ChannelID,
+			APIKeyID:       id.apiKeyID,
 			Model:          rec.Model,
 			RequestedModel: rec.RequestedModel,
 			Usage:          metrics,
@@ -106,6 +108,7 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 		MerchantID: id.merchantID,
 		AccountID:  id.accountID,
 		ChannelID:  rec.ChannelID,
+		APIKeyID:   id.apiKeyID,
 		Model:      rec.Model,
 		Usage:      metrics,
 	}); err != nil {

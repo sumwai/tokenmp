@@ -37,6 +37,7 @@ type recordedUsage struct {
 	MerchantID      uint64
 	AccountID       uint64
 	ChannelID       uint64
+	APIKeyID        uint64
 	Model           string
 	Usage           map[billing.Metric]int
 	PricingID       uint64
@@ -58,6 +59,9 @@ type scopeKey struct {
 // 端到端用例会因无候选而失败，这比另建一处断言的覆盖更直接。
 type fakeGatewayStore struct {
 	auth *store.APIKeyAuth
+	// authByHash 非 nil 时按密钥哈希返回各自的鉴权结果，用于「同账户多把 key」的用例；
+	// 为 nil 时统一返回 auth。
+	authByHash map[string]*store.APIKeyAuth
 	// routes 是同协议候选，RouteCandidates 返回它。
 	routes []store.RouteCandidate
 	// crossRoutes 是仅由不限协议查询返回的候选，供跨协议降级用例注入。
@@ -89,6 +93,12 @@ type fakeGatewayStore struct {
 }
 
 func (f *fakeGatewayStore) LookupAPIKey(_ context.Context, keyHash string, _ time.Time) (*store.APIKeyAuth, error) {
+	if f.authByHash != nil {
+		if auth, ok := f.authByHash[keyHash]; ok {
+			return auth, nil
+		}
+		return nil, fmt.Errorf("store: 查询 account_api_key 失败: %w", sql.ErrNoRows)
+	}
 	if keyHash != hashAPIKey(testAPIKey) {
 		return nil, fmt.Errorf("store: 查询 account_api_key 失败: %w", sql.ErrNoRows)
 	}
@@ -126,7 +136,7 @@ func (f *fakeGatewayStore) InsertUsage(_ context.Context, row store.UsageRow) (u
 	defer f.mu.Unlock()
 	return f.appendUsageLocked(recordedUsage{
 		MerchantID: row.MerchantID, AccountID: row.AccountID, ChannelID: row.ChannelID,
-		Model: row.Model, Usage: row.Usage, Multiplier: "1",
+		APIKeyID: row.APIKeyID, Model: row.Model, Usage: row.Usage, Multiplier: "1",
 	})
 }
 
@@ -240,7 +250,7 @@ func (t *fakeGatewayTx) InsertUsage(_ context.Context, row settlement.Usage) (ui
 	}
 	t.inserted = append(t.inserted, recordedUsage{
 		MerchantID: row.MerchantID, AccountID: row.AccountID, ChannelID: row.ChannelID,
-		Model: row.Model, Usage: row.Metrics, PricingID: row.PricingID,
+		APIKeyID: row.APIKeyID, Model: row.Model, Usage: row.Metrics, PricingID: row.PricingID,
 		PricingSnapshot: row.PricingSnapshot, GrossAmount: row.GrossAmount.String(),
 		Multiplier: row.Multiplier.String(), Settlement: row.Settlement,
 	})
@@ -1002,6 +1012,71 @@ func TestGatewayQuotaEnforcement(t *testing.T) {
 				t.Errorf("reject 响应不应带 Retry-After，得到 %q", retryAfter)
 			}
 		})
+	}
+}
+
+// TestGatewayQuotaEnforcementByAPIKey 覆盖 key 维度的端到端：同一账户下的两把 key，
+// key A 设了日限额且已超限，key B 未设限。A 收到 429，B 正常转发。
+//
+// 同时断言落库流水带上各自 key 的主键：限额判定依赖这一列。
+func TestGatewayQuotaEnforcementByAPIKey(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	const (
+		keyA   = "test-api-key-a"
+		keyB   = "test-api-key-b"
+		keyAID = 11
+		keyBID = 22
+	)
+	// 两把 key 归属同一账户与商家，区分只在 api_key_id。
+	st := &fakeGatewayStore{
+		authByHash: map[string]*store.APIKeyAuth{
+			hashAPIKey(keyA): {APIKeyID: keyAID, AccountID: 2, AccountStatus: accountStatusActive, MerchantID: 1},
+			hashAPIKey(keyB): {APIKeyID: keyBID, AccountID: 2, AccountStatus: accountStatusActive, MerchantID: 1},
+		},
+		routes:      []store.RouteCandidate{{ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model"}},
+		credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		// 只给 key A 设了达到上限的日限额。
+		quotas: []quota.Limit{{
+			ID: 1, Scope: billing.ScopeAPIKey, ScopeID: keyAID, Metric: billing.MetricRequest,
+			WindowKind: billing.WindowKindCalendar, Period: billing.PeriodDay,
+			LimitAmount: decimal.NewFromInt(100), Action: billing.ActionReject,
+		}},
+		quotaUsed: map[uint64]decimal.Decimal{1: decimal.NewFromInt(100)},
+	}
+	server := httptest.NewServer(newTestGateway(t, st).handler)
+	t.Cleanup(server.Close)
+
+	body := `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`
+	endpoint := server.URL + domain.ProtocolOpenAIChat.EndpointPath()
+
+	blocked := doPost(t, endpoint, authSchemePrefix+keyA, body)
+	assertJSONError(t, blocked, http.StatusTooManyRequests)
+	var envelope errorEnvelope
+	if err := json.Unmarshal(blocked.body, &envelope); err != nil {
+		t.Fatalf("解析错误体失败：%v", err)
+	}
+	if envelope.Error.Code != string(domain.CodeQuotaExceeded) {
+		t.Errorf("错误码 = %q，期望 %q", envelope.Error.Code, domain.CodeQuotaExceeded)
+	}
+
+	allowed := doPost(t, endpoint, authSchemePrefix+keyB, body)
+	if allowed.status != http.StatusOK {
+		t.Fatalf("未被限额的 key 状态码 = %d，期望 200，响应体 %s", allowed.status, allowed.body)
+	}
+
+	rows := st.usageSnapshot()
+	if len(rows) != 1 {
+		t.Fatalf("流水行数 = %d，期望 1（被拒的请求不落库）", len(rows))
+	}
+	if rows[0].APIKeyID != keyBID {
+		t.Errorf("api_key_id = %d，期望 %d", rows[0].APIKeyID, keyBID)
 	}
 }
 

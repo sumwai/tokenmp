@@ -98,10 +98,12 @@ type Bucket struct {
 // Usage 是一条待落库的结算流水。
 //
 // 结算字段与归属一起交给存储层，由存储层在同一个事务里写入流水并更新账本。
+// APIKeyID 为 0 表示无 key 维度，该行不计入 api_key 限额。
 type Usage struct {
 	MerchantID      uint64
 	AccountID       uint64
 	ChannelID       uint64
+	APIKeyID        uint64
 	Model           string
 	Metrics         map[billing.Metric]int
 	PricingID       uint64
@@ -120,6 +122,7 @@ type Input struct {
 	MerchantID     uint64
 	AccountID      uint64
 	ChannelID      uint64
+	APIKeyID       uint64
 	Model          string
 	RequestedModel string
 	Usage          map[billing.Metric]int

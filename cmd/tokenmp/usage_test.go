@@ -224,6 +224,9 @@ func assertUsageRow(t *testing.T, row recordedUsage, wantModel string, want map[
 	if row.ChannelID != 10 {
 		t.Errorf("channel_id = %d，期望 10", row.ChannelID)
 	}
+	if row.APIKeyID != activeAuth().APIKeyID {
+		t.Errorf("api_key_id = %d，期望 %d", row.APIKeyID, activeAuth().APIKeyID)
+	}
 	if row.Model != wantModel {
 		t.Errorf("model = %q，期望 %q", row.Model, wantModel)
 	}

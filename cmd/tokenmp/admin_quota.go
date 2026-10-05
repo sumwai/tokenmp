@@ -79,17 +79,33 @@ func adminQuotaAdd(ctx context.Context, args []string, env *adminEnv) int {
 func adminQuotaList(ctx context.Context, args []string, env *adminEnv) int {
 	fs := env.newFlagSet("admin quota list")
 	account := fs.Uint64(flagAccount, 0, "账户 id；不填列出全部")
+	scope := fs.String(flagScope, "", "范围过滤：account | api_key | channel | plan")
+	scopeID := fs.Uint64(flagScopeID, 0, "范围实体 id；与 --scope 成对使用")
 	asJSON := fs.Bool(flagJSON, false, "输出 JSON")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
-	// 只按 account 维度过滤：限额表允许其它 scope，但账户维度是运维最常用的查询入口。
-	var scope billing.Scope
-	var scopeID uint64
-	if *account != 0 {
-		scope, scopeID = billing.ScopeAccount, *account
+	// 过滤维度：--scope/--scope-id 是通用入口，--account 是账户维度的简写。
+	// 两者互斥，任一不给即列出全部；--scope 与 --scope-id 必须成对，
+	// 否则 scope 缺省值（空串）会被后面的白名单校验当作非法取值报错，报错点就会偏离真正缺失的那一半。
+	var (
+		filterScope billing.Scope
+		filterID    uint64
+	)
+	switch {
+	case *scope != "" || *scopeID != 0:
+		if *scope == "" || *scopeID == 0 {
+			return env.usageError("--scope 与 --scope-id 必须成对给出")
+		}
+		filterScope = billing.Scope(*scope)
+		if err := billing.ValidateScope(filterScope); err != nil {
+			return env.usageError(err.Error())
+		}
+		filterID = *scopeID
+	case *account != 0:
+		filterScope, filterID = billing.ScopeAccount, *account
 	}
-	views, err := env.service.ListQuotas(ctx, scope, scopeID)
+	views, err := env.service.ListQuotas(ctx, filterScope, filterID)
 	if err != nil {
 		return env.fail(err)
 	}
