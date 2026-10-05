@@ -36,6 +36,8 @@ make check          # 编译、单测（-race）、静态检查、格式检查
 - PR 模板位于 `.github/PULL_REQUEST_TEMPLATE.md`，门禁清单需勾选。
 - PR 标题同样使用 Conventional Commits 格式，`pr-title` 工作流会校验：
   采用 squash 合并时 PR 标题即进入 `main` 的提交信息，直接决定版本号与 changelog 分区。
+- 合并使用 squash（`gh pr merge --squash --delete-branch`），前置条件为 `make check` 全绿
+  且 `CI` 与 `PR 标题` 两项检查通过。
 
 ## 发布
 

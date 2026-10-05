@@ -52,6 +52,17 @@ make tools          # 按 .mise.toml 装齐工具链
 - 文案与提交信息不使用对话式指代（你 / 我 / 咱们），只陈述代码与事实。
 - 新增根目录文档前，先确认职责没有与上表重叠。
 
+## GitHub 协作
+
+`gh` CLI 已登录（账号 `sumwai`），Issue 与 PR 用它操作，不经网页手工编辑：
+
+- 取任务：`gh issue list` / `gh issue view <n>`；新建：`gh issue create -t "<type>: <标题>" -b "<现象、期望、验收条件>"`
+- 实现走分支与 PR：`git checkout -b <type>/<短描述>`，`gh pr create`，标题符合 Conventional Commits，正文写 `Closes #<n>`
+- 合并用 squash：`gh pr merge --squash --delete-branch`；squash 后 PR 标题即 `main` 上的提交信息，决定版本号与 changelog 分区
+- 合并前置：`make check` 全绿，`CI` 与 `PR 标题` 检查通过，评审无未解决意见
+- 结论回写：`gh issue comment` / `gh pr comment`；关闭用 `gh issue close` 并附理由
+- 不 force push `main`，不删除或改写已发布 tag，不批量关闭无关 Issue
+
 ## 提交
 
 使用 Conventional Commits（`<type>(<scope>): <描述>`），完整规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
