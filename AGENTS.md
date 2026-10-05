@@ -46,6 +46,8 @@ make tools          # 按 .mise.toml 装齐工具链
 
 规则：
 
+- **不写本机与环境特定信息**：账号名、主机名、本机路径、登录状态、密钥、本地配置。
+  文档描述仓库本身，不描述某台机器或某次环境 —— 此条优先于其他规则。
 - 只陈述仓库中已经存在的事实。不写计划、进度、待办清单、设计推演或决策记录。
 - 功能先落地，再更新文档；命令、目录、行为的变更与文档同步。
 - 实现取舍写进对应源文件的注释，不写进公开文档。
@@ -54,7 +56,7 @@ make tools          # 按 .mise.toml 装齐工具链
 
 ## GitHub 协作
 
-`gh` CLI 已登录（账号 `sumwai`），Issue 与 PR 用它操作，不经网页手工编辑：
+`gh` CLI 操作 Issue 与 PR，不经网页手工编辑：
 
 - 取任务：`gh issue list` / `gh issue view <n>`；新建：`gh issue create -t "<type>: <标题>" -b "<现象、期望、验收条件>"`
 - 实现走分支与 PR：`git checkout -b <type>/<短描述>`，`gh pr create`，标题符合 Conventional Commits，正文写 `Closes #<n>`
