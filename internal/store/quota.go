@@ -128,8 +128,8 @@ func (s *Store) Usage(ctx context.Context, q quota.UsageQuery) (decimal.Decimal,
 	if q.ScopeID == 0 {
 		return decimal.Zero, errors.New("store: 限额聚合的 scope_id 不能为 0")
 	}
-	if err := billing.ValidateMetric(q.Metric); err != nil {
-		return decimal.Zero, err
+	if metricErr := billing.ValidateMetric(q.Metric); metricErr != nil {
+		return decimal.Zero, metricErr
 	}
 	since := q.Since
 	if since.IsZero() {
