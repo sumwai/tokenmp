@@ -1,9 +1,12 @@
 package circuit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -409,6 +412,40 @@ func TestBreakerStatusIsReadOnly(t *testing.T) {
 	breaker.Record("channel-c", nil)
 	if got := breaker.Status("channel-c"); got.State != StateClosed || got.ConsecutiveFailures != 0 {
 		t.Fatalf("成功清零后快照 = %+v，期望闭合且计数 0", got)
+	}
+}
+
+// TestBreakerLogsStateTransitions 守护状态迁移写入结构化日志：
+// 打开、半开与恢复闭合各留下一条记录，字段含渠道标识与迁移后的状态取值。
+func TestBreakerLogsStateTransitions(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	clock := newFakeClock()
+	breaker := NewBreaker(Options{
+		FailureThreshold: 1,
+		Cooldown:         time.Minute,
+		Clock:            clock.Now,
+		Logger:           logger,
+	})
+	const id = "channel-1"
+
+	breaker.Record(id, upstreamUnavailable())
+	clock.Advance(time.Minute)
+	if !breaker.Allow(id) {
+		t.Fatal("冷却期已满后未放行探测")
+	}
+	breaker.Record(id, nil)
+
+	logs := buf.String()
+	for _, want := range []string{
+		`"upstream_id":"channel-1"`,
+		`"to":"open"`,
+		`"to":"half_open"`,
+		`"to":"closed"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("状态迁移日志缺少 %s：%s", want, logs)
+		}
 	}
 }
 
