@@ -90,6 +90,17 @@ func TestKnownEnums(t *testing.T) {
 		}
 	})
 
+	t.Run("Fallback", func(t *testing.T) {
+		for _, v := range []Fallback{FallbackChargeBalance, FallbackReject} {
+			if !v.Known() {
+				t.Errorf("Fallback %q 应在白名单内", v)
+			}
+			if err := ValidateFallback(v); err != nil {
+				t.Errorf("Fallback %q 校验失败：%v", v, err)
+			}
+		}
+	})
+
 	t.Run("QuotaEvent", func(t *testing.T) {
 		if !QuotaEventReset.Known() {
 			t.Errorf("QuotaEvent %q 应在白名单内", QuotaEventReset)
@@ -114,6 +125,7 @@ func TestValidateRejectsUnknown(t *testing.T) {
 		{name: "未知 DayKind", validate: func() error { return ValidateDayKind(DayKind("vacation")) }},
 		{name: "未知 Scope", validate: func() error { return ValidateScope(Scope("tenant")) }},
 		{name: "未知 Action", validate: func() error { return ValidateAction(Action("warn")) }},
+		{name: "未知 Fallback", validate: func() error { return ValidateFallback(Fallback("retry")) }},
 		{name: "未知 QuotaEvent", validate: func() error { return ValidateQuotaEvent(QuotaEvent("grant")) }},
 	}
 	for _, tt := range tests {
@@ -150,6 +162,9 @@ func TestFromDBIsLenient(t *testing.T) {
 	}
 	if got := ActionFromDB("warn"); got != Action("warn") {
 		t.Errorf("ActionFromDB 应原样返回，得到 %q", got)
+	}
+	if got := FallbackFromDB("retry"); got != Fallback("retry") {
+		t.Errorf("FallbackFromDB 应原样返回，得到 %q", got)
 	}
 	if got := QuotaEventFromDB("grant"); got != QuotaEvent("grant") {
 		t.Errorf("QuotaEventFromDB 应原样返回，得到 %q", got)

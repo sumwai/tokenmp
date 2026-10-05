@@ -23,6 +23,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/pipeline"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/transport"
 	"github.com/sumwai/tokenmp/internal/upstream"
@@ -71,8 +72,10 @@ type gatewayStore interface {
 	LookupAPIKey(ctx context.Context, keyHash string, now time.Time) (*store.APIKeyAuth, error)
 	RouteCandidates(ctx context.Context, channelType store.ChannelType, model string, merchantID uint64) ([]store.RouteCandidate, error)
 	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
-	// InsertUsage 写一条 billing_usage 流水，返回新行 id。
+	// InsertUsage 写一条 billing_usage 流水（占位口径，结算失败时使用），返回新行 id。
 	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
+	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
+	settlement.Repo
 }
 
 // 编译期断言：真实存储层满足装配层的依赖面。
@@ -184,7 +187,7 @@ func newGateway(st gatewayStore, opts gatewayOptions) (*gateway, error) {
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st},
 		Observer:    opts.Observer,
-		Usage:       newUsageRecorder(st, opts.UsageWriteTimeout, nil),
+		Usage:       newUsageRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
 		MaxAttempts: attempts,
 	})

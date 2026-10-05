@@ -138,6 +138,46 @@ func UnitSettleFromDB(raw string) UnitSettle {
 	return UnitSettle(raw)
 }
 
+// Fallback 是账本扣尽后的处置方式，对应 account_bucket.fallback。
+//
+//	charge_balance  包扣尽后差额转 currency 账本继续扣（后付透支）
+//	reject          只扣到 0，不足部分记欠额
+//
+// 新增处置方式：本 const 块加一个取值，并在扣减代码里识别该处置。
+type Fallback string
+
+const (
+	// FallbackChargeBalance 是扣完转后付。
+	FallbackChargeBalance Fallback = "charge_balance"
+	// FallbackReject 是扣完拒绝。
+	FallbackReject Fallback = "reject"
+)
+
+// knownFallbacks 是写入白名单。
+var knownFallbacks = map[Fallback]struct{}{
+	FallbackChargeBalance: {},
+	FallbackReject:        {},
+}
+
+// Known 报告该处置方式是否在写入白名单内。
+func (f Fallback) Known() bool {
+	_, ok := knownFallbacks[f]
+	return ok
+}
+
+// ValidateFallback 是写入口校验：未知处置方式直接拒绝。
+func ValidateFallback(f Fallback) error {
+	if !f.Known() {
+		return fmt.Errorf("billing: 未知的账本处置方式 %q", string(f))
+	}
+	return nil
+}
+
+// FallbackFromDB 把数据库列值转成 Fallback，未知值原样返回。
+func FallbackFromDB(raw string) Fallback {
+	return Fallback(raw)
+}
+
 // WindowKind 是窗口型限额的窗口类型，对应 account_quota.window_kind。
 //
 // 窗口类型已决定重置语义，故 account_quota 没有 reset_policy 列：

@@ -199,7 +199,7 @@ func recordingGatewayStore(t *testing.T, upstreamURL, upstreamModel string) (*ht
 // waitUsageRows 轮询等待流水行数达到 want，超时即失败。
 //
 // 流式响应读到 EOF 时服务端处理器已经写完流水，但轮询让断言不依赖这个时序细节。
-func waitUsageRows(t *testing.T, st *fakeGatewayStore, want int) []store.UsageRow {
+func waitUsageRows(t *testing.T, st *fakeGatewayStore, want int) []recordedUsage {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -213,7 +213,7 @@ func waitUsageRows(t *testing.T, st *fakeGatewayStore, want int) []store.UsageRo
 }
 
 // assertUsageRow 断言一行流水的归属与分量。
-func assertUsageRow(t *testing.T, row store.UsageRow, wantModel string, want map[billing.Metric]int) {
+func assertUsageRow(t *testing.T, row recordedUsage, wantModel string, want map[billing.Metric]int) {
 	t.Helper()
 	if row.MerchantID != activeAuth().MerchantID {
 		t.Errorf("merchant_id = %d，期望 %d", row.MerchantID, activeAuth().MerchantID)
@@ -491,7 +491,7 @@ func TestUsageInsertFailureDoesNotBlockForwarding(t *testing.T) {
 func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 	st := &fakeGatewayStore{}
 	var logged []string
-	recorder := newUsageRecorder(st, 0, func(msg string, args ...any) {
+	recorder := newUsageRecorder(st, nil, 0, func(msg string, args ...any) {
 		logged = append(logged, msg)
 	})
 	ctx := withIdentity(context.Background(), identity{accountID: 2, merchantID: 1})
@@ -527,7 +527,7 @@ func TestUsageRecorderDropsUnmappedComponent(t *testing.T) {
 func TestUsageRecorderLogsCacheWriteConflict(t *testing.T) {
 	st := &fakeGatewayStore{}
 	var logged []string
-	recorder := newUsageRecorder(st, 0, func(msg string, args ...any) {
+	recorder := newUsageRecorder(st, nil, 0, func(msg string, args ...any) {
 		logged = append(logged, msg)
 	})
 	ctx := withIdentity(context.Background(), identity{accountID: 2, merchantID: 1})
@@ -563,7 +563,7 @@ func TestUsageRecorderLogsCacheWriteConflict(t *testing.T) {
 // TestUsageRecorderRequiresIdentity 验证未鉴权上下文不写脏流水。
 func TestUsageRecorderRequiresIdentity(t *testing.T) {
 	st := &fakeGatewayStore{}
-	recorder := newUsageRecorder(st, 0, func(string, ...any) {})
+	recorder := newUsageRecorder(st, nil, 0, func(string, ...any) {})
 	if err := recorder.RecordUsage(context.Background(), domain.UsageRecord{ChannelID: 10, Model: "m"}); err == nil {
 		t.Fatal("缺少鉴权上下文应报错")
 	}

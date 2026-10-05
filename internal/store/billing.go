@@ -34,6 +34,13 @@ type executor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// session 是读路径依赖的最小执行面：与 executor 同一思路，补上查询能力，
+// 让同一段查询代码既能在 *sql.DB 上跑，也能在 *sql.Tx 上跑（结算要求事务内读）。
+type session interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // scanTime 承载 DATE / DATETIME / TIME 列。
 //
 // go-sql-driver 在 DSN 开启 parseTime 时把这些列解析成 time.Time，
@@ -224,8 +231,9 @@ type Adjustment struct {
 // UsageRow 是 billing_usage 的一行：一次转发的用量事实。
 //
 // Usage 的键必须是 billing 的白名单指标，写入前逐个校验，脏键不落库。
-// 本轮不结算：pricing_id / gross_amount / multiplier / settlement 四个结算列
-// 由 SQL 固定为 0 / 0 / 1 / NULL，不经调用方传入。
+// 本条路径只写占位结算字段：pricing_id / gross_amount / multiplier / settlement
+// 由 SQL 固定为 0 / 0 / 1 / NULL，不经调用方传入。带真实结算字段的写入见
+// settlement.go 的 Tx.InsertUsage。
 type UsageRow struct {
 	MerchantID uint64
 	AccountID  uint64
@@ -236,43 +244,60 @@ type UsageRow struct {
 
 // insertUsageSQL 把结算列写死为「未结算」形态。
 //
-// 不把 pricing_id 等做成占位符：本轮口径是「只落用量、不结算」，允许调用方传值
-// 会给出「这里能结算」的假象；结算落地时再改成显式参数。
+// 不把 pricing_id 等做成占位符：本条路径的口径是「只落用量、不结算」，允许调用方
+// 传值会给出「这里能结算」的假象。真实结算走 settlement.go 的显式参数语句。
 const insertUsageSQL = "INSERT INTO billing_usage " +
 	"(merchant_id, account_id, channel_id, model, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
 	"VALUES (?, ?, ?, ?, ?, 0, 0, 1, NULL)"
+
+// validateUsageInput 校验一条用量流水的最小事实，占位与结算两条写入路径共用。
+func validateUsageInput(merchantID, accountID, channelID uint64, model string, usage map[billing.Metric]int) error {
+	if merchantID == 0 {
+		return errors.New("store: billing_usage.merchant_id 不能为 0")
+	}
+	if accountID == 0 {
+		return errors.New("store: billing_usage.account_id 不能为 0")
+	}
+	if channelID == 0 {
+		return errors.New("store: billing_usage.channel_id 不能为 0")
+	}
+	if strings.TrimSpace(model) == "" {
+		return errors.New("store: billing_usage.model 不能为空")
+	}
+	for metric := range usage {
+		if err := billing.ValidateMetric(metric); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// encodeUsage 把用量分量序列化为 JSON 列值。
+//
+// 空 map 序列化为 {}，不是 null：usage 列是 NOT NULL 的 JSON，null 会被拒绝。
+// nil map 也要换成空 map，否则 json.Marshal 会给出 null。
+func encodeUsage(usage map[billing.Metric]int) ([]byte, error) {
+	if usage == nil {
+		usage = map[billing.Metric]int{}
+	}
+	payload, err := json.Marshal(usage)
+	if err != nil {
+		return nil, fmt.Errorf("store: 编码 billing_usage.usage 失败: %w", err)
+	}
+	return payload, nil
+}
 
 // insertUsage 写一条用量流水。
 //
 // usage 为空集合时仍然插入：billing_usage 一行即一次请求，次数即行数；
 // 上游没给用量不等于这次请求没有发生。
 func insertUsage(ctx context.Context, ex executor, row UsageRow) (uint64, error) {
-	if row.MerchantID == 0 {
-		return 0, errors.New("store: billing_usage.merchant_id 不能为 0")
+	if err := validateUsageInput(row.MerchantID, row.AccountID, row.ChannelID, row.Model, row.Usage); err != nil {
+		return 0, err
 	}
-	if row.AccountID == 0 {
-		return 0, errors.New("store: billing_usage.account_id 不能为 0")
-	}
-	if row.ChannelID == 0 {
-		return 0, errors.New("store: billing_usage.channel_id 不能为 0")
-	}
-	if strings.TrimSpace(row.Model) == "" {
-		return 0, errors.New("store: billing_usage.model 不能为空")
-	}
-	for metric := range row.Usage {
-		if err := billing.ValidateMetric(metric); err != nil {
-			return 0, err
-		}
-	}
-	// 空 map 序列化为 {}，不是 null：usage 列是 NOT NULL 的 JSON，null 会被拒绝。
-	// nil map 也要换成空 map，否则 json.Marshal 会给出 null。
-	usage := row.Usage
-	if usage == nil {
-		usage = map[billing.Metric]int{}
-	}
-	payload, err := json.Marshal(usage)
+	payload, err := encodeUsage(row.Usage)
 	if err != nil {
-		return 0, fmt.Errorf("store: 编码 billing_usage.usage 失败: %w", err)
+		return 0, err
 	}
 	res, err := ex.ExecContext(ctx, insertUsageSQL,
 		row.MerchantID, row.AccountID, row.ChannelID, row.Model, payload)
@@ -332,13 +357,13 @@ WHERE merchant_id = ? AND model = ? AND retired_at IS NULL AND effective_at <= ?
 ORDER BY version DESC
 LIMIT 1`
 
-// ActivePricing 查某商家某模型在 asOf 时刻生效的定价版本。
+// activePricing 查某商家某模型在 asOf 时刻生效的定价版本。
 //
 // 生效时刻由调用方传入而不是用数据库的 NOW()：判定依赖数据库时钟会让
 // 结算结果不可复现，也让补算历史流水无法指定时刻。无匹配时返回的错误
 // 可用 errors.Is(err, sql.ErrNoRows) 判断。
-func (s *Store) ActivePricing(ctx context.Context, merchantID uint64, model string, asOf time.Time) (*Pricing, error) {
-	row := s.db.QueryRowContext(ctx, activePricingSQL, merchantID, model, asOf)
+func activePricing(ctx context.Context, q session, merchantID uint64, model string, asOf time.Time) (*Pricing, error) {
+	row := q.QueryRowContext(ctx, activePricingSQL, merchantID, model, asOf)
 	var (
 		p           Pricing
 		effectiveAt scanTime
@@ -356,6 +381,11 @@ func (s *Store) ActivePricing(ctx context.Context, merchantID uint64, model stri
 		p.RetiredAt = &retiredAt.Time
 	}
 	return &p, nil
+}
+
+// ActivePricing 查某商家某模型在 asOf 时刻生效的定价版本。
+func (s *Store) ActivePricing(ctx context.Context, merchantID uint64, model string, asOf time.Time) (*Pricing, error) {
+	return activePricing(ctx, s.db, merchantID, model, asOf)
 }
 
 const priceComponentPlaceholder = "(?, ?, ?, ?, ?, ?, ?, ?)"
@@ -421,9 +451,9 @@ FROM billing_price_component
 WHERE pricing_id = ?
 ORDER BY id`
 
-// PriceComponents 查某个定价版本的全部分量。
-func (s *Store) PriceComponents(ctx context.Context, pricingID uint64) ([]PriceComponent, error) {
-	rows, err := s.db.QueryContext(ctx, priceComponentsSQL, pricingID)
+// priceComponents 查某个定价版本的全部分量。
+func priceComponents(ctx context.Context, q session, pricingID uint64) ([]PriceComponent, error) {
+	rows, err := q.QueryContext(ctx, priceComponentsSQL, pricingID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 billing_price_component 失败: %w", err)
 	}
@@ -451,6 +481,11 @@ func (s *Store) PriceComponents(ctx context.Context, pricingID uint64) ([]PriceC
 		return nil, fmt.Errorf("store: 遍历 billing_price_component 行失败: %w", err)
 	}
 	return components, nil
+}
+
+// PriceComponents 查某个定价版本的全部分量。
+func (s *Store) PriceComponents(ctx context.Context, pricingID uint64) ([]PriceComponent, error) {
+	return priceComponents(ctx, s.db, pricingID)
 }
 
 const insertPriceRuleSQL = `INSERT INTO billing_price_rule
@@ -499,14 +534,14 @@ FROM billing_price_rule
 WHERE scope = ? AND scope_id = ?
 ORDER BY priority DESC, id`
 
-// PriceRulesByScope 查某个 scope 下的全部规则，按优先级从高到低。
+// priceRulesByScope 查某个 scope 下的全部规则，按优先级从高到低。
 //
-// 只做过滤不做匹配：命中的选取与组合是规则匹配函数的职责，本 issue 不实现。
-func (s *Store) PriceRulesByScope(ctx context.Context, scope billing.Scope, scopeID uint64) ([]PriceRule, error) {
+// 只做过滤不做匹配：命中的选取与组合是规则匹配函数的职责。
+func priceRulesByScope(ctx context.Context, q session, scope billing.Scope, scopeID uint64) ([]PriceRule, error) {
 	if err := billing.ValidateScope(scope); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, priceRulesSQL, scope, scopeID)
+	rows, err := q.QueryContext(ctx, priceRulesSQL, scope, scopeID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 billing_price_rule 失败: %w", err)
 	}
@@ -556,6 +591,13 @@ func (s *Store) PriceRulesByScope(ctx context.Context, scope billing.Scope, scop
 		return nil, fmt.Errorf("store: 遍历 billing_price_rule 行失败: %w", err)
 	}
 	return rules, nil
+}
+
+// PriceRulesByScope 查某个 scope 下的全部规则，按优先级从高到低。
+//
+// 只做过滤不做匹配：命中的选取与组合是规则匹配函数的职责。
+func (s *Store) PriceRulesByScope(ctx context.Context, scope billing.Scope, scopeID uint64) ([]PriceRule, error) {
+	return priceRulesByScope(ctx, s.db, scope, scopeID)
 }
 
 const calendarPlaceholder = "(?, ?, ?)"

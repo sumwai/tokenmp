@@ -7,6 +7,7 @@ import (
 
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -21,14 +22,26 @@ const defaultUsageWriteTimeout = 5 * time.Second
 //
 // 归属（商家、账户）取自鉴权上下文，不来自请求体：用量必须记在密钥所属的账户上，
 // 否则一个账户的请求会记到另一个账户的流水里。流水线只交出事由渠道、履约模型与用量。
+//
+// 结算与落库是同一件事：结算器在事务里写结算字段并扣账本，结算失败时退回占位口径
+// 只落用量。这样「流水已写」与「已扣费」不会出现两套时序。
 
 // logFunc 写一条结构化日志，签名与 slog 的包级函数一致。
 type logFunc func(msg string, args ...any)
 
+// usageSettler 是结算入口，由 internal/settlement 的实现满足。
+//
+// 抽成接口是为了让记账路径不直接依赖结算包：测试注入失败的替身即可验证
+// 「结算失败退回占位流水」。
+type usageSettler interface {
+	Settle(ctx context.Context, in settlement.Input) error
+}
+
 // storeUsageRecorder 是 domain.UsageRecorder 的存储实现。
 type storeUsageRecorder struct {
-	store gatewayStore
-	logf  logFunc
+	store   gatewayStore
+	settler usageSettler
+	logf    logFunc
 	// writeTimeout 是单次写用量流水的耗时上限；非正时取 defaultUsageWriteTimeout。
 	writeTimeout time.Duration
 }
@@ -36,21 +49,24 @@ type storeUsageRecorder struct {
 // 编译期断言：装配层的记账实现满足流水线的用量记录接口。
 var _ domain.UsageRecorder = (*storeUsageRecorder)(nil)
 
-// newUsageRecorder 构造记账实现；writeTimeout 非正时取默认值，logf 为 nil 时用 slog 的默认 logger。
-func newUsageRecorder(st gatewayStore, writeTimeout time.Duration, logf logFunc) *storeUsageRecorder {
+// newUsageRecorder 构造记账实现；settler 为 nil 时只落占位流水（不结算），
+// writeTimeout 非正时取默认值，logf 为 nil 时用 slog 的默认 logger。
+func newUsageRecorder(st gatewayStore, settler usageSettler, writeTimeout time.Duration, logf logFunc) *storeUsageRecorder {
 	if logf == nil {
 		logf = slog.Warn
 	}
 	if writeTimeout <= 0 {
 		writeTimeout = defaultUsageWriteTimeout
 	}
-	return &storeUsageRecorder{store: st, logf: logf, writeTimeout: writeTimeout}
+	return &storeUsageRecorder{store: st, settler: settler, logf: logf, writeTimeout: writeTimeout}
 }
 
-// RecordUsage 把一次转发的用量写进 billing_usage。
+// RecordUsage 把一次转发的用量结算并写进 billing_usage。
 //
 // 没有对应 Metric 的分量（当前只有服务端工具调用次数）记日志后丢弃：丢一个没有计价
 // 口径的分量，代价远小于丢掉一整行已经发生的转发流水。
+// 计算流程：先把内部统一用量映射为计费分量，再交给结算器在事务里落库并扣账本；
+// 结算失败退回占位口径只落用量，并记结构化错误日志——流水丢失比结算失败更糟。
 // 落库失败返回错误，同时记日志；流水线忽略返回值，不影响已写给客户端的响应。
 func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRecord) error {
 	id, ok := identityFromContext(ctx)
@@ -69,6 +85,23 @@ func (r *storeUsageRecorder) RecordUsage(ctx context.Context, rec domain.UsageRe
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.writeTimeout)
 	defer cancel()
+
+	if r.settler != nil {
+		err := r.settler.Settle(writeCtx, settlement.Input{
+			RequestID:      rec.RequestID,
+			MerchantID:     id.merchantID,
+			AccountID:      id.accountID,
+			ChannelID:      rec.ChannelID,
+			Model:          rec.Model,
+			RequestedModel: rec.RequestedModel,
+			Usage:          metrics,
+		})
+		if err == nil {
+			return nil
+		}
+		r.logf("结算失败，按占位口径落流水", "request_id", rec.RequestID, "error", err)
+	}
+
 	if _, err := r.store.InsertUsage(writeCtx, store.UsageRow{
 		MerchantID: id.merchantID,
 		AccountID:  id.accountID,

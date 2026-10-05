@@ -16,12 +16,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
 // testAPIKey 是测试客户端的明文密钥；库中存的是它的 SHA-256 hex。
 const testAPIKey = "test-client-key"
+
+// recordedUsage 是一条已落库流水在测试里的视图，占位与结算两条写入路径共用。
+type recordedUsage struct {
+	MerchantID      uint64
+	AccountID       uint64
+	ChannelID       uint64
+	Model           string
+	Usage           map[billing.Metric]int
+	PricingID       uint64
+	PricingSnapshot []byte
+	GrossAmount     string
+	Multiplier      string
+	Settlement      []byte
+}
+
+// scopeKey 是规则池的键：scope 与实体 id。
+type scopeKey struct {
+	scope billing.Scope
+	id    uint64
+}
 
 // fakeGatewayStore 是 gatewayStore 的内存替身。
 //
@@ -33,11 +56,19 @@ type fakeGatewayStore struct {
 	credentials    []store.Credential
 	wantMerchantID uint64
 
-	// mu 保护用量记录：流式请求下 InsertUsage 在服务端 goroutine 里被调用。
+	// 结算数据：零值表示「无定价、无规则、无渠道加成」。
+	pricing           *settlement.Pricing
+	rules             map[scopeKey][]settlement.Rule
+	dayKinds          map[string]billing.DayKind
+	accountMultiplier decimal.Decimal
+	channelMultiplier decimal.Decimal
+	buckets           []settlement.Bucket
+
+	// mu 保护用量记录与账本：流式请求下结算在服务端 goroutine 里被调用。
 	mu sync.Mutex
 	// usageRows 按写入顺序保存流水行，供端到端用例断言分量。
-	usageRows []store.UsageRow
-	// insertErr 非 nil 时 InsertUsage 返回它，用于验证落库失败不影响转发。
+	usageRows []recordedUsage
+	// insertErr 非 nil 时写入返回它，用于验证落库失败不影响转发。
 	insertErr error
 }
 
@@ -62,9 +93,18 @@ func (f *fakeGatewayStore) CredentialsByGroup(_ context.Context, _ string, merch
 	return f.credentials, nil
 }
 
+// InsertUsage 落占位口径流水（结算失败时的回退路径）。
 func (f *fakeGatewayStore) InsertUsage(_ context.Context, row store.UsageRow) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.appendUsageLocked(recordedUsage{
+		MerchantID: row.MerchantID, AccountID: row.AccountID, ChannelID: row.ChannelID,
+		Model: row.Model, Usage: row.Usage, Multiplier: "1",
+	})
+}
+
+// appendUsageLocked 在已持锁的前提下追加一行流水。
+func (f *fakeGatewayStore) appendUsageLocked(row recordedUsage) (uint64, error) {
 	if f.insertErr != nil {
 		return 0, f.insertErr
 	}
@@ -72,11 +112,107 @@ func (f *fakeGatewayStore) InsertUsage(_ context.Context, row store.UsageRow) (u
 	return uint64(len(f.usageRows)), nil
 }
 
-// usageSnapshot 返回已写入流水行的一份拷贝。
-func (f *fakeGatewayStore) usageSnapshot() []store.UsageRow {
+// AccountBuckets 实现转发前的额度预检读取。
+func (f *fakeGatewayStore) AccountBuckets(_ context.Context, _ uint64) ([]settlement.Bucket, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]store.UsageRow(nil), f.usageRows...)
+	return append([]settlement.Bucket(nil), f.effectiveBucketsLocked()...), nil
+}
+
+// InTx 模拟一段事务：持锁期间读写同一份账本副本，失败时丢弃改动。
+func (f *fakeGatewayStore) InTx(ctx context.Context, fn func(context.Context, settlement.Tx) error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tx := &fakeGatewayTx{store: f, buckets: append([]settlement.Bucket(nil), f.effectiveBucketsLocked()...)}
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	f.buckets = tx.buckets
+	f.usageRows = append(f.usageRows, tx.inserted...)
+	return nil
+}
+
+// effectiveBucketsLocked 返回当前账本；未显式配置时给一笔可透支的货币账本，
+// 使既有无结算用例不受 402 预检影响。
+func (f *fakeGatewayStore) effectiveBucketsLocked() []settlement.Bucket {
+	if f.buckets == nil {
+		return []settlement.Bucket{{
+			ID: 1, Unit: billing.UnitSettleCurrency,
+			Remaining: decimal.NewFromInt(1000), Fallback: billing.FallbackChargeBalance,
+		}}
+	}
+	return f.buckets
+}
+
+// fakeGatewayTx 在事务内读写 fakeGatewayStore 的账本副本。
+type fakeGatewayTx struct {
+	store    *fakeGatewayStore
+	buckets  []settlement.Bucket
+	inserted []recordedUsage
+}
+
+func (t *fakeGatewayTx) LockAccount(context.Context, uint64) (decimal.Decimal, error) {
+	if t.store.accountMultiplier.IsZero() {
+		return decimal.NewFromInt(1), nil
+	}
+	return t.store.accountMultiplier, nil
+}
+
+func (t *fakeGatewayTx) ActivePricing(context.Context, uint64, string, time.Time) (*settlement.Pricing, error) {
+	if t.store.pricing == nil {
+		return nil, settlement.ErrNoPricing
+	}
+	return t.store.pricing, nil
+}
+
+func (t *fakeGatewayTx) PriceRulesByScope(_ context.Context, scope billing.Scope, scopeID uint64) ([]settlement.Rule, error) {
+	return t.store.rules[scopeKey{scope: scope, id: scopeID}], nil
+}
+
+func (t *fakeGatewayTx) ModelMapMultiplier(context.Context, uint64, string) (decimal.Decimal, error) {
+	if t.store.channelMultiplier.IsZero() {
+		return decimal.NewFromInt(1), nil
+	}
+	return t.store.channelMultiplier, nil
+}
+
+func (t *fakeGatewayTx) CalendarDay(_ context.Context, calendar, _ string) (billing.DayKind, bool, error) {
+	kind, ok := t.store.dayKinds[calendar]
+	return kind, ok, nil
+}
+
+func (t *fakeGatewayTx) LockBuckets(context.Context, uint64) ([]settlement.Bucket, error) {
+	return append([]settlement.Bucket(nil), t.buckets...), nil
+}
+
+func (t *fakeGatewayTx) InsertUsage(_ context.Context, row settlement.Usage) (uint64, error) {
+	if t.store.insertErr != nil {
+		return 0, t.store.insertErr
+	}
+	t.inserted = append(t.inserted, recordedUsage{
+		MerchantID: row.MerchantID, AccountID: row.AccountID, ChannelID: row.ChannelID,
+		Model: row.Model, Usage: row.Metrics, PricingID: row.PricingID,
+		PricingSnapshot: row.PricingSnapshot, GrossAmount: row.GrossAmount.String(),
+		Multiplier: row.Multiplier.String(), Settlement: row.Settlement,
+	})
+	return uint64(len(t.inserted)), nil
+}
+
+func (t *fakeGatewayTx) UpdateBucketRemaining(_ context.Context, bucketID uint64, remaining decimal.Decimal) error {
+	for i := range t.buckets {
+		if t.buckets[i].ID == bucketID {
+			t.buckets[i].Remaining = remaining
+			return nil
+		}
+	}
+	return fmt.Errorf("账本 %d 不存在", bucketID)
+}
+
+// usageSnapshot 返回已写入流水行的一份拷贝。
+func (f *fakeGatewayStore) usageSnapshot() []recordedUsage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedUsage(nil), f.usageRows...)
 }
 
 // activeAuth 返回一份鉴权通过的最小事实。
@@ -656,4 +792,161 @@ func waitForOK(t *testing.T, url string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("等待 %s 就绪超时", url)
+}
+
+// TestGatewayPaymentRequiredPrecheck 覆盖 402 预检的各分支。
+//
+// 预检只防「彻底没钱」：从未充值或只剩耗尽的 reject 包时回 402；
+// 存在可透支的 currency 账本时放行，请求照常转发。
+func TestGatewayPaymentRequiredPrecheck(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
+	tests := []struct {
+		name       string
+		buckets    []settlement.Bucket
+		wantStatus int
+	}{
+		{
+			name:       "从未充值",
+			buckets:    []settlement.Bucket{},
+			wantStatus: http.StatusPaymentRequired,
+		},
+		{
+			name: "只剩耗尽的 reject 包",
+			buckets: []settlement.Bucket{{
+				ID: 1, Unit: billing.UnitSettleToken, Remaining: decimal.Zero, Fallback: billing.FallbackReject,
+			}},
+			wantStatus: http.StatusPaymentRequired,
+		},
+		{
+			name: "currency 可透支",
+			buckets: []settlement.Bucket{{
+				ID: 1, Unit: billing.UnitSettleCurrency, Remaining: decimal.Zero, Fallback: billing.FallbackChargeBalance,
+			}},
+			wantStatus: http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", jsonContentType)
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, responseBody)
+			}))
+			t.Cleanup(upstream.Close)
+
+			st := &fakeGatewayStore{
+				auth:        activeAuth(),
+				routes:      []store.RouteCandidate{{ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model"}},
+				credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+				buckets:     tt.buckets,
+			}
+			server := httptest.NewServer(newTestGateway(t, st).handler)
+			t.Cleanup(server.Close)
+
+			result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+				authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+			if result.status != tt.wantStatus {
+				t.Fatalf("状态码 = %d，期望 %d，响应体 %s", result.status, tt.wantStatus, result.body)
+			}
+			if tt.wantStatus == http.StatusPaymentRequired {
+				assertJSONError(t, result, http.StatusPaymentRequired)
+			}
+		})
+	}
+}
+
+// TestGatewaySettlementEndToEnd 覆盖结算端到端：定价解析、倍率链、扣减与流水结算字段。
+//
+// 数值可复算：gross = 1000×0.27/1e6 + 500×1.10/1e6 = 0.00082；
+// 倍率 = 账户 2 × 渠道 1.5 × 规则 0.5 = 1.5；扣减 = 0.00082 × 1.5 = 0.00123。
+func TestGatewaySettlementEndToEnd(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":1000,"completion_tokens":500}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", jsonContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	st := &fakeGatewayStore{
+		auth:        activeAuth(),
+		routes:      []store.RouteCandidate{{ChannelID: 10, BaseURL: upstream.URL, CredGroup: "group-a", UpstreamModel: "up-model"}},
+		credentials: []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+		pricing: &settlement.Pricing{ID: 7, Version: 3, Components: []settlement.Component{
+			{ID: 11, Metric: billing.MetricInputToken, UnitSettle: billing.UnitSettleCurrency,
+				UnitPrice: decimal.RequireFromString("0.27"), BasisQty: decimal.RequireFromString("1000000")},
+			{ID: 12, Metric: billing.MetricOutputToken, UnitSettle: billing.UnitSettleCurrency,
+				UnitPrice: decimal.RequireFromString("1.10"), BasisQty: decimal.RequireFromString("1000000")},
+		}},
+		accountMultiplier: decimal.NewFromInt(2),
+		channelMultiplier: decimal.RequireFromString("1.5"),
+		rules: map[scopeKey][]settlement.Rule{
+			{scope: billing.ScopePricing, id: 7}: {{
+				ID: 21, Scope: billing.ScopePricing, ScopeID: 7,
+				Multiplier: decimal.RequireFromString("0.5"),
+			}},
+		},
+		buckets: []settlement.Bucket{{
+			ID: 5, Unit: billing.UnitSettleCurrency,
+			Remaining: decimal.RequireFromString("1"), Fallback: billing.FallbackChargeBalance,
+		}},
+	}
+	server := httptest.NewServer(newTestGateway(t, st).handler)
+	t.Cleanup(server.Close)
+
+	result := doPost(t, server.URL+domain.ProtocolOpenAIChat.EndpointPath(),
+		authSchemePrefix+testAPIKey, `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	if result.status != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应体 %s", result.status, result.body)
+	}
+
+	rows := st.usageSnapshot()
+	if len(rows) != 1 {
+		t.Fatalf("流水行数 = %d，期望 1", len(rows))
+	}
+	row := rows[0]
+	if row.Model != "up-model" {
+		t.Errorf("model = %q，期望履约模型 up-model", row.Model)
+	}
+	if row.PricingID != 7 {
+		t.Errorf("pricing_id = %d，期望 7", row.PricingID)
+	}
+	if row.GrossAmount != "0.00082" {
+		t.Errorf("gross_amount = %s，期望 0.00082", row.GrossAmount)
+	}
+	if row.Multiplier != "1.5" {
+		t.Errorf("multiplier = %s，期望 1.5", row.Multiplier)
+	}
+	if len(row.PricingSnapshot) == 0 {
+		t.Fatal("pricing_snapshot 为空")
+	}
+	if len(row.Settlement) == 0 {
+		t.Fatal("settlement 为空")
+	}
+
+	var payload struct {
+		Lines []struct {
+			BucketID uint64 `json:"bucket_id"`
+			Unit     string `json:"unit"`
+			Qty      string `json:"qty"`
+		} `json:"lines"`
+	}
+	if err := json.Unmarshal(row.Settlement, &payload); err != nil {
+		t.Fatalf("解析 settlement 失败：%v", err)
+	}
+	if len(payload.Lines) != 1 {
+		t.Fatalf("扣减明细 = %#v，期望一行", payload.Lines)
+	}
+	line := payload.Lines[0]
+	if line.BucketID != 5 || line.Unit != string(billing.UnitSettleCurrency) || line.Qty != "0.00123" {
+		t.Errorf("扣减明细 = %#v，期望 bucket 5 / currency / 0.00123", line)
+	}
+
+	st.mu.Lock()
+	remaining := st.buckets[0].Remaining
+	st.mu.Unlock()
+	if remaining.String() != "0.99877" {
+		t.Errorf("账本余量 = %s，期望 0.99877（1 - 0.00123）", remaining)
+	}
 }

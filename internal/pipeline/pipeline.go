@@ -493,9 +493,11 @@ func (p *Pipeline) recordUsage(ctx context.Context, req *domain.Request, route d
 	_ = p.usage.RecordUsage(ctx, domain.UsageRecord{
 		RequestID: req.RequestID,
 		ChannelID: route.ChannelID,
-		// 记录实际履约的上游模型名：定价按履约模型解析，客户端别名不参与计费。
+		// 记录实际履约的上游模型名：定价按履约模型解析，客户端别名不参与定价。
 		Model: domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel}),
-		Usage: usage,
+		// 请求模型用于查渠道倍率：upstream_model_map 以客户端模型名为主键。
+		RequestedModel: req.Model,
+		Usage:          usage,
 	})
 }
 
