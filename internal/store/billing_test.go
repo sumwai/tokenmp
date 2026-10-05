@@ -479,3 +479,86 @@ func TestScanTimeAcceptsDriverForms(t *testing.T) {
 		})
 	}
 }
+
+func TestInsertUsageArgs(t *testing.T) {
+	fake := &recordedExec{id: 9}
+	id, err := insertUsage(context.Background(), fake, UsageRow{
+		MerchantID: 3,
+		AccountID:  4,
+		ChannelID:  5,
+		Model:      "up-model",
+		Usage:      map[billing.Metric]int{billing.MetricInputToken: 7, billing.MetricReasoningToken: 2},
+	})
+	if err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if id != 9 {
+		t.Errorf("自增 id = %d，期望 9", id)
+	}
+	if fake.query != insertUsageSQL {
+		t.Errorf("SQL = %q，期望 %q", fake.query, insertUsageSQL)
+	}
+	if len(fake.args) != 5 {
+		t.Fatalf("参数个数 = %d，期望 5", len(fake.args))
+	}
+	want := []any{uint64(3), uint64(4), uint64(5), "up-model", []byte(`{"input_token":7,"reasoning_token":2}`)}
+	if !reflect.DeepEqual(fake.args, want) {
+		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
+	}
+}
+
+// TestInsertUsageEmptyMetrics 验证未取得用量时写入 {} 而不是 null：
+// 空用量仍是一次请求的流水（次数即行数），usage 列是 NOT NULL 的 JSON，null 会被拒绝。
+func TestInsertUsageEmptyMetrics(t *testing.T) {
+	fake := &recordedExec{}
+	if _, err := insertUsage(context.Background(), fake, UsageRow{
+		MerchantID: 1, AccountID: 2, ChannelID: 3, Model: "m",
+	}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	got, ok := fake.args[4].([]byte)
+	if !ok {
+		t.Fatalf("usage 参数类型 = %T，期望 []byte", fake.args[4])
+	}
+	if string(got) != "{}" {
+		t.Errorf("空用量应序列化为 {}，得到 %s", got)
+	}
+}
+
+func TestInsertUsageRejectsBadInput(t *testing.T) {
+	tests := []struct {
+		name string
+		give UsageRow
+	}{
+		{name: "商家为零", give: UsageRow{AccountID: 2, ChannelID: 3, Model: "m"}},
+		{name: "账户为零", give: UsageRow{MerchantID: 1, ChannelID: 3, Model: "m"}},
+		{name: "渠道为零", give: UsageRow{MerchantID: 1, AccountID: 2, Model: "m"}},
+		{name: "模型为空", give: UsageRow{MerchantID: 1, AccountID: 2, ChannelID: 3}},
+		{name: "模型仅空白", give: UsageRow{MerchantID: 1, AccountID: 2, ChannelID: 3, Model: "  "}},
+		{name: "未知指标", give: UsageRow{MerchantID: 1, AccountID: 2, ChannelID: 3, Model: "m", Usage: map[billing.Metric]int{billing.Metric("cache_write_2h"): 1}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &recordedExec{}
+			if _, err := insertUsage(context.Background(), fake, tt.give); err == nil {
+				t.Fatal("应当被拒绝")
+			}
+			if fake.calls != 0 {
+				t.Errorf("校验失败不应触达驱动，实际调用 %d 次", fake.calls)
+			}
+		})
+	}
+}
+
+func TestInsertUsageWrapsDriverError(t *testing.T) {
+	fake := &recordedExec{err: errExecFailure}
+	_, err := insertUsage(context.Background(), fake, UsageRow{
+		MerchantID: 1, AccountID: 2, ChannelID: 3, Model: "m",
+	})
+	if !errors.Is(err, errExecFailure) {
+		t.Errorf("驱动错误应被包装可辨识，得到 %v", err)
+	}
+	if !strings.Contains(err.Error(), "billing_usage") {
+		t.Errorf("错误信息应含表名，得到 %v", err)
+	}
+}
