@@ -27,6 +27,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
+	"github.com/sumwai/tokenmp/internal/route"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/transport"
@@ -295,7 +296,7 @@ func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
 // 否则一个商家的密钥可以打到另一个商家的渠道。
 type storeRouteResolver struct {
 	store gatewayStore
-	// intN 是加权随机的随机源，返回 [0, n) 内的整数；nil 时用 defaultIntN。
+	// intN 是加权随机的随机源，返回 [0, n) 内的整数；nil 时用 route 包的默认实现。
 	// 注入后同优先级候选的首选可被测试固定。
 	intN func(int) int
 }
@@ -321,19 +322,7 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 	if err != nil {
 		return nil, err
 	}
-	return routeChain(req.Protocol, sameProtocol, crossProtocol, r.intN), nil
-}
-
-// endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
-//
-// 库里只存到端点段之前（如 https://host/api/v3）：同一台主机上的不同协议端点因此共享一段根地址，
-// 端点段由本次协议决定。拼接去掉根地址末尾的斜杠，避免出现 //chat/completions 这样的双斜杠。
-func endpointURL(base string, protocol domain.Protocol) string {
-	root := strings.TrimRight(strings.TrimSpace(base), "/")
-	if root == "" {
-		return ""
-	}
-	return root + protocol.EndpointSegment()
+	return route.RouteChain(req.Protocol, sameProtocol, crossProtocol, r.intN), nil
 }
 
 // storeCredentialGroupLoader 是按数据库读凭据的 credential.GroupLoader。
