@@ -77,3 +77,18 @@ func TestUsageWritesToGivenStream(t *testing.T) {
 		t.Errorf("help 不应写 stderr，实际写到：%q", stderr.String())
 	}
 }
+
+// TestServeFailsFastOnMissingConfig 守护 serve 的配置缺失退出码。
+//
+// 配置缺失在读配置阶段就该以运行失败码退出，不触碰数据库；
+// 退出码与其它子命令的运行失败口径一致（1），而不是用法码。
+func TestServeFailsFastOnMissingConfig(t *testing.T) {
+	t.Setenv("TOKENMP_MYSQL_DSN", "")
+	var stdout, stderr strings.Builder
+	if code := run([]string{"serve"}, &stdout, &stderr); code != exitFailure {
+		t.Errorf("退出码 = %d，期望 %d", code, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), "配置") {
+		t.Errorf("stderr 应报配置错误，实际：%s", stderr.String())
+	}
+}

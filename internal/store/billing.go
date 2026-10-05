@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -218,6 +219,69 @@ type Adjustment struct {
 	Reason      string
 	Operator    string
 	CreatedAt   time.Time
+}
+
+// UsageRow 是 billing_usage 的一行：一次转发的用量事实。
+//
+// Usage 的键必须是 billing 的白名单指标，写入前逐个校验，脏键不落库。
+// 本轮不结算：pricing_id / gross_amount / multiplier / settlement 四个结算列
+// 由 SQL 固定为 0 / 0 / 1 / NULL，不经调用方传入。
+type UsageRow struct {
+	MerchantID uint64
+	AccountID  uint64
+	ChannelID  uint64
+	Model      string
+	Usage      map[billing.Metric]int
+}
+
+// insertUsageSQL 把结算列写死为「未结算」形态。
+//
+// 不把 pricing_id 等做成占位符：本轮口径是「只落用量、不结算」，允许调用方传值
+// 会给出「这里能结算」的假象；结算落地时再改成显式参数。
+const insertUsageSQL = "INSERT INTO billing_usage " +
+	"(merchant_id, account_id, channel_id, model, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
+	"VALUES (?, ?, ?, ?, ?, 0, 0, 1, NULL)"
+
+// insertUsage 写一条用量流水。
+//
+// usage 为空集合时仍然插入：billing_usage 一行即一次请求，次数即行数；
+// 上游没给用量不等于这次请求没有发生。
+func insertUsage(ctx context.Context, ex executor, row UsageRow) (uint64, error) {
+	if row.MerchantID == 0 {
+		return 0, errors.New("store: billing_usage.merchant_id 不能为 0")
+	}
+	if row.AccountID == 0 {
+		return 0, errors.New("store: billing_usage.account_id 不能为 0")
+	}
+	if row.ChannelID == 0 {
+		return 0, errors.New("store: billing_usage.channel_id 不能为 0")
+	}
+	if strings.TrimSpace(row.Model) == "" {
+		return 0, errors.New("store: billing_usage.model 不能为空")
+	}
+	for metric := range row.Usage {
+		if err := billing.ValidateMetric(metric); err != nil {
+			return 0, err
+		}
+	}
+	// 空 map 序列化为 {}，不是 null：usage 列是 NOT NULL 的 JSON，null 会被拒绝。
+	// nil map 也要换成空 map，否则 json.Marshal 会给出 null。
+	usage := row.Usage
+	if usage == nil {
+		usage = map[billing.Metric]int{}
+	}
+	payload, err := json.Marshal(usage)
+	if err != nil {
+		return 0, fmt.Errorf("store: 编码 billing_usage.usage 失败: %w", err)
+	}
+	res, err := ex.ExecContext(ctx, insertUsageSQL,
+		row.MerchantID, row.AccountID, row.ChannelID, row.Model, payload)
+	return insertID(res, err, "billing_usage")
+}
+
+// InsertUsage 写一条用量流水，返回新行 id。
+func (s *Store) InsertUsage(ctx context.Context, row UsageRow) (uint64, error) {
+	return insertUsage(ctx, s.db, row)
 }
 
 const insertPricingSQL = `INSERT INTO billing_pricing (merchant_id, model, version, effective_at) VALUES (?, ?, ?, ?)`

@@ -9,8 +9,10 @@ func TestKnownEnums(t *testing.T) {
 			MetricInputToken,
 			MetricOutputToken,
 			MetricCacheReadToken,
+			MetricCacheWriteToken,
 			MetricCacheWrite5m,
 			MetricCacheWrite1h,
+			MetricReasoningToken,
 			MetricRequest,
 		} {
 			if !v.Known() {
