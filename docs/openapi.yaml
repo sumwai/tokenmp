@@ -1,0 +1,1260 @@
+openapi: 3.1.0
+
+# TokenMP 数据面契约。
+#
+# 本文件只描述当前实现已经存在的行为：每条描述都能在 internal/adapters、
+# internal/transport、cmd/tokenmp 里找到对应实现，并有一批测试守住。
+# 参数取舍（透传 / 注入 / 合并 / 忽略）、跨协议降级与用量计费口径不在本文件展开，
+# 集中在 docs/compatibility.md，本文件各 description 只链过去。
+info:
+  title: TokenMP 数据面
+  version: "0"
+  description: |
+    TokenMP 是面向大模型 API 的转发网关，对外暴露一个健康检查与三个转发端点：
+
+    - `POST /v1/chat/completions` — OpenAI Chat Completions 方言
+    - `POST /v1/responses` — OpenAI Responses 方言
+    - `POST /v1/messages` — Anthropic Messages 方言
+
+    三个转发端点共用一条转发流水线：Bearer 鉴权 → 额度预检与窗口限额 → 选路 →
+    请求定稿 → 上游调用与候选回退 → 响应回写。同一份内部请求/响应/用法格式在三方言之间转换，
+    因此同一渠道可以承接来自任一方言的请求，这就是跨协议降级。
+
+    行为细节（三方言的参数处理清单、模型名替换、跨协议降级的客户端可观察行为、
+    用量分量与计费关系、错误码表）见 [docs/compatibility.md](compatibility.md)。
+
+    三个端点的路径与请求体字段名是固定契约；未知字段一律忽略而不是拒绝，
+    这是对上游协议持续扩展的兼容口径。
+servers:
+  - url: http://localhost:8080
+    description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
+
+tags:
+  - name: health
+    description: 进程探活
+  - name: openai-chat
+    description: OpenAI Chat Completions 方言
+  - name: openai-responses
+    description: OpenAI Responses 方言
+  - name: anthropic-messages
+    description: Anthropic Messages 方言
+
+# 默认所有端点都需要 Bearer 鉴权；/healthz 单独置空。
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: 健康检查
+      description: |
+        固定返回 200 与 `text/plain` 的 `ok`。不鉴权、不探测依赖（数据库、上游连通性），
+        因此上游抖动不会让本端点失败。
+      security: []
+      operationId: healthz
+      responses:
+        '200':
+          description: 进程在线。
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
+                examples: [ok]
+
+  /v1/chat/completions:
+    post:
+      tags: [openai-chat]
+      summary: OpenAI Chat Completions 转发
+      description: |
+        请求体按 [OpenAI Chat Completions 请求](#/components/schemas/ChatCompletionRequest) 解码；
+        未知字段忽略。流式请求（`stream: true`）响应为 SSE 流，见下方 200 的说明。
+      operationId: chatCompletions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: |
+            非流式：返回 [ChatCompletionResponse](#/components/schemas/ChatCompletionResponse)。
+
+            流式（`stream: true`）：返回 `text/event-stream`。每帧形如 `data: <JSON>\n\n`，
+            JSON 为 `chat.completion.chunk`；不发送具名事件。流以 `data: [DONE]` 结束。
+            当客户端通过 `stream_options.include_usage: true` 索取用量时，末尾会出现一帧
+            `choices` 为空、`usage` 非空的用量帧；未索取时该帧不下发（用量仍计入计费）。
+            同协议透传由网关为计费向上游注入 `include_usage`，只向索取的客户端回传该帧。
+            流式不设整体超时，只受上游首字节超时与帧间空闲超时两级约束；两级到期或上游在
+            结束标记前断开时，连接直接关闭（本协议没有流内错误帧可下发）。
+          headers:
+            x-tokenmp-routed-model:
+              $ref: '#/components/headers/RoutedModel'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE 帧序列：若干 `data: <chat.completion.chunk JSON>`，最后 `data: [DONE]`。
+                  客户端索取用量时，`[DONE]` 之前还有一帧只承载 `usage` 的 chunk。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /v1/responses:
+    post:
+      tags: [openai-responses]
+      summary: OpenAI Responses 转发
+      description: |
+        请求体按 [ResponsesRequest](#/components/schemas/ResponsesRequest) 解码；
+        未知字段与未知 input 条目类型忽略。`input` 只接受字符串或条目数组。
+      operationId: createResponse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesRequest'
+      responses:
+        '200':
+          description: |
+            非流式：返回 [ResponsesResponse](#/components/schemas/ResponsesResponse)。
+
+            流式（`stream: true`）：返回 `text/event-stream`，使用具名事件：
+            `response.created`、`response.output_item.added`、`response.content_part.added`、
+            `response.output_text.delta`、`response.output_text.done`、`response.content_part.done`、
+            `response.output_item.done`、`response.function_call_arguments.delta`、
+            `response.function_call_arguments.done`，以及终止事件 `response.completed` /
+            `response.incomplete` / `response.failed`。用量随终止事件内嵌的
+            `response.usage` 下发，是协议固有部分，无论客户端是否索取都会出现。
+            流式不设整体超时；中止时下发 `error` 事件。
+          headers:
+            x-tokenmp-routed-model:
+              $ref: '#/components/headers/RoutedModel'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponsesResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  具名 SSE 事件序列，每帧形如 `event: <name>\ndata: <JSON>\n\n`。
+                  终止事件为 `response.completed` / `response.incomplete` / `response.failed`，
+                  其内嵌 `response.usage` 为本次用量。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /v1/messages:
+    post:
+      tags: [anthropic-messages]
+      summary: Anthropic Messages 转发
+      description: |
+        请求体按 [AnthropicMessagesRequest](#/components/schemas/AnthropicMessagesRequest) 解码。
+        `model`、`max_tokens`、`messages` 必填；`max_tokens` 必须为正整数。
+        本方言的 `messages` 只接受 `user` 与 `assistant` 两种角色，工具结果以
+        `tool_result` 内容块放在 user 消息里。请求体没有 `request_id` 字段。
+      operationId: createMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnthropicMessagesRequest'
+      responses:
+        '200':
+          description: |
+            非流式：返回 [AnthropicMessagesResponse](#/components/schemas/AnthropicMessagesResponse)。
+
+            流式（`stream: true`）：返回 `text/event-stream`，使用具名事件：
+            `message_start`、`content_block_start`、`content_block_delta`、`content_block_stop`、
+            `message_delta`、`message_stop`，以及心跳 `ping` 与错误事件 `error`。
+            用量随 `message_start`（输入侧）与 `message_delta`（累计值，含输出）下发，
+            是协议固有部分，无论客户端是否索取都会出现。
+            流式不设整体超时；中止时下发 `error` 事件。
+          headers:
+            x-tokenmp-routed-model:
+              $ref: '#/components/headers/RoutedModel'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnthropicMessagesResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  具名 SSE 事件序列，每帧形如 `event: <name>\ndata: <JSON>\n\n`。
+                  `message_stop` 为唯一的终止帧；之后的用量以 `message_delta` 的 `usage` 为准。
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <key>`。方案名大小写不敏感；密钥为明文，网关只在库中存其
+        SHA-256 哈希。缺失、格式非法、密钥查不到或已过期、账户不可用一律回 401，
+        不区分具体原因。
+
+  headers:
+    RoutedModel:
+      description: |
+        网关本次实际履约的模型名（渠道配置了上游模型名时才有该标头）。
+        响应体里的模型名可能由上游回显为上游模型名，本标头是权威口径。
+      schema:
+        type: string
+    RetryAfter:
+      description: |
+        仅 `throttle` 处置的窗口限额超限时出现，单位秒。
+      schema:
+        type: integer
+        minimum: 1
+
+  schemas:
+    # ------------------------------------------------------------------
+    # 错误体
+    # ------------------------------------------------------------------
+    ErrorEnvelope:
+      type: object
+      description: |
+        统一错误体。鉴权（401）、额度预检（402）、窗口限额（429）与未注册路径（404）
+        发生在协议分派之前或之外，一律使用本结构；已注册路径上由适配器编码的错误
+        （400 / 404 / 405 / 5xx）在 OpenAI 系方言下同形。
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type, code]
+          properties:
+            message:
+              type: string
+              description: 面向用户的文案，不含上游密钥。
+            type:
+              type: string
+              description: |
+                错误分类。OpenAI 系口径为 `invalid_request_error`、`upstream_error` 或
+                `api_error`。
+            code:
+              type: string
+              description: |
+                统一错误码。取值与 HTTP 状态码对应关系见
+                [docs/compatibility.md](compatibility.md) 的错误码表。
+          additionalProperties: false
+      additionalProperties: false
+
+    AnthropicErrorEnvelope:
+      type: object
+      description: Anthropic Messages 方言的错误体。本方言没有独立的 `code` 字段，统一错误码不对外出现。
+      required: [type, error]
+      properties:
+        type:
+          type: string
+          const: error
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              description: |
+                错误分类：`invalid_request_error`、`authentication_error`、`permission_error`、
+                `rate_limit_error`、`not_found_error` 或 `api_error`。
+            message:
+              type: string
+          additionalProperties: false
+      additionalProperties: false
+
+    # ------------------------------------------------------------------
+    # 用量
+    # ------------------------------------------------------------------
+    ChatUsage:
+      type: object
+      description: |
+        OpenAI Chat Completions 用量。`cached_tokens` 与 `cache_write_tokens` 已包含在
+        `prompt_tokens` 内，`reasoning_tokens` 已包含在 `completion_tokens` 内，
+        子项都不再叠加进 `total_tokens`。子项全为零时省略对应的 details 对象。
+      properties:
+        prompt_tokens:
+          type: integer
+          minimum: 0
+        completion_tokens:
+          type: integer
+          minimum: 0
+        total_tokens:
+          type: integer
+          minimum: 0
+          description: 等于 `prompt_tokens + completion_tokens`。
+        prompt_tokens_details:
+          type: object
+          properties:
+            cached_tokens:
+              type: integer
+              minimum: 0
+            cache_write_tokens:
+              type: integer
+              minimum: 0
+        completion_tokens_details:
+          type: object
+          properties:
+            reasoning_tokens:
+              type: integer
+              minimum: 0
+      additionalProperties: true
+
+    ResponsesUsage:
+      type: object
+      description: |
+        OpenAI Responses 用量。子项口径与 Chat 一致：已包含在主计数内，不叠加。
+      properties:
+        input_tokens:
+          type: integer
+          minimum: 0
+        output_tokens:
+          type: integer
+          minimum: 0
+        total_tokens:
+          type: integer
+          minimum: 0
+          description: 等于 `input_tokens + output_tokens`。
+        input_tokens_details:
+          type: object
+          properties:
+            cached_tokens:
+              type: integer
+              minimum: 0
+            cache_write_tokens:
+              type: integer
+              minimum: 0
+        output_tokens_details:
+          type: object
+          properties:
+            reasoning_tokens:
+              type: integer
+              minimum: 0
+      additionalProperties: true
+
+    AnthropicUsage:
+      type: object
+      description: |
+        Anthropic Messages 用量。线格式的 `input_tokens` 不含缓存 token，网关解码时
+        按「`input_tokens + cache_read_input_tokens + cache_creation_input_tokens`」
+        换算为内部统一口径的输入总数，编码回客户端时再减去缓存子项还原。
+        `cache_creation` 两档与 `cache_creation_input_tokens` 合计是同一件事的两种口径，
+        上游能分档时只填分档字段。
+      properties:
+        input_tokens:
+          type: integer
+          minimum: 0
+          description: 不含缓存 token 的输入 token。
+        output_tokens:
+          type: integer
+          minimum: 0
+        cache_read_input_tokens:
+          type: integer
+          minimum: 0
+        cache_creation_input_tokens:
+          type: integer
+          minimum: 0
+        cache_creation:
+          type: object
+          properties:
+            ephemeral_5m_input_tokens:
+              type: integer
+              minimum: 0
+            ephemeral_1h_input_tokens:
+              type: integer
+              minimum: 0
+        output_tokens_details:
+          type: object
+          properties:
+            thinking_tokens:
+              type: integer
+              minimum: 0
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # OpenAI Chat Completions
+    # ------------------------------------------------------------------
+    ChatContentPart:
+      oneOf:
+        - $ref: '#/components/schemas/ChatTextPart'
+        - $ref: '#/components/schemas/ChatImagePart'
+
+    ChatTextPart:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          type: string
+          const: text
+        text:
+          type: string
+      additionalProperties: true
+
+    ChatImagePart:
+      type: object
+      required: [type, image_url]
+      properties:
+        type:
+          type: string
+          const: image_url
+        image_url:
+          oneOf:
+            - type: string
+            - type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+              additionalProperties: true
+      additionalProperties: true
+
+    ChatToolCall:
+      type: object
+      required: [id, type, function]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: function
+          description: 未识别的类型会被忽略。
+        function:
+          type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+            arguments:
+              type: string
+              description: 上游返回的原始 JSON 字符串，网关不解析。
+          additionalProperties: true
+      additionalProperties: true
+
+    ChatMessage:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool, developer]
+          description: |
+            `developer` 归一化为内部的 system。未识别的角色会跳过该条消息。
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/ChatContentPart'
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatToolCall'
+        tool_call_id:
+          type: string
+          description: 仅 `tool` 角色使用，必填。
+      additionalProperties: true
+
+    ChatTool:
+      type: object
+      required: [type, function]
+      properties:
+        type:
+          type: string
+          const: function
+          description: 未识别的类型会被忽略。
+        function:
+          type: object
+          required: [name]
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+            parameters:
+              type: object
+              description: JSON Schema，原样透传。
+          additionalProperties: true
+      additionalProperties: true
+
+    ChatToolChoice:
+      oneOf:
+        - type: string
+          enum: [auto, none, required]
+        - type: object
+          required: [type, function]
+          properties:
+            type:
+              type: string
+              const: function
+            function:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+              additionalProperties: true
+          additionalProperties: true
+      description: |
+        字符串形态只允许 `auto` / `none` / `required`；指定具体工具用对象形态。
+        未识别的取值回 400，不静默丢弃。
+
+    ChatStreamOptions:
+      type: object
+      properties:
+        include_usage:
+          type: boolean
+          description: |
+            为 true 时向客户端下发只承载 `usage` 的末尾帧。网关无论如何都会向上游索取用量，
+            该开关只决定客户端是否收到那一帧；用量始终计入计费。
+      additionalProperties: true
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: 客户端模型别名；选路后可能被渠道配置的上游模型名替换。
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatTool'
+        tool_choice:
+          $ref: '#/components/schemas/ChatToolChoice'
+        max_tokens:
+          type: integer
+          minimum: 0
+          description: 与 `max_completion_tokens` 同时给出时以本字段为准。
+        max_completion_tokens:
+          type: integer
+          minimum: 0
+          description: "`max_tokens` 的替代字段；只在 `max_tokens` 缺省时使用。"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        stream:
+          type: boolean
+          description: 为 true 时响应为 `text/event-stream`。
+        stream_options:
+          $ref: '#/components/schemas/ChatStreamOptions'
+        user:
+          type: string
+        request_id:
+          type: string
+          description: |
+            网关扩展字段。请求体自带时用作请求 id；也可经 `X-Request-Id` 请求头传入，
+            请求头优先，都没有时由网关生成。该值只作日志关联，不参与鉴权与选路。
+      additionalProperties: true
+
+    ChatResponseMessage:
+      type: object
+      properties:
+        role:
+          type: string
+        content:
+          type: [string, "null"]
+          description: 仅含工具调用时为 null。
+        reasoning_content:
+          type: string
+          description: 部分兼容渠道放在 message 上的推理内容；跨协议重建时不下发。
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatToolCall'
+      additionalProperties: true
+
+    ChatChoice:
+      type: object
+      properties:
+        index:
+          type: integer
+        message:
+          $ref: '#/components/schemas/ChatResponseMessage'
+        finish_reason:
+          type: string
+          description: |
+            `stop`、`length`、`tool_calls`、`content_filter`；上游给出无法识别的字面量时，
+            跨协议重建会写成 `unknown`。同协议透传时该字段逐字节来自上游。
+      additionalProperties: true
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+          description: 上游回显的模型名；网关实际履约的模型名以 `x-tokenmp-routed-model` 为准。
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatChoice'
+        usage:
+          $ref: '#/components/schemas/ChatUsage'
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # OpenAI Responses
+    # ------------------------------------------------------------------
+    ResponsesContentPart:
+      type: object
+      properties:
+        type:
+          type: string
+          description: |
+            输入接受 `input_text` / `output_text` / `text` / `input_image`；
+            未识别类型跳过该片段。输出为 `output_text`。
+        text:
+          type: string
+        image_url:
+          oneOf:
+            - type: string
+            - type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+              additionalProperties: true
+      additionalProperties: true
+
+    ResponsesInputMessage:
+      type: object
+      required: [role]
+      properties:
+        type:
+          type: string
+          const: message
+          description: 缺省即 message。
+        role:
+          type: string
+          enum: [system, user, assistant, developer, tool]
+          description: "`developer` 归一化为内部的 system。"
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/ResponsesContentPart'
+      additionalProperties: true
+
+    ResponsesFunctionCallInput:
+      type: object
+      required: [type, call_id, name]
+      properties:
+        type:
+          type: string
+          const: function_call
+        call_id:
+          type: string
+        name:
+          type: string
+        arguments:
+          type: string
+      additionalProperties: true
+
+    ResponsesFunctionCallOutputInput:
+      type: object
+      required: [type, call_id]
+      properties:
+        type:
+          type: string
+          const: function_call_output
+        call_id:
+          type: string
+        output:
+          description: 字符串原样保留；结构化结果保留其 JSON 原文。
+      additionalProperties: true
+
+    ResponsesInputItem:
+      oneOf:
+        - $ref: '#/components/schemas/ResponsesInputMessage'
+        - $ref: '#/components/schemas/ResponsesFunctionCallInput'
+        - $ref: '#/components/schemas/ResponsesFunctionCallOutputInput'
+      description: 未识别的条目类型跳过。
+
+    ResponsesTool:
+      description: |
+        兼容两种写法：Responses 的扁平写法 `{type, name, parameters}` 与
+        Chat Completions 的嵌套写法 `{type, function: {...}}`。
+      oneOf:
+        - type: object
+          required: [type, name]
+          properties:
+            type:
+              type: string
+              const: function
+            name:
+              type: string
+            description:
+              type: string
+            parameters:
+              type: object
+          additionalProperties: true
+        - type: object
+          required: [type, function]
+          properties:
+            type:
+              type: string
+              const: function
+            function:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                parameters:
+                  type: object
+              additionalProperties: true
+          additionalProperties: true
+
+    ResponsesToolChoice:
+      oneOf:
+        - type: string
+          enum: [none, auto, required]
+        - type: object
+          required: [type, name]
+          properties:
+            type:
+              type: string
+              const: function
+            name:
+              type: string
+          additionalProperties: true
+      description: 其余对象形态回 400，不静默退化为默认策略。
+
+    ResponsesRequest:
+      type: object
+      required: [model, input]
+      properties:
+        model:
+          type: string
+          description: 客户端模型别名；选路后可能被渠道配置的上游模型名替换。
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/ResponsesInputItem'
+        instructions:
+          type: string
+          description: 归一化为内部 system 消息，排在 input 之前。
+        max_output_tokens:
+          type: integer
+          minimum: 0
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResponsesTool'
+        tool_choice:
+          $ref: '#/components/schemas/ResponsesToolChoice'
+        stream:
+          type: boolean
+        user:
+          type: string
+        request_id:
+          type: string
+          description: |
+            网关扩展字段。请求体自带时用作请求 id；也可经 `X-Request-Id` 请求头传入，
+            请求头优先，都没有时由网关生成。
+      additionalProperties: true
+
+    ResponsesOutputContent:
+      type: object
+      properties:
+        type:
+          type: string
+          const: output_text
+        text:
+          type: string
+        annotations:
+          type: array
+          items: {}
+      additionalProperties: true
+
+    ResponsesOutputItem:
+      oneOf:
+        - type: object
+          required: [type, role]
+          properties:
+            type:
+              type: string
+              const: message
+            id:
+              type: string
+            role:
+              type: string
+              const: assistant
+            status:
+              type: string
+            content:
+              type: array
+              items:
+                $ref: '#/components/schemas/ResponsesOutputContent'
+          additionalProperties: true
+        - type: object
+          required: [type, call_id, name]
+          properties:
+            type:
+              type: string
+              const: function_call
+            id:
+              type: string
+            call_id:
+              type: string
+            name:
+              type: string
+            arguments:
+              type: string
+            status:
+              type: string
+          additionalProperties: true
+        - type: object
+          required: [type, call_id]
+          properties:
+            type:
+              type: string
+              const: function_call_output
+            call_id:
+              type: string
+            output:
+              type: string
+          additionalProperties: true
+        - type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              const: reasoning
+          additionalProperties: true
+
+    ResponsesResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: response
+        model:
+          type: string
+        status:
+          type: string
+          enum: [completed, incomplete, failed]
+          description: |
+            `completed` 对应正常结束与工具调用结束，`incomplete` 对应长度截断与内容过滤，
+            其余（含无法识别的结束原因）为 `failed`。
+        output:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResponsesOutputItem'
+        usage:
+          $ref: '#/components/schemas/ResponsesUsage'
+      additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # Anthropic Messages
+    # ------------------------------------------------------------------
+    AnthropicImageSource:
+      oneOf:
+        - type: object
+          required: [type, media_type, data]
+          properties:
+            type:
+              type: string
+              const: base64
+            media_type:
+              type: string
+            data:
+              type: string
+          additionalProperties: true
+        - type: object
+          required: [type, url]
+          properties:
+            type:
+              type: string
+              const: url
+            url:
+              type: string
+          additionalProperties: true
+
+    AnthropicInputContentBlock:
+      oneOf:
+        - type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              const: text
+            text:
+              type: string
+          additionalProperties: true
+        - type: object
+          required: [type, source]
+          properties:
+            type:
+              type: string
+              const: image
+            source:
+              $ref: '#/components/schemas/AnthropicImageSource'
+          additionalProperties: true
+        - type: object
+          required: [type, id, name]
+          properties:
+            type:
+              type: string
+              const: tool_use
+            id:
+              type: string
+            name:
+              type: string
+            input:
+              type: object
+          additionalProperties: true
+        - type: object
+          required: [type, tool_use_id]
+          properties:
+            type:
+              type: string
+              const: tool_result
+            tool_use_id:
+              type: string
+            content:
+              oneOf:
+                - type: string
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/AnthropicInputContentBlock'
+            is_error:
+              type: boolean
+          additionalProperties: true
+      description: |
+        未识别的块类型（含请求方向的 `thinking`、`redacted_thinking`）跳过该块。
+        请求方向的 `thinking` 块不建模，也不回传。
+
+    AnthropicInputMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/AnthropicInputContentBlock'
+      additionalProperties: true
+
+    AnthropicTool:
+      type: object
+      required: [name, input_schema]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        input_schema:
+          type: object
+      additionalProperties: true
+
+    AnthropicToolChoice:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [auto, any, none, tool]
+          description: "`any` 表示必须调用至少一个工具。"
+        name:
+          type: string
+          description: "`type: tool` 时必填。"
+      additionalProperties: true
+
+    AnthropicMessagesRequest:
+      type: object
+      required: [model, max_tokens, messages]
+      properties:
+        model:
+          type: string
+          description: 客户端模型别名；选路后可能被渠道配置的上游模型名替换。
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: 本方言必填且必须为正整数。
+        system:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: '#/components/schemas/AnthropicInputContentBlock'
+          description: 归一化为内部 system 消息。
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AnthropicInputMessage'
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnthropicTool'
+        tool_choice:
+          $ref: '#/components/schemas/AnthropicToolChoice'
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 本方言的区间是 [0, 1]，与 OpenAI 系方言的 [0, 2] 不同。
+        stream:
+          type: boolean
+        metadata:
+          type: object
+          properties:
+            user_id:
+              type: string
+          additionalProperties: true
+      additionalProperties: true
+
+    AnthropicOutputContentBlock:
+      oneOf:
+        - type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              const: text
+            text:
+              type: string
+          additionalProperties: true
+        - type: object
+          required: [type, id, name]
+          properties:
+            type:
+              type: string
+              const: tool_use
+            id:
+              type: string
+            name:
+              type: string
+            input:
+              type: object
+          additionalProperties: true
+        - type: object
+          required: [type, thinking]
+          properties:
+            type:
+              type: string
+              const: thinking
+            thinking:
+              type: string
+          additionalProperties: true
+      description: 响应方向的推理块只在解码方向建模，跨协议重建不下发。
+
+    AnthropicMessagesResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        model:
+          type: string
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnthropicOutputContentBlock'
+        stop_reason:
+          type: string
+          description: |
+            `end_turn`、`max_tokens`、`tool_use`、`stop_sequence`、`refusal`；
+            无法识别的结束原因省略该字段。
+        usage:
+          $ref: '#/components/schemas/AnthropicUsage'
+      additionalProperties: true
+
+  responses:
+    BadRequest:
+      description: |
+        请求体不是合法 JSON，或缺少必填字段、字段取值非法。错误码 `invalid_request`。
+        响应体形态随方言：OpenAI 系为 `ErrorEnvelope`，Anthropic 为 `AnthropicErrorEnvelope`。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    Unauthorized:
+      description: |
+        缺少或非法的 `Authorization` 头、密钥无效或已过期、账户不可用。错误码 `unauthorized`。
+        一律使用 `ErrorEnvelope`，与请求方言无关。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    PaymentRequired:
+      description: |
+        账户无任何可用额度。错误码 `forbidden`。一律使用 `ErrorEnvelope`。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    NotFound:
+      description: |
+        无可用渠道时错误码为 `model_not_found`（对方言适配器编码）；未注册路径为
+        `not_found`（共享 `ErrorEnvelope`）。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    MethodNotAllowed:
+      description: |
+        已注册路径上的非 POST 方法。错误码 `invalid_request`，HTTP 状态码为 405。
+        响应体由方言适配器编码。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    TooManyRequests:
+      description: |
+        窗口限额超限。`reject` 处置错误码为 `quota_exceeded`；`throttle` 处置错误码为
+        `rate_limited` 并附 `Retry-After`。使用共享 `ErrorEnvelope`，与请求方言无关。
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    InternalError:
+      description: |
+        平台自身故障（存储查询失败、额度预检失败、编码失败等）。错误码 `internal`。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    BadGateway:
+      description: |
+        上游不可用或拒绝请求。错误码 `upstream_unavailable`（连接失败、响应无法解析、
+        流在结束标记前断开）或 `upstream_rejected`（上游 4xx 拒绝）。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    ServiceUnavailable:
+      description: |
+        上游限流（上游返回 429）。错误码 `upstream_rate_limited`。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+
+    GatewayTimeout:
+      description: |
+        上游超时（上游 408，或等待上游响应的整体超时到期）。错误码 `upstream_timeout`。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/AnthropicErrorEnvelope'
