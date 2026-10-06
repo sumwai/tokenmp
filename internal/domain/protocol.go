@@ -13,12 +13,19 @@ const (
 	ProtocolOpenAIChat        Protocol = "openai_chat"        // POST /v1/chat/completions
 	ProtocolOpenAIResponses   Protocol = "openai_responses"   // POST /v1/responses
 	ProtocolAnthropicMessages Protocol = "anthropic_messages" // POST /v1/messages
+	// ProtocolGeminiGenerate 是 Gemini 原生 generateContent 协议。
+	//
+	// 它的客户端端点与上游端点都含模型名（/v1beta/models/{model}:generateContent），
+	// 流式形态由路径后缀 :streamGenerateContent?alt=sse 表达而不是请求体字段，
+	// 固定字符串表达不了，因此端点格式由适配器经 EndpointFormat 声明；
+	// 本枚举只登记协议取值，EndpointPath / EndpointSegment 对它返回空串。
+	ProtocolGeminiGenerate Protocol = "gemini_generate"
 )
 
 // Valid 报告协议取值是否受支持。
 func (p Protocol) Valid() bool {
 	switch p {
-	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages:
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
 		return true
 	default:
 		return false
@@ -32,6 +39,9 @@ func (p Protocol) Valid() bool {
 // 因为不同供应商对「版本根 + 端点路径」的拼法并不一致。
 //
 // 取值恒等于 "/v1" 与 EndpointSegment() 的拼接，两条事实同源，由测试守住这层关系。
+//
+// Gemini 的端点路径含模型名、且客户端路径同样区分流式形态，固定字符串表达不了，
+// 本方法对它返回空串；它的端点由适配器的 EndpointFormat 声明（见 ports.go）。
 func (p Protocol) EndpointPath() string {
 	switch p {
 	case ProtocolOpenAIChat:
@@ -90,11 +100,11 @@ func ProtocolForEndpointPath(path string) (Protocol, bool) {
 
 // CrossProtocolRebuildable 报告本协议能否与其它协议互相重建请求与响应。
 //
-// 三种会话式协议在内部统一协议里有完整字段可以互相表达，选路因此允许把一个协议的
+// 四种会话式协议在内部统一协议里有完整字段可以互相表达，选路因此允许把一个协议的
 // 请求交给另一个协议的渠道，由适配器重建。
 func (p Protocol) CrossProtocolRebuildable() bool {
 	switch p {
-	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages:
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
 		return true
 	default:
 		return false

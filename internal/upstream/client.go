@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -144,7 +145,7 @@ func New(opts Options) (*Client, error) {
 // DecodeResponse 归一化为 Response。响应体读取上限为 maxResponseBytes，超过该上限即判定为
 // 超出安全上限并归为可重试的上游不可用，不把整段响应体读进内存。
 // 解码失败说明上游返回了本网关无法识别的响应，归为可重试的上游不可用，而不是客户端的参数错误。
-func (c *Client) Complete(ctx context.Context, route domain.Route, _ *domain.Request, body []byte) (*domain.UpstreamResult, error) {
+func (c *Client) Complete(ctx context.Context, route domain.Route, req *domain.Request, body []byte) (*domain.UpstreamResult, error) {
 	adapter, err := c.adapterFor(route.Protocol)
 	if err != nil {
 		return nil, err
@@ -153,7 +154,7 @@ func (c *Client) Complete(ctx context.Context, route domain.Route, _ *domain.Req
 	callCtx, cancel := context.WithTimeout(ctx, c.timeoutFor(route))
 	defer cancel()
 
-	httpReq, err := c.newRequest(callCtx, route, adapter, body, false)
+	httpReq, err := c.newRequest(callCtx, route, adapter, req, body, false)
 	if err != nil {
 		return nil, err
 	}
@@ -225,8 +226,8 @@ func responseTooLargeError() *domain.Error {
 //  2. 再交适配器的 UpstreamHeaders 补协议内置必需头（同名时渠道级取值覆盖内置值）
 //
 // Content-Type 与 Accept 由本包按响应形态设定，保证与 body 的实际形态一致。
-func (c *Client) newRequest(ctx context.Context, route domain.Route, adapter domain.Adapter, body []byte, stream bool) (*http.Request, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route.BaseURL, bytes.NewReader(body))
+func (c *Client) newRequest(ctx context.Context, route domain.Route, adapter domain.Adapter, req *domain.Request, body []byte, stream bool) (*http.Request, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamTarget(route, adapter, req, stream), bytes.NewReader(body))
 	if err != nil {
 		return nil, domain.NewError(domain.CodeInternal, "构造上游请求失败").WithCause(err)
 	}
@@ -243,6 +244,13 @@ func (c *Client) newRequest(ctx context.Context, route domain.Route, adapter dom
 			httpReq.Header.Add(name, value)
 		}
 	}
+	if provider, ok := c.headers.(domain.UpstreamQueryProvider); ok {
+		values, queryErr := provider.UpstreamQuery(ctx, route)
+		if queryErr != nil {
+			return nil, domain.NewError(domain.CodeInternal, "解析上游查询参数失败").WithCause(queryErr)
+		}
+		applyQuery(httpReq, values)
+	}
 	httpReq.Header.Set("Content-Type", jsonContentType)
 	accept := adapter.ContentType()
 	if stream {
@@ -250,6 +258,45 @@ func (c *Client) newRequest(ctx context.Context, route domain.Route, adapter dom
 	}
 	httpReq.Header.Set("Accept", accept)
 	return httpReq, nil
+}
+
+// upstreamTarget 返回本次调用的上游地址。
+//
+// 端点段的拼接由适配器声明（domain.EndpointFormat）：既有三方言的端点段已由选路结果
+// 拼进 route.BaseURL；Gemini 的端点含模型名与流式后缀，在此按本次请求拼上。
+// 固定端点的协议不实现该接口，地址逐字节沿用 route.BaseURL。
+func upstreamTarget(route domain.Route, adapter domain.Adapter, req *domain.Request, stream bool) string {
+	format, ok := adapter.(domain.EndpointFormat)
+	if !ok {
+		return route.BaseURL
+	}
+	model := ""
+	if req != nil {
+		model = domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel})
+	}
+	return joinEndpoint(route.BaseURL, format.UpstreamPath(model, stream))
+}
+
+// joinEndpoint 把端点段拼到渠道根地址之后，去掉根地址末尾的斜杠避免双斜杠。
+func joinEndpoint(base, path string) string {
+	if path == "" {
+		return base
+	}
+	return strings.TrimRight(base, "/") + path
+}
+
+// applyQuery 把查询参数项追加到请求地址；values 为空时不动地址。
+func applyQuery(req *http.Request, values url.Values) {
+	if len(values) == 0 {
+		return
+	}
+	query := req.URL.Query()
+	for name, items := range values {
+		for _, item := range items {
+			query.Add(name, item)
+		}
+	}
+	req.URL.RawQuery = query.Encode()
 }
 
 // adapterFor 按上游协议取适配器；未注册协议或返回空适配器一律按平台内部错误处理。

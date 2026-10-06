@@ -38,7 +38,7 @@ var _ domain.UpstreamCaller = (*Client)(nil)
 //  8. 凭据类判定与解除冷却一律取自渠道声明的信标头（见 decideCredentialOutcome）：
 //     非 2xx 时结论附加在返回的错误上；2xx 时续期事实经下沉目标回流，目标不支持时跳过。
 //     信标头在判定后被剥除，不随响应外泄。
-func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Request, body []byte, sink domain.ChunkSink) error {
+func (c *Client) Stream(ctx context.Context, route domain.Route, req *domain.Request, body []byte, sink domain.ChunkSink) error {
 	if sink == nil {
 		return domain.NewError(domain.CodeInternal, "流式下沉目标为空")
 	}
@@ -54,7 +54,7 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Reque
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	httpReq, err := c.newRequest(streamCtx, route, adapter, body, true)
+	httpReq, err := c.newRequest(streamCtx, route, adapter, req, body, true)
 	if err != nil {
 		return err
 	}

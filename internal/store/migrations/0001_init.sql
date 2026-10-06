@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS upstream_channel (
   merchant_id   BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '渠道归属的商家',
   name          VARCHAR(128)    NOT NULL DEFAULT '' COMMENT '渠道名，商家内用于区分同一协议的多条渠道',
   vendor        VARCHAR(64)     NOT NULL DEFAULT '' COMMENT '上游厂商标签，仅供展示与对账分组，不参与路由',
-  type          VARCHAR(32)     NOT NULL COMMENT '协议方言：openai_chat | openai_responses | anthropic_messages。协议是数据面的分发键，厂商交给 vendor；新增协议 = 新增适配器 + 新增取值，不改表。',
+  type          VARCHAR(32)     NOT NULL COMMENT '协议方言：openai_chat | openai_responses | anthropic_messages | gemini_generate。协议是数据面的分发键，厂商交给 vendor；新增协议 = 新增适配器 + 新增取值，不改表。',
   cred_group    VARCHAR(64)     NOT NULL COMMENT '凭据分组，商家内唯一；同厂商多端点共享一份凭据',
   base_url      VARCHAR(255)    NOT NULL,
   enabled       TINYINT         NOT NULL DEFAULT 1,
