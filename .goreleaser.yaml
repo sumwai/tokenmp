@@ -45,6 +45,10 @@ archives:
       - README.md
       - CONTRIBUTING.md
       - CHANGELOG.md
+      # README 用相对路径引用 docs/ 与 RELEASE.md。归档里不带这两项时，
+      # 解包后的部署手册、运营剧本与发布说明全是死链，单文件分发就只剩二进制可用。
+      - RELEASE.md
+      - docs/
 
 checksum:
   name_template: 'checksums.txt'
