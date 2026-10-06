@@ -32,10 +32,15 @@ const (
 
 // NamedCredential 是组内一份启用凭据。
 type NamedCredential struct {
+	// ID 是凭据行的主键，供续期写回定位到具体行。
+	ID uint64
 	// Name 是凭据行的名字，用于日志与冷却键。它不是密钥，可以出现在日志里。
 	Name string
 	// APIKey 是明文密钥，只用于注入上游请求头，不落日志。
+	// 订阅型凭据（OAuth 非 nil）下它是当前有效的访问令牌。
 	APIKey string
+	// OAuth 非 nil 时本凭据为订阅型，取用时可能需要惰性续期。
+	OAuth *OAuthCredential
 }
 
 // Group 是一个渠道分组在某个归属下的启用凭据快照，按轮换顺序排列。
@@ -65,6 +70,8 @@ type RotationOptions struct {
 	Clock func() time.Time
 	// Logger 记录冷却跳过与切换；nil 时不记录。
 	Logger *slog.Logger
+	// Renewal 是订阅型凭据的惰性续期参数；nil 或缺少刷新器时不续期。
+	Renewal *RenewalOptions
 }
 
 // Rotator 是按轮换顺序取用组内凭据的 Resolver，同时实现 domain.CredentialRotation。
@@ -75,6 +82,7 @@ type Rotator struct {
 	cooldown time.Duration
 	clock    func() time.Time
 	logger   *slog.Logger
+	renewal  *renewalState
 
 	mu sync.Mutex
 	// cursors 是每分组的轮换起点游标，使多个并发请求不会永远从同一条凭据开始。
@@ -124,6 +132,7 @@ func NewRotator(opts RotationOptions) (*Rotator, error) {
 		cooldown: cooldown,
 		clock:    clock,
 		logger:   opts.Logger,
+		renewal:  newRenewalState(opts.Renewal),
 		cursors:  make(map[string]uint64),
 		cooling:  make(map[string]time.Time),
 	}, nil
@@ -153,7 +162,12 @@ func (r *Rotator) Resolve(ctx context.Context, route domain.Route) (Credential, 
 	entry := state.group.Entries[state.order[state.tried]]
 	state.tried++
 	state.current = &entry
-	return Credential{APIKey: entry.APIKey}, nil
+	renewed, err := r.renewEntry(ctx, route, entry)
+	if err != nil {
+		return Credential{}, err
+	}
+	state.current = &renewed
+	return Credential{APIKey: renewed.APIKey}, nil
 }
 
 // Advance 实现 domain.CredentialRotation：凭据类失败后推进到下一条凭据。
@@ -208,6 +222,53 @@ func (r *Rotator) prepare(ctx context.Context, route domain.Route, state *attemp
 	return nil
 }
 
+// renewEntry 在访问令牌临近过期时先续期，返回本次实际该使用的凭据。
+//
+// 三种结果：
+//
+//   - 未进入续期窗口、渠道未声明画像或凭据不是订阅型：原样返回，与不续期时一致；
+//   - 续期失败但不是 invalid_grant：保留旧令牌并记日志，由上游答复定夺；
+//   - invalid_grant：返回带凭据类标记的错误，由 Advance 把该凭据标记进冷却。
+func (r *Rotator) renewEntry(ctx context.Context, route domain.Route, entry NamedCredential) (NamedCredential, error) {
+	if r.renewal == nil || entry.OAuth == nil {
+		return entry, nil
+	}
+	if !r.renewal.due(entry.OAuth.Expires, r.clock()) {
+		return entry, nil
+	}
+	profile := route.OAuthProfile
+	if !profile.Configured() {
+		return entry, nil
+	}
+	out, err := r.renewal.refresh(ctx, OAuthRefreshInput{
+		CredentialID: entry.ID,
+		Name:         entry.Name,
+		Profile:      profile,
+		Access:       entry.OAuth.Access,
+		Refresh:      entry.OAuth.Refresh,
+		Expires:      entry.OAuth.Expires,
+		Account:      entry.OAuth.Account,
+	})
+	if err != nil {
+		if isInvalidGrant(err) {
+			r.logRenewRejected(route, entry)
+			return entry, &oauthInvalidGrantError{name: entry.Name}
+		}
+		r.logRenewFailed(route, entry, err)
+		return entry, nil
+	}
+	renewed := entry
+	renewed.APIKey = out.Access
+	renewed.OAuth = &OAuthCredential{
+		Access:  out.Access,
+		Refresh: out.Refresh,
+		Expires: out.Expires,
+		Account: entry.OAuth.Account,
+	}
+	r.logRenewed(route, entry)
+	return renewed, nil
+}
+
 // resolveFirst 处理没有尝试级状态的解析：取轮换顺序里的第一条。
 func (r *Rotator) resolveFirst(ctx context.Context, route domain.Route) (Credential, error) {
 	group, err := r.loader.LoadGroup(ctx, route)
@@ -223,7 +284,11 @@ func (r *Rotator) resolveFirst(ctx context.Context, route domain.Route) (Credent
 		return Credential{}, domain.NewError(domain.CodeInternal,
 			fmt.Sprintf("凭据分组 %q 没有可用凭据", route.CredentialRef))
 	}
-	return Credential{APIKey: group.Entries[order[0]].APIKey}, nil
+	entry, err := r.renewEntry(ctx, route, group.Entries[order[0]])
+	if err != nil {
+		return Credential{}, err
+	}
+	return Credential{APIKey: entry.APIKey}, nil
 }
 
 // rotationOrder 算出本次尝试的凭据试用顺序：跳过冷却中的，按分组游标错开起点，再截到上限。
@@ -348,16 +413,55 @@ func keyPrefix(apiKey string) string {
 }
 
 // logSwitch 记录一次凭据切换，字段只含分组、凭据名与密钥前缀，不含 secret。
+//
+// 订阅型凭据不打印前缀：访问令牌没有必要泄露前几个字符，而接口形态完全一样。
 func (r *Rotator) logSwitch(route domain.Route, failed NamedCredential, tried, limit int) {
 	if r.logger == nil {
 		return
 	}
-	r.logger.Info("上游拒绝本次凭据，切换组内下一条",
+	fields := []any{
 		"cred_group", route.CredentialRef,
 		"credential", failed.Name,
-		"credential_prefix", keyPrefix(failed.APIKey),
 		"tried", tried,
 		"limit", limit,
+	}
+	if failed.OAuth == nil {
+		fields = append(fields, "credential_prefix", keyPrefix(failed.APIKey))
+	}
+	r.logger.Info("上游拒绝本次凭据，切换组内下一条", fields...)
+}
+
+// logRenewed 记录一次订阅型凭据续期成功；只列出凭据名，不含任何令牌。
+func (r *Rotator) logRenewed(route domain.Route, entry NamedCredential) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Info("OAuth 凭据已续期",
+		"cred_group", route.CredentialRef,
+		"credential", entry.Name,
+	)
+}
+
+// logRenewFailed 记录一次续期失败但保留旧令牌的情形；只列出凭据名与错误摘要。
+func (r *Rotator) logRenewFailed(route domain.Route, entry NamedCredential, err error) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Warn("OAuth 凭据续期失败，保留旧令牌",
+		"cred_group", route.CredentialRef,
+		"credential", entry.Name,
+		"error", err.Error(),
+	)
+}
+
+// logRenewRejected 记录一次刷新令牌被拒；该凭据随后进入冷却。
+func (r *Rotator) logRenewRejected(route domain.Route, entry NamedCredential) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Warn("OAuth 刷新令牌已失效，标记凭据过期并冷却",
+		"cred_group", route.CredentialRef,
+		"credential", entry.Name,
 	)
 }
 
