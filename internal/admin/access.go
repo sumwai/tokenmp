@@ -56,8 +56,9 @@ func (s *Service) ListCredentials(ctx context.Context) ([]CredentialView, error)
 		return nil, err
 	}
 	views := make([]CredentialView, 0, len(rows))
+	now := s.now()
 	for _, row := range rows {
-		kind, expires, expired := credentialState(row.Secret)
+		kind, expires, expired := credentialState(row.Secret, now)
 		views = append(views, CredentialView{
 			ID:         row.ID,
 			MerchantID: row.MerchantID,

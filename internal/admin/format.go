@@ -65,7 +65,7 @@ type CredentialView struct {
 // credentialState 从一行 secret 提取展示用的形态、过期时刻与过期标记。
 //
 // 解析失败时不虚构形态：kind 置为 unknown，过期信息留空，由 maskSecret 继续给出整段掩码。
-func credentialState(secret []byte) (kind, expires string, expired bool) {
+func credentialState(secret []byte, now time.Time) (kind, expires string, expired bool) {
 	parsed, err := credential.ParseSecret(secret)
 	if err != nil {
 		return "unknown", "", false
@@ -77,7 +77,7 @@ func credentialState(secret []byte) (kind, expires string, expired bool) {
 	if parsed.Expires.IsZero() {
 		return state, "", false
 	}
-	return state, parsed.Expires.UTC().Format(time.RFC3339), !parsed.Expires.After(time.Now())
+	return state, parsed.Expires.UTC().Format(time.RFC3339), !parsed.Expires.After(now)
 }
 
 // plaintextPrefix 返回明文的前 visiblePrefixLen 个字符，作为 key_prefix 列的取值。
