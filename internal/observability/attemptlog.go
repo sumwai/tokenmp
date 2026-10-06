@@ -77,6 +77,11 @@ func (o *attemptObserver) RecordAttempt(ctx context.Context, rec domain.AttemptR
 	if rec.ErrorDetail != "" {
 		args = append(args, "error_detail", rec.ErrorDetail)
 	}
+	// 分类名与错误码不同轴：同一个 error_code（如 upstream_rejected）下可能既有额度
+	// 用尽也有纯粹的参数错误，按类聚合看的是这个字段。
+	if rec.FailureClass != "" {
+		args = append(args, "failure_class", rec.FailureClass)
+	}
 	if len(rec.RewrittenParts) > 0 {
 		args = append(args, "rewritten_parts", rec.RewrittenParts)
 	}

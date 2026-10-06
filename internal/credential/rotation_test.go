@@ -44,6 +44,15 @@ func (credentialRejectedError) Error() string { return "凭据被拒绝" }
 
 func (credentialRejectedError) CredentialRejected() bool { return true }
 
+// classCooldownError 模拟分类器额外给出冷却时长的凭据类失败（如额度用尽）。
+type classCooldownError struct{ cooldown time.Duration }
+
+func (classCooldownError) Error() string { return "额度用尽" }
+
+func (classCooldownError) CredentialRejected() bool { return true }
+
+func (e classCooldownError) CredentialCooldown() time.Duration { return e.cooldown }
+
 // rotationRoute 是轮换用例共用的路由：分组名与协议不影响轮换逻辑，只用作游标键。
 func rotationRoute() domain.Route {
 	return domain.Route{CredentialRef: "group-a", Protocol: domain.ProtocolOpenAIChat}
@@ -194,6 +203,71 @@ func TestRotatorSkipsCoolingAndRecovers(t *testing.T) {
 	}
 }
 
+// TestAdvanceUsesFailureClassCooldown 断言分类方给出的冷却时长覆盖配置的默认值。
+//
+// 额度用尽与密钥失效的恢复速度差一个数量级：前者要等窗口滚动或加额，后者换一把 key 就好。
+// 分类器知道是哪种，默认冷却不该把它抹平。
+func TestAdvanceUsesFailureClassCooldown(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	// 配置的默认冷却只有 30 秒，远短于额度类失败给出的 15 分钟。
+	r := newTestRotator(t, twoKeyGroup(), clock, 30*time.Second)
+	route := rotationRoute()
+
+	ctx := r.Begin(context.Background(), route)
+	if _, err := r.Resolve(ctx, route); err != nil {
+		t.Fatalf("解析失败：%v", err)
+	}
+	if _, switched := r.Advance(ctx, route, classCooldownError{cooldown: 15 * time.Minute}); !switched {
+		t.Fatal("凭据类失败应触发切换")
+	}
+
+	// 默认冷却早已过去，但类给出的 15 分钟未到：first 仍应被跳过。
+	clock.Advance(time.Minute)
+	if got := resolveOne(t, r, route).APIKey; got != "sk-second" {
+		t.Fatalf("类给出的冷却期内取到 %q，期望 sk-second", got)
+	}
+
+	// 类给出的冷却到期后 first 重新进入轮换。
+	clock.Advance(15 * time.Minute)
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		seen[resolveOne(t, r, route).APIKey] = true
+	}
+	if !seen["sk-first"] {
+		t.Fatalf("类给出的冷却到期后 first 未恢复可用，实际取到 %v", seen)
+	}
+}
+
+// TestAdvanceFallsBackToConfiguredCooldown 断言错误未声明冷却时长时沿用配置的默认值。
+//
+// 多数失败（如认证）不在分类里另立数值，回退路径必须与引入分类之前的行径一致。
+func TestAdvanceFallsBackToConfiguredCooldown(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	r := newTestRotator(t, twoKeyGroup(), clock, 30*time.Second)
+	route := rotationRoute()
+
+	ctx := r.Begin(context.Background(), route)
+	if _, err := r.Resolve(ctx, route); err != nil {
+		t.Fatalf("解析失败：%v", err)
+	}
+	if _, switched := r.Advance(ctx, route, credentialRejectedError{}); !switched {
+		t.Fatal("凭据类失败应触发切换")
+	}
+
+	// 默认冷却未到时跳过，到期后恢复。
+	if got := resolveOne(t, r, route).APIKey; got != "sk-second" {
+		t.Fatalf("冷却期内取到 %q，期望 sk-second", got)
+	}
+	clock.Advance(31 * time.Second)
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		seen[resolveOne(t, r, route).APIKey] = true
+	}
+	if !seen["sk-first"] {
+		t.Fatalf("默认冷却到期后 first 未恢复可用，实际取到 %v", seen)
+	}
+}
+
 // TestRotatorAllCoolingFallsOpen 断言整组都在冷却时仍取用凭据，而不是让请求无凭据可用。
 func TestRotatorAllCoolingFallsOpen(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
@@ -201,7 +275,7 @@ func TestRotatorAllCoolingFallsOpen(t *testing.T) {
 	route := rotationRoute()
 
 	for _, name := range []string{"first", "second"} {
-		r.markCooling("merchant-1", name)
+		r.markCooling("merchant-1", name, time.Minute)
 	}
 	ctx := r.Begin(context.Background(), route)
 	resolved, err := r.Resolve(ctx, route)

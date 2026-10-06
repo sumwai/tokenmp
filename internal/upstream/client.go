@@ -371,6 +371,13 @@ func isCredentialRejection(status int, body []byte) bool {
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return true
 	}
+	return hasCredentialFailureToken(status, body)
+}
+
+// hasCredentialFailureToken 报告响应体是否出现明确的认证/权限失败字面量。
+//
+// 只在 4xx 上扫描：5xx 是上游侧故障，报文里偶然出现同名字面量不代表凭据有问题。
+func hasCredentialFailureToken(status int, body []byte) bool {
 	if status < http.StatusBadRequest || status >= http.StatusInternalServerError {
 		return false
 	}
@@ -405,9 +412,9 @@ func classifyHTTPStatus(outcome credentialOutcome, status int, header http.Heade
 	default:
 		err = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用").WithDetail(detail)
 	}
-	return withCredentialRenewal(
+	return withUpstreamFailure(withCredentialRenewal(
 		withCredentialRejection(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status), outcome.rejected),
-		outcome.renewed)
+		outcome.renewed), outcome.failure)
 }
 
 // credentialOutcome 是「本次上游响应下凭据该如何处置」的判定结论。
@@ -416,27 +423,36 @@ type credentialOutcome struct {
 	rejected bool
 	// renewed 报告上游声明本次凭据登录态已续期（解除既有冷却）。
 	renewed bool
+	// failure 是本次失败的分类，供日志按类聚合与按类定冷却时长。
+	// 它只描述事实，是否停用凭据由 rejected 决定。
+	failure upstreamFailure
 }
 
 // decideCredentialOutcome 是凭据处置判定的唯一出处。
 //
-// 优先级：命中信标头 > 状态码启发式。信标头由渠道 config 声明，只在取值命中已声明的
-// 三种之一时生效：
-//   - expired 直接判定为拒绝，优先于状态码结论，使厂商用 403/502 表达登录态失效时也能冷却；
+// 优先级：命中信标头 > 报文与状态码分类。信标头由渠道 config 声明，只在取值命中已声明
+// 的三种之一时生效：
+//   - expired 直接判定为拒绝，优先于分类结论，使厂商用 403/502 表达登录态失效时也能冷却；
 //   - kept 直接判定为不拒绝，即使状态码是 401，使状态码另有含义的厂商不被误冷却；
-//   - renewed 判定为不拒绝并请求解除冷却。
+//   - renewed 判定为不拒绝并请求解出冷却。
 //
-// 未声明信标头或取值未命中时回退到 isCredentialRejection，行为与未引入信标头时完全一致。
+// 未声明信标头或取值未命中时走 classifyUpstreamFailure，再由 failureRejectsCredential
+// 决定该不该换凭据：认证、额度、余额三类换，限流、上下文超限、模型不可用不换。
 func decideCredentialOutcome(signin domain.SigninHeader, status int, header http.Header, body []byte) credentialOutcome {
+	failure := classifyUpstreamFailure(status, body)
 	switch signin.Verdict(header) {
 	case domain.SigninExpired:
+		// 信标头是渠道显式声明的登录态事实，优先于报文与状态码分类。命中时归类
+		// 也不再记录：厂商已经声明了这次失败的语义，另附一个由状态码推出的分类
+		// 只会自相矛盾（如 429 配 failure=quota 却不按额度冷却）。
 		return credentialOutcome{rejected: true}
 	case domain.SigninKept:
+		// kept 是厂商在说「这个状态码不代表凭据有问题」，同样不附分类。
 		return credentialOutcome{rejected: false}
 	case domain.SigninRenewed:
 		return credentialOutcome{renewed: true}
 	default:
-		return credentialOutcome{rejected: isCredentialRejection(status, body)}
+		return credentialOutcome{rejected: failureRejectsCredential(failure), failure: failure}
 	}
 }
 
@@ -463,6 +479,37 @@ func withCredentialRejection(err error, rejected bool) error {
 		return err
 	}
 	return &credentialRejectionError{err: err}
+}
+
+// upstreamFailureError 在已分级的错误之上标注失败分类与建议的凭据冷却时长。
+//
+// 与 retryAfterError / credentialRejectionError 同一机制：用包装而不往 domain.Error
+// 加字段，两个能力分别由 domain.FailureClassOf 与 domain.CredentialCooldownOf 读取。
+type upstreamFailureError struct {
+	err     error
+	failure upstreamFailure
+}
+
+// Error 实现 error 接口，转发被包装错误的面向排障文案。
+func (e *upstreamFailureError) Error() string { return e.err.Error() }
+
+// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
+func (e *upstreamFailureError) Unwrap() error { return e.err }
+
+// FailureClass 声明本次失败的分类名，供尝试日志按类聚合。
+func (e *upstreamFailureError) FailureClass() string { return failurePolicyOf(e.failure).name }
+
+// CredentialCooldown 声明本次失败建议的凭据停用时长；零值表示用调用方配置的默认冷却。
+func (e *upstreamFailureError) CredentialCooldown() time.Duration {
+	return failurePolicyOf(e.failure).cooldown
+}
+
+// withUpstreamFailure 给错误附上失败分类；分类为 other 时不加包装，零值保持零开销。
+func withUpstreamFailure(err error, failure upstreamFailure) error {
+	if failure == failureOther {
+		return err
+	}
+	return &upstreamFailureError{err: err, failure: failure}
 }
 
 // credentialRenewalError 在已分级的错误之上标注「上游声明本次凭据登录态已续期」。

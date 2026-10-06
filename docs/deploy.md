@@ -47,7 +47,7 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 | `TOKENMP_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | 否 | `32` | 条 | 上游连接池每主机空闲连接数 |
 | `TOKENMP_UPSTREAM_IDLE_CONN_TIMEOUT` | 否 | `90s` | 时长 | 上游空闲连接回收时长 |
 | `TOKENMP_USAGE_WRITE_TIMEOUT` | 否 | `5s` | 时长 | 写用量流水超时 |
-| `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 否 | `60s` | 时长 | 上游凭据类失败后的冷却时长 |
+| `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 否 | `60s` | 时长 | 凭据类失败后的默认冷却时长；仅适用于未在失败分类里另立数值的类别（当前是认证失败，额度用尽与余额耗尽另有固定值）|
 | `TOKENMP_UPSTREAM_OAUTH_REFRESH_WINDOW` | 否 | `5m` | 时长 | 订阅型凭据的提前续期窗口：访问令牌剩余有效期不足该值时先续期 |
 | `TOKENMP_UPSTREAM_OAUTH_REFRESH_TIMEOUT` | 否 | `15s` | 时长 | 单次 OAuth 续期与等待续期的上限 |
 | `TOKENMP_UPSTREAM_RATE_LIMIT_WAIT` | 否 | `2s` | 时长 | 渠道限流下等待令牌的最长时间 |

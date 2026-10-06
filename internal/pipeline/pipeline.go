@@ -692,6 +692,7 @@ func (p *Pipeline) recordAttempt(
 		Usage:            result.Usage,
 		ErrorCode:        errorCode(result.Err),
 		ErrorDetail:      errorDetail(result.Err),
+		FailureClass:     domain.FailureClassOf(result.Err),
 		StartedAt:        result.StartedAt,
 		EndedAt:          result.EndedAt,
 		RateLimitWait:    result.RateLimitWait,
