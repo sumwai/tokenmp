@@ -173,9 +173,56 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 		BaseURL:              endpointURL(candidate.BaseURL, protocol),
 		CredentialRef:        candidate.CredGroup,
 		RequestOverrides:     sanitizeRequestOverrides(candidate),
+		SigninHeader:         parseSigninHeader(candidate.Config),
 		RateLimitQPS:         candidate.RateLimitQPS,
 		RateLimitConcurrency: candidate.RateLimitConcurrency,
 	}
+}
+
+// channelConfig 是 upstream_channel.config 里本网关认识的键。
+//
+// config 的结构随协议方言与厂商演进，不为此改表；不认识的键照常忽略。
+type channelConfig struct {
+	// SigninHeader 声明本渠道的登录态信标头映射。
+	SigninHeader signinHeaderConfig `json:"signin_header"`
+}
+
+// signinHeaderConfig 是 config 里 signin_header 的结构。
+type signinHeaderConfig struct {
+	Name   string             `json:"name"`
+	Values signinHeaderValues `json:"values"`
+}
+
+// signinHeaderValues 是信标头的三种取值，取值本身也由配置给出。
+type signinHeaderValues struct {
+	Expired string `json:"expired"`
+	Kept    string `json:"kept"`
+	Renewed string `json:"renewed"`
+}
+
+// parseSigninHeader 从渠道 config JSON 里读登录态信标头映射。
+//
+// 读取必须宽容：config 是人工写入的 JSON 列，写坏的文本、缺键或类型不符都只让本渠道
+// 回退到状态码启发式，不得让整次选路失败。未声明头名时返回零值，与未配置等价。
+func parseSigninHeader(raw []byte) domain.SigninHeader {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return domain.SigninHeader{}
+	}
+	var cfg channelConfig
+	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+		return domain.SigninHeader{}
+	}
+	header := domain.SigninHeader{
+		Name:    strings.TrimSpace(cfg.SigninHeader.Name),
+		Expired: cfg.SigninHeader.Values.Expired,
+		Kept:    cfg.SigninHeader.Values.Kept,
+		Renewed: cfg.SigninHeader.Values.Renewed,
+	}
+	if !header.Configured() {
+		return domain.SigninHeader{}
+	}
+	return header
 }
 
 // endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
