@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.7](https://github.com/sumwai/tokenmp/compare/v0.1.6...v0.1.7) (2026-10-06)
+
+
+### Features
+
+* 上游失败的按类分类与换凭据——额度与余额耗尽不再当成限流 ([#84](https://github.com/sumwai/tokenmp/issues/84)) ([c498525](https://github.com/sumwai/tokenmp/commit/c49852515b15e863121dc73083fd5b64e4e4701e)), closes [#83](https://github.com/sumwai/tokenmp/issues/83)
+* 渠道 config 新增 headers 键——客户端优先的静态上游请求头 ([#77](https://github.com/sumwai/tokenmp/issues/77)) ([8c7ec6b](https://github.com/sumwai/tokenmp/commit/8c7ec6baece7186f53ad6efcfac1d97cca02052b)), closes [#76](https://github.com/sumwai/tokenmp/issues/76)
+
+
+### Bug Fixes
+
+* 管理面两处缺口——credential 缺 enable、channel list 读 NULL config 崩溃 ([#82](https://github.com/sumwai/tokenmp/issues/82)) ([9e44f6e](https://github.com/sumwai/tokenmp/commit/9e44f6ea7d7d1a225d645c4e1cbf87bff853e361)), closes [#81](https://github.com/sumwai/tokenmp/issues/81)
+
+
+### Documentation
+
+* README 补部署与运行入口，归档带上 docs 与 RELEASE ([#79](https://github.com/sumwai/tokenmp/issues/79)) ([6dccb82](https://github.com/sumwai/tokenmp/commit/6dccb823b89c243a42c9f699d9c7ef5d2589f95c)), closes [#78](https://github.com/sumwai/tokenmp/issues/78)
+
 ## [0.1.6](https://github.com/sumwai/tokenmp/compare/v0.1.5...v0.1.6) (2026-10-06)
 
 
