@@ -4,19 +4,23 @@
 `tokenmp admin ...` 命令与预期的输出形态。命令只做参数解析与输出，业务校验在
 `internal/admin`，数据库连接取自 `TOKENMP_MYSQL_DSN`。
 
-步骤编号与端到端剧本 `cmd/tokenmp/journey_e2e_test.go` 的 7 个子测试一一对应，便于互查：
+步骤编号与端到端剧本的子测试一一对应，便于互查：
 
-| 本文件步骤 | e2e 子测试（`make e2e`） |
+| 本文件步骤 | e2e 剧本与子测试（`make e2e`） |
 |---|---|
-| 1 入驻、开户、定价与充值 | 步骤 1 迁移就位与入驻发 key 充值买包 |
+| 1 入驻、开户、定价与充值 | `cmd/tokenmp/journey_e2e_test.go` 步骤 1 迁移就位与入驻发 key 充值买包 |
 | 2 启动 serve | 步骤 2 启动 serve 与假上游 |
 | 3 客户端调用（三方言） | 步骤 3 三方言流式与非流式 |
 | 4 限额与调账 | 步骤 4 限额拦截与重置 |
 | 5 凭据轮换 | 步骤 5 凭据轮换 |
 | 6 跨协议降级 | 步骤 6 跨协议转换 |
 | 7 流水与余额核对 | 步骤 7 admin 回读对账 |
+| 8 上游套餐配额 | 步骤 9 上游套餐配额跳过 |
+| 9 网关中间件 | `cmd/tokenmp/plugin_e2e_test.go` 的 `TestE2EPluginMiddleware` |
 
 第 4 步的调账命令不在 e2e 剧本内（剧本只演练限额），其余步骤与子测试逐项对应。
+订阅型凭据的 OAuth 登录与续期由 `cmd/tokenmp/oauth_e2e_test.go` 的 `TestE2EOAuthJourney`
+独立演练，本文件并入步骤 5。
 `make e2e` 的 DSN 经 `TOKENMP_TEST_MYSQL_DSN` 传入，须指向可丢弃的库。
 
 以下示例取值均为占位，用 `tokenmp` 指代 `./bin/tokenmp`。`id` 一类的数字以实际库为准，
@@ -281,7 +285,11 @@ id  account  delta_amount  reason  operator  created_at
 
 ## 步骤 5：凭据轮换
 
-对应 e2e 步骤 5。同一凭据分组内可放多份启用凭据，按 id 升序轮换取用；上游拒绝凭据
+对应 e2e 步骤 5。
+
+### 5.1 API key 凭据的轮换
+
+同一凭据分组内可放多份启用凭据，按 id 升序轮换取用；上游拒绝凭据
 （401 / 403 等）时在同一渠道内换下一条，失败那条进入冷却。报废一份凭据的处置是
 「先加新的、再停用旧的」：
 
@@ -302,6 +310,51 @@ id  merchant  cred_group  name       prefix     enabled
 ```
 
 冷却状态是进程内的，`serve` 重启即重置；停用是库中的持久状态。
+
+### 5.2 订阅型凭据的 OAuth 登录
+
+API key 之外，凭据可以是会过期的 OAuth 令牌。渠道 `config` 声明 OAuth 画像，
+`admin credential oauth-login` 按画像选择流程：
+
+```
+$ tokenmp admin channel create --merchant 2 --name upstream-sub \
+    --type openai_chat --base-url https://api.example.com/v1 \
+    --cred-group grp-oauth --vendor vendor-b \
+    --config '{"oauth":{"device_url":"https://auth.example.com/device","token_url":"https://auth.example.com/token","client_id":"client-1"}}'
+已创建渠道 id=2
+```
+
+有 `device_url` 走设备码流程，打印验证地址与用户码后在终端等待轮询结果：
+
+```
+$ tokenmp admin credential oauth-login grp-oauth --merchant 2 --name primary
+请在浏览器打开 https://auth.example.com/verify 并输入用户码 ABCD-1234
+OAuth 登录完成：id=2 group=grp-oauth account=oauth-account flow=device
+```
+
+只有 `authorize_url` 与 `token_url` 时走授权码流程：
+
+```
+$ tokenmp admin channel create --merchant 2 --name upstream-sub-code \
+    --type openai_chat --base-url https://api.example.com/v1 \
+    --cred-group grp-oauth-code --vendor vendor-b \
+    --config '{"oauth":{"authorize_url":"https://auth.example.com/authorize","token_url":"https://auth.example.com/token","client_id":"client-1"}}'
+已创建渠道 id=3
+```
+
+打印授权地址并读取回调里的 code：
+
+```
+$ tokenmp admin credential oauth-login grp-oauth-code --merchant 2 --name primary
+请在浏览器打开授权地址：https://auth.example.com/authorize?client_id=client-1&response_type=code
+粘贴回调地址里的 code 后回车：code-from-callback
+OAuth 登录完成：id=3 group=grp-oauth-code account=oauth-account flow=code
+```
+
+`--code` 可直接传入授权码，省去标准输入；`--account` 在端点未返回账户标识时兜底。
+输出只含分组与账户标识，不回显任何令牌。数据面取用凭据时，若访问令牌剩余有效期不足
+`TOKENMP_UPSTREAM_OAUTH_REFRESH_WINDOW`（默认 `5m`）先续期；续期失败为 `invalid_grant`
+时标记该凭据过期并进入冷却，其它错误保留旧令牌照常发请求。
 
 ## 步骤 6：跨协议降级
 
@@ -361,3 +414,118 @@ id  account  merchant  product  qty         price_paid   purchased_at
 
 `quota list` 的 `used` 与 `usage list` 的同指标聚合是两条独立读取路径，两者对不上时先查
 限额的重置事件（`quota reset` 会移动聚合下界）。
+
+## 步骤 8：上游套餐配额
+
+对应 e2e 步骤 9 上游套餐配额跳过。上游套餐把「还剩多少额度」建成可判定、可采集的数据：
+套餐挂在商家的 `cred_group` 上，限额行的窗口语义与下游限额同口径。
+
+### 8.1 建套餐
+
+```
+$ tokenmp admin plan add --merchant 2 --cred-group grp-pro --name plan-pro \
+    --quota input_token:rolling/5h:1000000 \
+    --quota output_token:day:500000
+已写入套餐 id=1
+```
+
+`--quota` 形如 `metric:window:limit` 且可重复：`metric` 取计费指标，`limit` 是上限，
+`window` 可写全 `rolling/5h`，也可只写周期（`5h` 推 `rolling`，`day` / `week` / `month` /
+`total` 推 `calendar`）。`--multiplier` 是套餐倍率，不填默认 1；`--valid-from` 与
+`--valid-to` 限定有效期，不填表示不限。
+
+```
+$ tokenmp admin plan list
+id  merchant  cred_group  name      multiplier  last_checked_at  quota_id  metric        window_kind  period  limit_amount  last_used  used_percent  quota_checked_at  resets_at
+1   2         grp-pro     plan-pro  1           -                1         input_token   rolling      5h      1000000       0          0             -                 2026-01-01 15:00:00
+1   2         grp-pro     plan-pro  1           -                2         output_token  calendar     day     500000        0          0             -                 2026-01-02 00:00:00
+```
+
+`plan list` 按「一行一条限额」摊平：`last_used` 来自最近一次探针采集，`used_percent` 由它
+与 `limit_amount` 得出，`resets_at` 复用下游限额的窗口计算。未采集过时 `last_checked_at`
+与 `quota_checked_at` 为 `-`。
+
+### 8.2 声明探针
+
+探针写在渠道 `config` 的 `probe` 键下，采集周期由 `TOKENMP_UPSTREAM_PROBE_INTERVAL`
+（默认 `5m`）控制：
+
+```
+$ tokenmp admin channel create --merchant 2 --name upstream-pro \
+    --type openai_chat --base-url https://api.example.com/v1 \
+    --cred-group grp-pro --vendor vendor-a \
+    --config '{"probe":{"url":"https://api.example.com/quota","headers":{"Authorization":"Bearer probe-token"},"metrics":[{"metric":"input_token","window_kind":"rolling","period":"5h","used_path":"$.used"}]}}'
+已创建渠道 id=3
+```
+
+`probe` 的字段：`url` 必填，`method` 留空取 `GET`，`headers` 是随探针发出的请求头，
+`metrics` 至少一条，每条声明 `metric` / `window_kind` / `period` 与 `used_path`
+（该窗口已用量在响应 JSON 里的路径）；`window_kind` 可省略，按 `period` 推出
+（`5h` 推 `rolling`，其余推 `calendar`），与 `--quota` 同口径。套餐里每一条限额行都必须
+被探针覆盖，否则整轮采集按失败处理并保留旧快照；探针多报的取值忽略。
+
+### 8.3 路由跳过
+
+serve 启动后立即采一轮，随后按周期执行。探针报满额且快照仍新鲜时，该 `cred_group` 下的
+渠道不进入候选回退链，请求由同模型的其它候选承接；快照超过两个采集周期视为未知并放行。
+探针不可达、响应缺路径或渠道 `config` 写坏都只记结构化日志、保留旧快照，转发不受影响。
+全部候选都被跳过时回 404 `model_not_found`。
+
+## 步骤 9：网关中间件
+
+对应 `cmd/tokenmp/plugin_e2e_test.go` 的 `TestE2EPluginMiddleware`（独立剧本）。中间件在
+三个时机介入转发，可改写范围与失败语义见 [docs/compatibility.md](compatibility.md)。
+
+### 9.1 写一个中间件文件
+
+中间件是单文件 `*.mw.js`（或 `*.mw.mjs`、带 `package.json` 入口的目录）。导出可选的
+`onRequest` / `onEvent` / `onResponse` 三个函数，并用 `events` 声明逐事件钩子的白名单：
+
+```js
+// /path/to/example.mw.js
+export const events = ["text_delta"];
+
+export function onRequest(body, ctx) {
+  // 按模型别名分派；改写后的 model 参与选路。
+  if (ctx.model === "fast") {
+    body.model = "glm-5";
+  }
+  return body;
+}
+
+export function onEvent(event, ctx) {
+  // 返回 null 丢弃该事件；返回事件对象表示改写；返回 undefined 表示不改写。
+  if (ctx.state.drop_text) {
+    return null;
+  }
+  return event;
+}
+
+export function onResponse(body, ctx) {
+  body.handled_by = "tokenmp";
+  return body;
+}
+```
+
+### 9.2 配置启用
+
+中间件文件列表经 `TOKENMP_PLUGIN_FILES` 传入，逗号分隔，空值表示禁用插件层：
+
+```
+$ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp serve
+```
+
+任一项路径不存在、扩展名不符或编译失败都会让 serve 以退出码 1 终止；文件指纹变化时
+惰性重编译，重编译失败保留上一份产物继续服务。
+
+### 9.3 列出已加载的中间件
+
+```
+$ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp admin plugin list
+name            path                      hooks                         events      calls  failures  average_ms  last_error
+example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_delta  0      0         0.00
+```
+
+`plugin list` 只读配置、不连数据库，未配置时只输出表头。`calls` / `failures` /
+`average_ms` 是加载中间件那个进程的累计值，独立执行一次 `admin plugin list` 通常只看得到
+清单，计数为零；`last_error` 是该中间件最近一次钩子失败的文案。
