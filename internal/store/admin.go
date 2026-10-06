@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -181,6 +182,9 @@ func (s *Store) SetMerchantStatus(ctx context.Context, id uint64, status string)
 }
 
 // Channel 是 upstream_channel 的一行。
+//
+// Config 是渠道级扩展配置（JSON），探针声明就写在这里。它带 `json:"-"`：
+// 探针 headers 里可能有鉴权 token，管理面列表输出不回显配置原文。
 type Channel struct {
 	ID         uint64      `json:"id"`
 	MerchantID uint64      `json:"merchant_id"`
@@ -192,10 +196,10 @@ type Channel struct {
 	Priority   int         `json:"priority"`
 	Weight     int         `json:"weight"`
 	Enabled    bool        `json:"enabled"`
-	// Config 是渠道级扩展配置的原始 JSON，结构随协议方言演进，存储层不解释。
-	// 凭据注入形态（credential_style）是当前认识的键，由选路边界解析。
-	// 用 json.RawMessage 而不是 []byte：后者在 JSON 序列化时会被转成 base64 字符串。
-	Config json.RawMessage `json:"config,omitempty"`
+	// Config 是渠道级扩展配置（JSON），凭据注入形态与探针声明都写在这里。
+	// 带 `json:"-"`：探针 headers 里可能有鉴权 token，管理面列表输出不回显配置原文。
+	// 用 json.RawMessage 而不是 []byte：与 config 列的原义 JSON 同形，读取方按对象取键。
+	Config json.RawMessage `json:"-"`
 }
 
 const insertChannelSQL = `INSERT INTO upstream_channel
@@ -219,12 +223,38 @@ func insertChannel(ctx context.Context, ex executor, c Channel) (uint64, error) 
 	if strings.TrimSpace(c.BaseURL) == "" {
 		return 0, errors.New("store: upstream_channel.base_url 不能为空")
 	}
+	config, err := encodeChannelConfig(c.Config)
+	if err != nil {
+		return 0, err
+	}
 	res, err := ex.ExecContext(ctx, insertChannelSQL,
-		c.MerchantID, c.Name, c.Vendor, c.Type, c.CredGroup, c.BaseURL, c.Priority, c.Weight, nullableJSON(c.Config))
+		c.MerchantID, c.Name, c.Vendor, c.Type, c.CredGroup, c.BaseURL, c.Priority, c.Weight, config)
 	if err != nil {
 		return 0, describeWriteError("upstream_channel", err)
 	}
 	return insertID(res, nil, "upstream_channel")
+}
+
+// encodeChannelConfig 把渠道扩展配置收敛成 SQL 参数。
+//
+// 空配置写成 NULL；非空必须是合法 JSON 对象。不是对象（数组、裸字符串）的配置
+// 不该落库：读取方按对象取键，落库一个数组只会把错误推到很久以后的采集日志里。
+func encodeChannelConfig(raw []byte) (any, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &object); err != nil {
+		return nil, fmt.Errorf("store: upstream_channel.config 必须是 JSON 对象: %w", err)
+	}
+	if object == nil {
+		return nil, errors.New("store: upstream_channel.config 必须是 JSON 对象")
+	}
+	return trimmed, nil
 }
 
 // InsertChannel 写一条渠道，返回新行 id。

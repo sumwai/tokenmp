@@ -22,8 +22,10 @@ import (
 const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 
 // knownTables 与 migrations/0001_init.sql、0002_billing.sql、0003_account_bucket_unit_rate.sql、
-// 0004_billing_usage_api_key.sql 对应，删除顺序无关紧要（全库无外键）。
+// 0004_billing_usage_api_key.sql、0005_upstream_plan.sql 对应，删除顺序无关紧要（全库无外键）。
 var knownTables = []string{
+	"upstream_plan_quota",
+	"upstream_plan",
 	"billing_adjustment",
 	"account_quota_event",
 	"account_quota",
@@ -90,7 +92,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 4)
+	assertMigrationVersionCount(ctx, t, s.DB(), 5)
 	assertPlatformMerchantCount(ctx, t, s.DB(), 1)
 	// 第二次迁移不应重复加列：列仍存在且可空。
 	assertUnitRateColumn(ctx, t, s.DB())
@@ -420,5 +422,5 @@ func TestBillingStoreRoundTrip(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 4)
+	assertMigrationVersionCount(ctx, t, s.DB(), 5)
 }

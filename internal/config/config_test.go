@@ -97,6 +97,9 @@ func TestLoadServeDefaults(t *testing.T) {
 	if got.BreakerProbes != defaultBreakerProbes {
 		t.Errorf("BreakerProbes = %d，期望 %d", got.BreakerProbes, defaultBreakerProbes)
 	}
+	if got.ProbeInterval != defaultProbeInterval {
+		t.Errorf("ProbeInterval = %s，期望 %s", got.ProbeInterval, defaultProbeInterval)
+	}
 }
 
 // TestLoadServeExplicitTimeoutsAndPool 断言显式给出的超时与连接池取值原样生效。
@@ -115,6 +118,7 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 		envBreakerThreshold:            "9",
 		envBreakerCooldown:             "1m",
 		envBreakerProbes:               "3",
+		envProbeInterval:               "30s",
 	}))
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
@@ -152,6 +156,9 @@ func TestLoadServeExplicitTimeoutsAndPool(t *testing.T) {
 	if got.BreakerProbes != 3 {
 		t.Errorf("BreakerProbes = %d，期望 3", got.BreakerProbes)
 	}
+	if got.ProbeInterval != 30*time.Second {
+		t.Errorf("ProbeInterval = %s，期望 30s", got.ProbeInterval)
+	}
 }
 
 // TestLoadServeRejectsInvalidTimeoutsAndPool 断言非正数与非法时长在启动前报错。
@@ -177,6 +184,8 @@ func TestLoadServeRejectsInvalidTimeoutsAndPool(t *testing.T) {
 		{name: "限流等待格式错", key: envRateLimitWait, val: "2"},
 		{name: "熔断阈值为零", key: envBreakerThreshold, val: "0"},
 		{name: "熔断阈值为负", key: envBreakerThreshold, val: "-1"},
+		{name: "探针周期为零", key: envProbeInterval, val: "0s"},
+		{name: "探针周期格式错", key: envProbeInterval, val: "5"},
 		{name: "熔断阈值格式错", key: envBreakerThreshold, val: "five"},
 		{name: "熔断冷却为零", key: envBreakerCooldown, val: "0s"},
 		{name: "熔断冷却格式错", key: envBreakerCooldown, val: "30"},
