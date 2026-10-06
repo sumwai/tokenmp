@@ -70,6 +70,22 @@ Gemini 的端点含模型名与流式后缀，由适配器在调用上游时拼�
 `x-goog-api-key` / `query`；留空按协议现状。`query` 表示把凭据写成上游地址的 `?key=`
 查询参数，服务只接受查询参数、不接受凭据请求头的上游（如部分 Gemini 兼容端点）。
 
+`--config` 的 `headers` 键声明上游强制要求的自定义请求头（如 opencode-go 要求
+`x-opencode-session`）。取值是默认值：客户端带了同名头就用客户端的，没带才用这里的。
+
+```
+$ tokenmp admin channel create --merchant 2 --name upstream-session \
+    --type openai_chat --base-url https://opencode.ai/zen/go/v1 \
+    --cred-group grp-session --vendor vendor-b \
+    --config '{"headers":{"x-opencode-session":"11111111-1111-1111-1111-111111111111"}}'
+已创建渠道 id=2
+```
+
+透传范围只限于这里声明过的头名，客户端带的其它头不进入上游请求。鉴权头
+（`authorization` / `x-api-key` / `x-goog-api-key`）与报文控制头（`content-type`、
+`accept`、`host` 及逐跳头）由网关自身占用，写进 `headers` 会在写入时被拒绝。
+`config` 写坏、缺键或类型不符都只让该渠道没有额外请求头，不影响选路与转发。
+
 ```
 $ tokenmp admin credential add --merchant 2 --group grp-chat --name primary \
     --api-key sk-upstream-xxx

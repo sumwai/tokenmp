@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -265,6 +266,11 @@ type Request struct {
 	UsageFramesRequested bool `json:"-"`
 	// RawBody 保留客户端原始请求体，供协议回退时按原协议重放。
 	RawBody []byte `json:"-"`
+	// Headers 是客户端原始请求头，只用于渠道静态请求头的透传取值。
+	//
+	// 网关不整体转发客户端请求头：只有渠道 config.headers 声明过的头名会经它取到
+	// 客户端取值，其余头名不进入上游请求。入口层写入，之后各层只读。
+	Headers http.Header `json:"-"`
 }
 
 // Validate 校验内部请求的最小必要条件。它不检查模型是否存在，后者由选路负责。

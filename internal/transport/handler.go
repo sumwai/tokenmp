@@ -203,6 +203,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 端点路径携带的模型名与流式形态由适配器声明（domain.EndpointFormat）；
 	// 固定端点路径的协议不实现该接口，沿用请求体解码结果。
 	h.applyEndpointPath(adapter, r.URL.Path, req)
+	// 客户端请求头挂到内部请求上，供渠道静态请求头的透传取值使用。
+	// 这里是客户端头的唯一入口，下游不会因此整体转发它们：选路只按渠道 config.headers
+	// 声明过的头名取客户端取值。
+	req.Headers = r.Header
 	// 请求 id 优先取客户端透传的 X-Request-Id，其次请求体自带，最后入口生成。
 	req.RequestID = h.resolveRequestID(r, req.RequestID)
 	state.requestID = req.RequestID

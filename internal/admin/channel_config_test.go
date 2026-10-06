@@ -74,3 +74,83 @@ func TestCreateChannelRejectsUnknownCredentialStyle(t *testing.T) {
 		t.Error("校验失败不应触达存储层")
 	}
 }
+
+// TestCreateChannelWritesStaticHeaders 守护渠道静态请求头随 config 落库。
+//
+// 数据面只从 config 读它，写入不落库则「强制自定义头的上游」在管理面无从配置。
+func TestCreateChannelWritesStaticHeaders(t *testing.T) {
+	f := &fakeStore{}
+	var got store.Channel
+	f.insertChannel = func(_ context.Context, c store.Channel) (uint64, error) {
+		got = c
+		return 1, nil
+	}
+	config := `{"headers":{"x-static-header":"1111"}}`
+	if _, err := newService(f).CreateChannel(context.Background(), ChannelInput{
+		MerchantID: 1, Name: "ch", Type: store.ChannelTypeOpenAIChat, CredGroup: "g", BaseURL: "https://up",
+		Config: config,
+	}); err != nil {
+		t.Fatalf("合法输入不应报错：%v", err)
+	}
+	if string(got.Config) != config {
+		t.Fatalf("config = %s，期望 %s", got.Config, config)
+	}
+}
+
+// TestCreateChannelRejectsReservedStaticHeader 守护网关自身占用的头名在写入入口被拦下。
+//
+// 鉴权头被渠道静态头占住时，客户端就能经透传取得上游凭据的位置；报文控制头被占住
+// 则会让 Content-Type 一类与实际报文形态不符。两者都不能只靠读取侧的宽容。
+func TestCreateChannelRejectsReservedStaticHeader(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{name: "鉴权头", config: `{"headers":{"Authorization":"Bearer x"}}`},
+		{name: "凭据头另一种形态", config: `{"headers":{"X-Api-Key":"x"}}`},
+		{name: "报文类型头", config: `{"headers":{"Content-Type":"text/plain"}}`},
+		{name: "传输层头", config: `{"headers":{"Host":"other"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeStore{}
+			if _, err := newService(f).CreateChannel(context.Background(), ChannelInput{
+				MerchantID: 1, Name: "ch", Type: store.ChannelTypeOpenAIChat, CredGroup: "g", BaseURL: "https://up",
+				Config: tc.config,
+			}); err == nil {
+				t.Fatalf("保留头名应当被拒绝：%s", tc.config)
+			}
+			if f.called("InsertChannel") {
+				t.Error("校验失败不应触达存储层")
+			}
+		})
+	}
+}
+
+// TestCreateChannelRejectsMalformedStaticHeaders 守护 headers 的结构在写入入口被校验。
+//
+// 读取侧对这些形态只让该渠道没有额外请求头；写入侧报错是为了不让操作者
+// 误以为头已生效。
+func TestCreateChannelRejectsMalformedStaticHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{name: "headers 是数组", config: `{"headers":["x"]}`},
+		{name: "headers 的值不是字符串", config: `{"headers":{"x-static-header":1}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeStore{}
+			if _, err := newService(f).CreateChannel(context.Background(), ChannelInput{
+				MerchantID: 1, Name: "ch", Type: store.ChannelTypeOpenAIChat, CredGroup: "g", BaseURL: "https://up",
+				Config: tc.config,
+			}); err == nil {
+				t.Fatalf("非法的 headers 应当被拒绝：%s", tc.config)
+			}
+			if f.called("InsertChannel") {
+				t.Error("校验失败不应触达存储层")
+			}
+		})
+	}
+}

@@ -164,7 +164,35 @@ func channelConfigArg(raw string) (json.RawMessage, error) {
 	if object == nil {
 		return nil, errors.New("渠道 config 必须是 JSON 对象")
 	}
+	if err := validateConfigHeaders(object); err != nil {
+		return nil, err
+	}
 	return json.RawMessage(trimmed), nil
+}
+
+// configFieldHeaders 是渠道静态请求头的 config 键名，与选路边界的读取口径同源。
+const configFieldHeaders = "headers"
+
+// validateConfigHeaders 校验渠道 config 的 headers：结构必须是字符串到字符串的对象，
+// 且不得占用网关自身的头名（见 domain.IsReservedUpstreamHeader）。
+//
+// 读取侧（route.parseHeaders）对这些情况是宽容的：写坏只让该渠道没有额外请求头。
+// 但写入是唯一能把「配错了」显式拦下的地方 —— 静默退化会让操作者误以为头已生效。
+func validateConfigHeaders(object map[string]json.RawMessage) error {
+	raw, ok := object[configFieldHeaders]
+	if !ok {
+		return nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(raw, &headers); err != nil {
+		return errors.New("渠道 config 的 headers 必须是字符串到字符串的 JSON 对象")
+	}
+	for name := range headers {
+		if domain.IsReservedUpstreamHeader(name) {
+			return fmt.Errorf("admin: 渠道静态请求头 %q 由网关自身占用，不能配置", name)
+		}
+	}
+	return nil
 }
 
 // ListChannels 列出全部渠道。
