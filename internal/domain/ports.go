@@ -242,6 +242,9 @@ type Route struct {
 	// SigninHeader 是渠道在 config 里声明的登录态信标头映射；零值表示未声明，
 	// 凭据类判定回退到状态码启发式。
 	SigninHeader SigninHeader
+	// OAuthProfile 是渠道在 config 里声明的 OAuth 端点画像；零值表示未声明，
+	// 订阅型凭据取用时不做惰性续期，按原样注入。
+	OAuthProfile OAuthProfile
 }
 
 // RouteResolver 返回按有效优先级升序排列的候选渠道列表。
