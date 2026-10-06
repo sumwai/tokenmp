@@ -200,6 +200,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeError(rec, adapter, err)
 		return
 	}
+	// 端点路径携带的模型名与流式形态由适配器声明（domain.EndpointFormat）；
+	// 固定端点路径的协议不实现该接口，沿用请求体解码结果。
+	h.applyEndpointPath(adapter, r.URL.Path, req)
 	// 请求 id 优先取客户端透传的 X-Request-Id，其次请求体自带，最后入口生成。
 	req.RequestID = h.resolveRequestID(r, req.RequestID)
 	state.requestID = req.RequestID
@@ -225,6 +228,29 @@ func (h *Handler) resolveRequestID(r *http.Request, bodyID string) string {
 		return bodyID
 	}
 	return h.newRequestID()
+}
+
+// applyEndpointPath 把路径携带的端点事实补进请求。
+//
+// 端点路径含模型名或流式形态的协议（例如 Gemini 的 /v1beta/models/{model}:generateContent）
+// 经 domain.EndpointFormat 声明，由适配器从路径解析出模型名与是否流式，入口层只负责回填；
+// 固定端点路径的协议不实现该接口，协议差异不由此处承担。
+func (h *Handler) applyEndpointPath(adapter domain.Adapter, path string, req *domain.Request) {
+	if req == nil {
+		return
+	}
+	format, ok := adapter.(domain.EndpointFormat)
+	if !ok {
+		return
+	}
+	model, stream, matched := format.MatchClientPath(path)
+	if !matched {
+		return
+	}
+	if model != "" {
+		req.Model = model
+	}
+	req.Stream = stream
 }
 
 // accessState 是访问日志所需、在请求处理过程中逐步填齐的字段。

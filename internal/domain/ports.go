@@ -172,7 +172,7 @@ const (
 	// CredentialHeaderXAPIKey 注入 x-api-key: <凭据>。
 	CredentialHeaderXAPIKey CredentialHeaderStyle = "x-api-key"
 	// CredentialHeaderXGoogAPIKey 注入 x-goog-api-key: <凭据>（Gemini 原生形态）。
-	CredentialHeaderXGoogAPIKey CredentialHeaderStyle = "x-goog-api-key"
+	CredentialHeaderXGoogAPIKey CredentialHeaderStyle = "x-goog-api-key" //nolint:gosec // G101：这是注入形态名，不是凭据。
 	// CredentialHeaderQuery 不注入凭据请求头，改为以查询参数 key=<凭据> 追加到上游地址。
 	// 它服务只接受 ?key= 的 Gemini 兼容端点。
 	CredentialHeaderQuery CredentialHeaderStyle = "query"
