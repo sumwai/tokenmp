@@ -344,7 +344,7 @@ func mapTransportError(ctx context.Context, err error) *domain.Error {
 
 // credentialFailureTokens 是上游响应体里明确表示「凭据或权限不被接受」的标记。
 //
-// 只登记认证与权限两类字面量，三种线协议的报文里这些取值都只出现在凭据失败上；
+// 只登记认证与权限两类字面量，各线协议的报文里这些取值都只出现在凭据失败上；
 // 请求参数类错误（invalid_request_error、not_found_error）刻意不在列，
 // 否则「拿不准的 4xx」会触发换凭据，把一次参数错误放大成对整组 key 的枚举。
 var credentialFailureTokens = []string{

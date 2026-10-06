@@ -111,7 +111,7 @@ func (p Protocol) CrossProtocolRebuildable() bool {
 	}
 }
 
-// Role 是消息角色，已归一化到三种协议的交集。
+// Role 是消息角色，已归一化到各协议的公共表示。
 type Role string
 
 const (
@@ -134,7 +134,7 @@ const (
 	// 不新增字段：Kind 决定哪些字段有效的既有约定可以表达它。
 	//
 	// 它只在解码方向建模：编码方向（EncodeResponse 与跨协议请求重建）不下发推理内容，
-	// 因为三种协议对可回传形态的要求不同——Anthropic 的 thinking 块要求签名、
+	// 因为各协议对可回传形态的要求不同——Anthropic 的 thinking 块要求签名、
 	// OpenAI Responses 的 reasoning 条目要求上下文标识，从别的协议取到的纯文本无法重建。
 	PartReasoning PartKind = "reasoning"
 )
@@ -181,7 +181,7 @@ type ToolSpec struct {
 // ToolChoiceMode 是归一化后的工具选择模式。
 //
 // 各协议的工具选择字面量与对象形态各不相同，
-// 映射到本枚举由各适配器负责：`auto`、`none`、`required` 三种字符串取值在三种协议间
+// 映射到本枚举由各适配器负责：`auto`、`none`、`required` 三种字符串取值在各协议间
 // 通用，指定具体工具在各协议上是对象形态。
 type ToolChoiceMode string
 
@@ -337,7 +337,7 @@ func (p Part) validate() error {
 	return nil
 }
 
-// FinishReason 是归一化后的结束原因，取三种协议语义的交集。
+// FinishReason 是归一化后的结束原因，取各协议语义的交集。
 //
 // 各上游的具体字面量（如 `end_turn`、`max_output_tokens`）由各自的适配器
 // 负责映射到本枚举：字面量属于协议差异，放在这里会迫使新增协议修改本包。

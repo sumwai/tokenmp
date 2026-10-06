@@ -11,11 +11,12 @@ import (
 
 // Adapter 负责一种线协议与内部统一格式的双向转换。
 //
-// 三种协议各自实现本接口：
+// 四种协议各自实现本接口：
 //
 //   - OpenAI Chat Completions（POST /v1/chat/completions）；
 //   - OpenAI Responses（POST /v1/responses）；
-//   - Anthropic Messages（POST /v1/messages）。
+//   - Anthropic Messages（POST /v1/messages）；
+//   - Gemini generateContent（POST /v1beta/models/{model}:generateContent 与 :streamGenerateContent）。
 //
 // 流水线只依赖本接口，不感知协议细节。
 //
@@ -36,7 +37,7 @@ import (
 //   - 响应解码：DecodeResponse / DecodeStreamFrame；
 //   - 流式收尾：FinishStream。
 //
-// 方法集合是三个协议实现共同遵守的公共契约：新增或删除方法必须同步全部实现，
+// 方法集合是四个协议实现共同遵守的公共契约：新增或删除方法必须同步全部实现，
 // 避免适配器各自补私有方法而破坏统一转发流水线。
 //
 // 解码失败必须返回 domain.Error，错误码用 CodeInvalidRequest。
@@ -323,9 +324,9 @@ type ChannelLimiter interface {
 
 // UpstreamRequestBuilder 把内部统一请求转换为上游协议请求体。
 //
-// 之所以新增独立接口而不继续给 Adapter 加方法：Adapter 的方法集合是三个协议实现
-// 共同遵守的公共契约，且已有三个协议实现；请求侧的构建能力
-// 只有共享转发层需要，扩大 Adapter 会让三个协议实现一起被迫改动。
+// 之所以新增独立接口而不继续给 Adapter 加方法：Adapter 的方法集合是四个协议实现
+// 共同遵守的公共契约，且已有四个协议实现；请求侧的构建能力
+// 只有共享转发层需要，扩大 Adapter 会让四个协议实现一起被迫改动。
 type UpstreamRequestBuilder interface {
 	// EncodeRequest 按内部统一格式重建上游请求体，用于跨协议转发路径。
 	//
