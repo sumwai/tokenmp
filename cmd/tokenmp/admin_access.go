@@ -16,7 +16,7 @@ import (
 
 func adminCredential(ctx context.Context, args []string, env *adminEnv) int {
 	if len(args) == 0 {
-		return env.usageError("credential 需要动作：add / list / disable")
+		return env.usageError("credential 需要动作：add / list / enable / disable")
 	}
 	action, rest := args[0], args[1:]
 	switch action {
@@ -24,8 +24,10 @@ func adminCredential(ctx context.Context, args []string, env *adminEnv) int {
 		return adminCredentialAdd(ctx, rest, env)
 	case actionList:
 		return adminCredentialList(ctx, rest, env)
+	case actionEnable:
+		return adminCredentialSetEnabled(ctx, rest, env, true)
 	case actionDisable:
-		return adminCredentialDisable(ctx, rest, env)
+		return adminCredentialSetEnabled(ctx, rest, env, false)
 	case actionOAuthLogin:
 		return adminCredentialOAuthLogin(ctx, rest, env)
 	default:
@@ -87,16 +89,24 @@ func adminCredentialList(ctx context.Context, args []string, env *adminEnv) int 
 		[]string{flagID, flagMerchant, headerCredGroup, flagName, "prefix", headerEnabled}, rows, views)
 }
 
-func adminCredentialDisable(ctx context.Context, args []string, env *adminEnv) int {
-	fs := env.newFlagSet("admin credential disable")
+func adminCredentialSetEnabled(ctx context.Context, args []string, env *adminEnv, enabled bool) int {
+	fs := env.newFlagSet("admin credential")
 	id := fs.Uint64(flagID, 0, "凭据 id")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
-	if err := env.service.DisableCredential(ctx, *id); err != nil {
+	var err error
+	label := "停用"
+	if enabled {
+		label = "启用"
+		err = env.service.EnableCredential(ctx, *id)
+	} else {
+		err = env.service.DisableCredential(ctx, *id)
+	}
+	if err != nil {
 		return env.fail(err)
 	}
-	return env.printf("已停用凭据 id=%d\n", *id)
+	return env.printf("已%s凭据 id=%d\n", label, *id)
 }
 
 // adminCredentialOAuthLogin 执行一次 OAuth 登录并写入凭据。

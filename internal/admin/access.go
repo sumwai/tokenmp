@@ -82,6 +82,17 @@ func (s *Service) DisableCredential(ctx context.Context, id uint64) error {
 	return s.store.SetCredentialEnabled(ctx, id, false)
 }
 
+// EnableCredential 启用一行上游凭据。
+//
+// 与 DisableCredential 成对：停用是运营动作，误停之后必须能原地恢复，
+// 否则只能直接改库或重新写入一份凭据（后者会让凭据 id 与历史流水脱钩）。
+func (s *Service) EnableCredential(ctx context.Context, id uint64) error {
+	if err := requireID("凭据 id", id); err != nil {
+		return err
+	}
+	return s.store.SetCredentialEnabled(ctx, id, true)
+}
+
 // defaultMultiplier 是渠道倍率与账户倍率的默认值，与列的 DEFAULT 1 一致。
 const defaultMultiplier = "1"
 
