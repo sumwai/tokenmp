@@ -38,6 +38,12 @@ type passthroughSink struct {
 	// suppressUsageFrames 为真时抑制只承载用量的上游帧：客户端未索取用量帧，
 	// 网关为计费注入索取开关后上游多发的那一帧不该写给它。用量仍照常记账。
 	suppressUsageFrames bool
+	// events 是流式逐事件中间件；nil 时不做任何逐事件处置。
+	events domain.StreamMiddleware
+	// req 是本次请求，供中间件构造钩子上下文。
+	req *domain.Request
+	// client 是面向客户端的适配器，仅在中间件确实改动了帧时才用于重新编码。
+	client domain.Adapter
 	// usage 是最后一个携带用量的分片给出的用量；未取得时为零值。
 	usage domain.Usage
 	// wrote 记录是否已向客户端写出过字节。
@@ -71,9 +77,22 @@ func (s *passthroughSink) Send(_ context.Context, chunk domain.Chunk) error {
 // 分片里含只承载用量的帧且客户端未索取用量时，用量记下、原始字节不写出，也不置位 wrote：
 // 这一帧本不产生客户端字节，抑制它不应关闭换渠道重试。判定依据是分片类型而不是字节前缀，
 // 无法解析或形状非预期的帧不会产出该分片，因而原样转发，宁多勿丢。
-func (s *passthroughSink) SendFrame(_ context.Context, raw []byte, chunks []domain.Chunk) error {
+//
+// 中间件层只在本帧全部由内容分片组成时才介入：一帧里混有用量或结束分片时，
+// 重新编码会丢失那些分片，宁可整帧原样透传。确实改动了分片时按分片重新编码；
+// 重新编码不出来（例如协议在编码方向不下发该分片）时同样回退为原样透传。
+func (s *passthroughSink) SendFrame(ctx context.Context, raw []byte, chunks []domain.Chunk) error {
 	for _, chunk := range chunks {
 		s.recordUsage(chunk)
+	}
+	if s.events != nil {
+		handled, err := s.applyEvents(ctx, chunks)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
 	}
 	if s.suppressUsageFrames && carriesUsageOnlyFrame(chunks) {
 		return nil
@@ -84,6 +103,87 @@ func (s *passthroughSink) SendFrame(_ context.Context, raw []byte, chunks []doma
 		return clientWriteError(err)
 	}
 	return nil
+}
+
+// applyEvents 在整帧都是内容分片时交给中间件层处置，并返回是否已写完全帧。
+//
+// 未改动、或重新编码不出来时返回 false，由调用方按原帧透传。
+func (s *passthroughSink) applyEvents(ctx context.Context, chunks []domain.Chunk) (bool, error) {
+	filtered, changed, drop := s.filter(ctx, chunks)
+	if drop {
+		return true, nil
+	}
+	if !changed {
+		return false, nil
+	}
+	return s.writeFiltered(filtered)
+}
+
+// filter 逐分片询问中间件层；返回改写后的分片、是否发生改动、是否整帧丢弃。
+//
+// 只要帧里出现非内容分片就直接放弃介入（changed 与 drop 都为 false），
+// 由调用方按原始帧透传。
+func (s *passthroughSink) filter(ctx context.Context, chunks []domain.Chunk) (kept []domain.Chunk, changed, drop bool) {
+	for _, chunk := range chunks {
+		if !isContentChunk(chunk.Kind) {
+			return nil, false, false
+		}
+	}
+	kept = make([]domain.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		result := s.events.OnEvent(ctx, s.req, chunk)
+		switch {
+		case result.Drop:
+			changed = true
+		case result.Unchanged:
+			kept = append(kept, chunk)
+		default:
+			changed = true
+			kept = append(kept, result.Chunk)
+		}
+	}
+	if !changed {
+		return nil, false, false
+	}
+	if len(kept) == 0 {
+		return nil, true, true
+	}
+	return kept, true, false
+}
+
+// writeFiltered 按分片重新编码原帧；任一存活分片编码不出来（含编码方向不下发的分片）
+// 时返回 wrote=false，由调用方回退为原样透传。
+func (s *passthroughSink) writeFiltered(chunks []domain.Chunk) (bool, error) {
+	frames := make([][]byte, 0, len(chunks))
+	for _, chunk := range chunks {
+		frame, err := s.client.EncodeChunk(chunk)
+		if err != nil {
+			//nolint:nilerr // 编码失败按「无法重建该帧」处理，回退为原样透传，不视为转发失败。
+			return false, nil
+		}
+		if len(frame) == 0 {
+			return false, nil
+		}
+		frames = append(frames, frame)
+	}
+	s.wrote = true
+	for _, frame := range frames {
+		if _, err := s.out.Write(frame); err != nil {
+			s.failed = true
+			return true, clientWriteError(err)
+		}
+	}
+	return true, nil
+}
+
+// isContentChunk 报告分片是否是逐事件中间件可处置的内容分片。
+func isContentChunk(kind domain.ChunkKind) bool {
+	switch kind {
+	case domain.ChunkTextDelta, domain.ChunkToolCallDelta, domain.ChunkReasoningDelta:
+		return true
+	default:
+		return false
+	}
 }
 
 // carriesUsageOnlyFrame 报告一帧解出的分片里是否含只承载用量的帧。
@@ -127,6 +227,10 @@ func (s *passthroughSink) credentialRenewed() bool { return s.renewed }
 type rebuildSink struct {
 	out    io.Writer
 	client domain.Adapter
+	// events 是流式逐事件中间件；nil 时不做任何逐事件处置。
+	events domain.StreamMiddleware
+	// req 是本次请求，供中间件构造钩子上下文。
+	req *domain.Request
 	// startFrame 是流开始帧，延迟到首个字节真正要写出时才发，
 	// 使「上游在写出前失败」仍可换渠道重试。
 	startFrame []byte
@@ -147,20 +251,30 @@ var (
 // newRebuildSink 为一条流构造重建下沉目标，并预先生成流开始帧。
 //
 // model 是写入开始帧的模型名，由调用方按 Route.UpstreamModel 决定。
-func newRebuildSink(out io.Writer, client domain.Adapter, model string) (*rebuildSink, error) {
+func newRebuildSink(out io.Writer, client domain.Adapter, model string, events domain.StreamMiddleware, req *domain.Request) (*rebuildSink, error) {
 	startFrame, err := client.EncodeStreamStart(model)
 	if err != nil {
 		return nil, err
 	}
-	return &rebuildSink{out: out, client: client, startFrame: startFrame}, nil
+	return &rebuildSink{out: out, client: client, events: events, req: req, startFrame: startFrame}, nil
 }
 
 // Send 把一个上游分片编码为面向客户端的帧并写出。
 //
 // ChunkUsage 只出现在解码方向，必须在此跳过；结束分片按上游给出的用量原样交适配器编码。
-func (s *rebuildSink) Send(_ context.Context, chunk domain.Chunk) error {
+func (s *rebuildSink) Send(ctx context.Context, chunk domain.Chunk) error {
 	if chunk.Usage != nil {
 		s.usage = *chunk.Usage
+	}
+	// 内容分片先交中间件层处置：丢弃直接返回，改写后的分片继续走原有编码分支。
+	if s.events != nil && isContentChunk(chunk.Kind) {
+		result := s.events.OnEvent(ctx, s.req, chunk)
+		if result.Drop {
+			return nil
+		}
+		if !result.Unchanged {
+			chunk = result.Chunk
+		}
 	}
 	if chunk.Kind == domain.ChunkUsage {
 		return nil
