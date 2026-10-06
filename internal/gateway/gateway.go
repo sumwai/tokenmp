@@ -32,6 +32,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/me"
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/plan"
+	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
 	"github.com/sumwai/tokenmp/internal/route"
@@ -165,6 +166,10 @@ type Options struct {
 	Logger transport.AccessLogger
 	// Observer 记录每次上游尝试；nil 时不记录尝试级日志。
 	Observer domain.Observer
+	// PluginFiles 是网关中间件插件的文件或包目录列表；空表示不装配插件层。
+	PluginFiles []string
+	// PluginLogger 记录插件装载、钩子失败与控制台输出；nil 时不记录。
+	PluginLogger *slog.Logger
 }
 
 // Gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -202,6 +207,17 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	completeTimeout := opts.CompleteTimeout
 	if completeTimeout <= 0 {
 		completeTimeout = defaultCompleteTimeout
+	}
+	// 中间件插件在装配期加载：非法路径与编译失败在启动时报出，不推迟到第一个请求。
+	middleware, err := plugin.Load(opts.PluginFiles, plugin.Options{Logger: opts.PluginLogger})
+	if err != nil {
+		return nil, err
+	}
+	var streamMiddleware domain.StreamMiddleware
+	var responseMiddleware domain.ResponseMiddleware
+	if !middleware.Empty() {
+		streamMiddleware = middleware
+		responseMiddleware = middleware
 	}
 
 	// 协议适配器做成单例：不持有跨请求业务状态（流式状态由 NewStream 派生），可按协议共享。
@@ -288,13 +304,22 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		}),
 		MaxAttempts:           opts.MaxAttempts,
 		CrossProtocolAttempts: opts.CrossProtocolAttempts,
+		Stream:                streamMiddleware,
+		Response:              responseMiddleware,
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	// 请求改写必须发生在路由解析之前，因此由转发装饰器在流水线之外完成；
+	// 逐事件与非流式响应改写经流水线端口注入，两者共用一个插件集与同一请求状态。
+	var forward transport.Forwarder = forwarder
+	if !middleware.Empty() {
+		forward = &pluginForwarder{inner: forward, plugins: middleware}
+	}
+
 	handler, err := transport.New(transport.Options{
-		Forwarder:       forwarder,
+		Forwarder:       forward,
 		Adapters:        resolveAdapter,
 		CompleteTimeout: completeTimeout,
 		Logger:          opts.Logger,
@@ -319,8 +344,13 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	mux.HandleFunc(HealthzPath, healthz)
 	// 四条端点各自注册前缀并套上鉴权；其余路径一律走下面的 JSON 404。
 	// 固定端点用完整路径精确匹配，含模型名的端点用前缀匹配子树。
+	// 插件层启用时再套一层：把请求路径与鉴权归属写进上下文，供插件钩子消费。
+	protocolHandler := http.Handler(handler)
+	if !middleware.Empty() {
+		protocolHandler = pluginContextMiddleware(handler)
+	}
 	for _, protocol := range supportedProtocols {
-		mux.Handle(clientEndpointPrefix(adapters[protocol]), auth.Middleware(handler))
+		mux.Handle(clientEndpointPrefix(adapters[protocol]), auth.Middleware(protocolHandler))
 	}
 	// 自助查询共用数据面同一鉴权中间件：头格式、密钥失效与账户停用三类失败
 	// 与转发端点回同一种 401，不另写一套鉴权口径。

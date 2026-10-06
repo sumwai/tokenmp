@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -90,5 +92,46 @@ func TestServeFailsFastOnMissingConfig(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "配置") {
 		t.Errorf("stderr 应报配置错误，实际：%s", stderr.String())
+	}
+}
+
+// TestAdminPluginListReadsConfigWithoutDatabase 守护 plugin list 不连库：
+// 只读 TOKENMP_PLUGIN_FILES，缺 DSN 时也能列出已加载插件。
+func TestAdminPluginListReadsConfigWithoutDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "list.mw.js")
+	source := `export const events = ["text_delta"];
+` +
+		`export function onRequest(body) { return body; }
+` +
+		`export function onEvent(event) { return event; }
+`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatalf("写插件文件失败：%v", err)
+	}
+	t.Setenv("TOKENMP_MYSQL_DSN", "")
+	t.Setenv("TOKENMP_PLUGIN_FILES", path)
+
+	var stdout, stderr strings.Builder
+	if code := run([]string{"admin", "plugin", "list"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("退出码 = %d，期望 %d，stderr：%s", code, exitOK, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "list.mw.js") {
+		t.Errorf("输出应含插件名，实际：%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "onEvent") {
+		t.Errorf("输出应含已加载钩子，实际：%s", stdout.String())
+	}
+}
+
+// TestAdminPluginListRejectsInvalidPath 守护非法插件路径在启动期报出。
+func TestAdminPluginListRejectsInvalidPath(t *testing.T) {
+	t.Setenv("TOKENMP_MYSQL_DSN", "")
+	t.Setenv("TOKENMP_PLUGIN_FILES", filepath.Join(t.TempDir(), "missing.mw.js"))
+	var stdout, stderr strings.Builder
+	if code := run([]string{"admin", "plugin", "list"}, &stdout, &stderr); code != exitFailure {
+		t.Fatalf("退出码 = %d，期望 %d", code, exitFailure)
+	}
+	if !strings.Contains(stderr.String(), "错误") {
+		t.Errorf("stderr 应报加载错误，实际：%s", stderr.String())
 	}
 }
