@@ -6,7 +6,7 @@
 //
 //  1. 迁移就位 + admin 服务层全链（商家→渠道→凭据→模型映射→定价→开户→发 key→充值→买 token 包）
 //  2. 启动 serve（真实监听端口）+ 进程内假上游
-//  3. 三方言 × 流式/非流式调用：200、流水落库、结算五字段、账本可复算
+//  3. 四方言 × 流式/非流式调用：200、流水落库、结算五字段、账本可复算
 //  4. 限额演练：input_token 超限 429 quota_exceeded → reset → 放行；
 //     request 计数限额前 3 次放行、第 4 次 429
 //  5. 凭据轮换：第一把 401、第二把成功，流水仅一行
@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/sumwai/tokenmp/internal/access"
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
+	"github.com/sumwai/tokenmp/internal/adapters/gemini"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
 	"github.com/sumwai/tokenmp/internal/admin"
@@ -68,6 +70,7 @@ const (
 	e2eChatKey      = "e2e-upstream-chat"
 	e2eResponsesKey = "e2e-upstream-responses"
 	e2eMessagesKey  = "e2e-upstream-messages"
+	e2eGeminiKey    = "e2e-upstream-gemini"
 	e2eRejectedKey  = "e2e-upstream-rejected"
 	e2eRotateOKKey  = "e2e-upstream-rotate-ok"
 )
@@ -104,11 +107,12 @@ type journeyDialect struct {
 	protocol domain.Protocol
 }
 
-// journeyDialects 是剧本要覆盖的三种客户端方言。
+// journeyDialects 是剧本要覆盖的四种客户端方言。
 var journeyDialects = []journeyDialect{
 	{name: "openai_chat", protocol: domain.ProtocolOpenAIChat},
 	{name: "openai_responses", protocol: domain.ProtocolOpenAIResponses},
 	{name: "anthropic_messages", protocol: domain.ProtocolAnthropicMessages},
+	{name: "gemini_generate", protocol: domain.ProtocolGeminiGenerate},
 }
 
 // e2eUpstream 是进程内假上游：按请求路径判定方言，用同一套适配器编码应答，
@@ -120,6 +124,8 @@ type e2eUpstream struct {
 	mu       sync.Mutex
 	keyHits  map[string]int
 	pathHits map[string]int
+	// modelHits 按上游实际收到的模型名计数，供剧本断言模型名替换。
+	modelHits map[string]int
 }
 
 // newE2EUpstream 起一个假上游并注册关闭；调用方必须传入生命周期覆盖全部步骤的 t。
@@ -130,9 +136,11 @@ func newE2EUpstream(t *testing.T) *e2eUpstream {
 			domain.ProtocolOpenAIChat:        openaichat.New(),
 			domain.ProtocolOpenAIResponses:   openairesponses.New(),
 			domain.ProtocolAnthropicMessages: anthropic.New(),
+			domain.ProtocolGeminiGenerate:    gemini.New(),
 		},
-		keyHits:  map[string]int{},
-		pathHits: map[string]int{},
+		keyHits:   map[string]int{},
+		pathHits:  map[string]int{},
+		modelHits: map[string]int{},
 	}
 	u.server = httptest.NewServer(http.HandlerFunc(u.handle))
 	t.Cleanup(u.server.Close)
@@ -161,10 +169,19 @@ func (u *e2eUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "假上游无法解析请求体", http.StatusBadRequest)
 		return
 	}
+	// Gemini 的模型名与流式形态在路径上，其余方言在请求体里；统一在此收敛成两个变量。
+	model, stream := fields.Model, fields.Stream
+	if protocol == domain.ProtocolGeminiGenerate {
+		if upstreamModel, ok := e2eGeminiUpstreamModel(r.URL.Path); ok {
+			model = upstreamModel
+		}
+		stream = strings.Contains(r.URL.Path, ":streamGenerateContent")
+	}
 
-	key := e2eUpstreamKey(r.Header)
+	key := e2eUpstreamKey(r.Header, r.URL.Query())
 	u.record(u.keyHits, key)
 	u.record(u.pathHits, r.URL.Path)
+	u.record(u.modelHits, model)
 	if key == e2eRejectedKey {
 		w.Header().Set("Content-Type", access.JSONContentType)
 		w.WriteHeader(http.StatusUnauthorized)
@@ -172,8 +189,8 @@ func (u *e2eUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := e2eFakeResponse(fields.Model)
-	if !fields.Stream {
+	resp := e2eFakeResponse(model)
+	if !stream {
 		body, encodeErr := adapter.EncodeResponse(resp)
 		if encodeErr != nil {
 			http.Error(w, "假上游编码响应失败", http.StatusInternalServerError)
@@ -185,7 +202,7 @@ func (u *e2eUpstream) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	frames, err := e2eBuildStreamFrames(adapter.NewStream(), fields.Model, resp)
+	frames, err := e2eBuildStreamFrames(adapter.NewStream(), model, resp)
 	if err != nil {
 		http.Error(w, "假上游编码流式响应失败", http.StatusInternalServerError)
 		return
@@ -224,9 +241,24 @@ func (u *e2eUpstream) pathHit(path string) int {
 	return u.pathHits[path]
 }
 
-// e2eProtocolForPath 由上游地址的路径末尾判定方言，与网关拼上游地址的口径一致。
+// modelHit 返回某个上游模型名被收到的次数。
+func (u *e2eUpstream) modelHit(model string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.modelHits[model]
+}
+
+// e2eProtocolForPath 由上游地址的路径判定方言，与网关拼上游地址的口径一致。
+// 固定端点方言比对端点段；Gemini 的上游路径是 /models/{model}:generateContent 形态，
+// 与客户端前缀不同，故按方法后缀识别并顺带取出模型名。
 func e2eProtocolForPath(path string) (domain.Protocol, bool) {
+	if _, ok := e2eGeminiUpstreamModel(path); ok {
+		return domain.ProtocolGeminiGenerate, true
+	}
 	for _, dialect := range journeyDialects {
+		if dialect.protocol == domain.ProtocolGeminiGenerate {
+			continue
+		}
 		if strings.HasSuffix(path, dialect.protocol.EndpointSegment()) {
 			return dialect.protocol, true
 		}
@@ -234,12 +266,37 @@ func e2eProtocolForPath(path string) (domain.Protocol, bool) {
 	return "", false
 }
 
-// e2eUpstreamKey 取上游请求里的凭据：OpenAI 系用 Authorization，Anthropic 用 x-api-key。
-func e2eUpstreamKey(header http.Header) string {
+// e2eGeminiUpstreamModel 从上游路径 /models/{model}:generateContent 里取出模型名。
+func e2eGeminiUpstreamModel(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/models/")
+	if !ok {
+		return "", false
+	}
+	model, method, ok := strings.Cut(rest, ":")
+	if !ok || model == "" {
+		return "", false
+	}
+	switch method {
+	case "generateContent", "streamGenerateContent":
+		return model, true
+	default:
+		return "", false
+	}
+}
+
+// e2eUpstreamKey 取上游请求里的凭据：OpenAI 系用 Authorization，Anthropic 用 x-api-key，
+// Gemini 用 x-goog-api-key，查询参数形态回退到 ?key=。
+func e2eUpstreamKey(header http.Header, query url.Values) string {
 	if auth := header.Get("Authorization"); strings.HasPrefix(auth, access.AuthSchemePrefix) {
 		return strings.TrimPrefix(auth, access.AuthSchemePrefix)
 	}
-	return header.Get("x-api-key")
+	if key := header.Get("x-api-key"); key != "" {
+		return key
+	}
+	if key := header.Get("x-goog-api-key"); key != "" {
+		return key
+	}
+	return query.Get("key")
 }
 
 // e2eFakeResponse 构造假上游的归一化应答；用量固定，供账本复算。
@@ -365,7 +422,7 @@ func TestE2EOperatorJourney(t *testing.T) {
 	runStep("步骤1_迁移就位与入驻发key充值买包", journey.step1Onboarding)
 	runStep("步骤2_启动serve与假上游", journey.step2StartServe)
 	t.Cleanup(journey.stopServe)
-	runStep("步骤3_三方言流式与非流式", journey.step3Dialects)
+	runStep("步骤3_四方言流式与非流式", journey.step3Dialects)
 	runStep("步骤4_限额拦截与重置", journey.step4Quota)
 	runStep("步骤5_凭据轮换", journey.step5CredentialRotation)
 	runStep("步骤6_跨协议转换", journey.step6CrossProtocol)
@@ -430,9 +487,24 @@ func e2eRequest(protocol domain.Protocol, model string, stream bool) string {
 	case domain.ProtocolAnthropicMessages:
 		return fmt.Sprintf(
 			`{"model":%q,"max_tokens":64,"messages":[{"role":"user","content":"你好"}],"stream":%t}`, model, stream)
+	case domain.ProtocolGeminiGenerate:
+		// 模型名与流式形态在路径上，请求体里没有这两个字段。
+		return `{"contents":[{"role":"user","parts":[{"text":"你好"}]}]}`
 	default:
 		panic("剧本要求未知协议")
 	}
+}
+
+// e2eDialectEndpoint 返回某方言在本次调用里使用的客户端端点路径。
+// 固定端点方言用注册路径，Gemini 的端点含模型名与流式后缀。
+func e2eDialectEndpoint(protocol domain.Protocol, model string, stream bool) string {
+	if protocol == domain.ProtocolGeminiGenerate {
+		if stream {
+			return "/v1beta/models/" + model + ":streamGenerateContent?alt=sse"
+		}
+		return "/v1beta/models/" + model + ":generateContent"
+	}
+	return protocol.EndpointPath()
 }
 
 // e2eHTTPResult 是一次客户端调用的结果快照。
@@ -497,7 +569,7 @@ func (j *e2eJourney) step1Onboarding(t *testing.T) {
 	j.merchantID, err = j.svc.CreateMerchant(ctx, "e2e-partner", "E2E 入驻商家", store.MerchantKindPartner)
 	e2eMust(t, err)
 
-	// 渠道：三方言各一条，都指向同一个假上游；各自一份凭据与模型映射。
+	// 渠道：四方言各一条，都指向同一个假上游；各自一份凭据与模型映射。
 	channels := map[domain.Protocol]uint64{}
 	for _, dialect := range journeyDialects {
 		group := "e2e-" + dialect.name + "-group"
@@ -658,6 +730,8 @@ func e2eUpstreamKeyFor(protocol domain.Protocol) string {
 		return e2eChatKey
 	case domain.ProtocolOpenAIResponses:
 		return e2eResponsesKey
+	case domain.ProtocolGeminiGenerate:
+		return e2eGeminiKey
 	default:
 		return e2eMessagesKey
 	}
@@ -714,12 +788,15 @@ func e2eWaitForOK(t *testing.T, url string) {
 	t.Fatalf("等待 %s 就绪超时", url)
 }
 
-// step3Dialects 覆盖运营路径第 3 步：三方言 × 流式/非流式，
+// step3Dialects 覆盖运营路径第 3 步：四方言 × 流式/非流式，
 // 断言 200、流水落库、结算五字段非占位、账本按定价下降可复算。
 func (j *e2eJourney) step3Dialects(t *testing.T) {
 	for _, dialect := range journeyDialects {
+		// 记录调用前的计数，调用后断言模型名被替换成上游模型名、凭据按该方言注入。
+		modelBefore := j.upstream.modelHit(e2eBasicUpstreamModel)
+		keyBefore := j.upstream.keyHit(e2eUpstreamKeyFor(dialect.protocol))
 		for _, stream := range []bool{false, true} {
-			endpoint := j.gatewayURL + dialect.protocol.EndpointPath()
+			endpoint := j.gatewayURL + e2eDialectEndpoint(dialect.protocol, e2eBasicModel, stream)
 			result := e2ePost(t, endpoint, j.mainKey, e2eRequest(dialect.protocol, e2eBasicModel, stream))
 			if result.status != http.StatusOK {
 				t.Fatalf("方言 %s stream=%t 状态码 = %d，期望 200，响应体 %s",
@@ -732,12 +809,20 @@ func (j *e2eJourney) step3Dialects(t *testing.T) {
 				t.Fatalf("方言 %s stream=%t 响应体不含假上游正文：%s", dialect.name, stream, result.body)
 			}
 		}
+		if got := j.upstream.modelHit(e2eBasicUpstreamModel) - modelBefore; got != 2 {
+			t.Fatalf("方言 %s 上游收到上游模型名 %q %d 次，期望 2（流式与非流式各一次）",
+				dialect.name, e2eBasicUpstreamModel, got)
+		}
+		if got := j.upstream.keyHit(e2eUpstreamKeyFor(dialect.protocol)) - keyBefore; got != 2 {
+			t.Fatalf("方言 %s 上游收到凭据 %q %d 次，期望 2",
+				dialect.name, e2eUpstreamKeyFor(dialect.protocol), got)
+		}
 	}
 
 	rows := j.loadUsageRows(t)
 	want := len(journeyDialects) * 2
 	if len(rows) != want {
-		t.Fatalf("流水行数 = %d，期望 %d（三方言 × 流式/非流式）", len(rows), want)
+		t.Fatalf("流水行数 = %d，期望 %d（四方言 × 流式/非流式）", len(rows), want)
 	}
 	for i, row := range rows {
 		e2eAssertSettledRow(t, row, i)
