@@ -65,6 +65,18 @@ $ ./bin/tokenmp help
 尝试预算按段计量：同协议段与跨协议段各有额度，默认分别为 2 次与 1 次，
 同协议候选全部失败不会挤掉跨协议降级的机会；总次数另设防御性上限。
 
+拼候选链之前按上游套餐跳过配额耗尽的渠道：套餐的全部限额行都已用满且快照仍然新鲜时，
+该 `cred_group` 下的候选不进入回退链；快照超过两个采集周期视为未知并放行，
+宁可尝试不可误杀。套餐与限额行的已用量来自周期探针采集，采集周期由
+`TOKENMP_UPSTREAM_PROBE_INTERVAL` 控制；探针不可达或配置写坏时保留旧快照，
+转发路径不受影响。上游套餐与配额的运营序列见 [docs/operations.md](docs/operations.md)。
+
+本机可配置网关中间件（`TOKENMP_PLUGIN_FILES`），在三个时机介入转发：`onRequest` 在选路
+之前改写请求体，改写后的模型名参与选路；`onEvent` 在流式分片写回客户端之前改写或丢弃
+内容事件；`onResponse` 在非流式响应体写回之前改写。钩子抛错、超时或返回非法值一律按原样
+放行并记结构化日志。可改写范围、失败语义与沙箱边界见
+[docs/compatibility.md](docs/compatibility.md)。
+
 每请求写一条 JSON 请求日志到标准输出：请求 id（客户端带 `X-Request-Id` 时沿用）、
 协议方言、请求模型名、命中的渠道 id、上游状态码、是否跨协议重建与耗时。凭据与密钥不进入日志。
 
@@ -82,7 +94,7 @@ $ ./bin/tokenmp help
 |---|---|
 | `merchant` | `create` / `list` / `disable` |
 | `channel` | `create` / `list` / `enable` / `disable` |
-| `credential` | `add` / `list` / `disable` |
+| `credential` | `add` / `list` / `disable` / `oauth-login` |
 | `model-map` | `set` / `list` / `disable` |
 | `account` | `create` / `list` / `disable` / `set-multiplier` / `set-merchant` |
 | `key` | `issue` / `list` / `revoke` |
@@ -95,6 +107,8 @@ $ ./bin/tokenmp help
 | `usage` | `list` |
 | `adjust` | `add` / `list` |
 | `quota` | `add` / `list` / `del` / `reset` |
+| `plan` | `add` / `list` |
+| `plugin` | `list` |
 
 ```
 $ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
@@ -118,6 +132,14 @@ $ ./bin/tokenmp admin usage list --account 1 --json
 可按 `--scope` 与 `--scope-id` 过滤或按 `--account` 列出某账户的限额，不填列出全部；
 `quota reset` 在指定限额上追加一条重置基准，`--reason` 与 `--operator` 必填。
 
+`plan add` 写入一条上游套餐及其限额行：`--quota` 形如 `metric:window:limit` 且可重复，
+`window` 可写 `rolling/5h` 或简写 `5h`（`5h` 推 `rolling`，其余周期推 `calendar`）；
+`plan list` 按「一行一条限额」摊平，附当前窗口的已用百分比与重置时刻。
+`plugin list` 只读 `TOKENMP_PLUGIN_FILES`，列出已加载中间件的钩子、事件白名单与进程内统计，
+不连数据库。
+`credential oauth-login <group>` 按渠道 `config` 声明的 OAuth 画像走设备码或授权码流程换取令牌
+并写入凭据，输出只含分组与账户标识，不回显任何令牌。
+
 ## 目录结构
 
 ```
@@ -129,6 +151,7 @@ internal/pipeline/   核心转发流水线：选路、请求定稿、上游调�
 internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
 internal/upstream/   调用上游渠道的 HTTP 客户端
 internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
+internal/oauth/      订阅型上游的 OAuth 协议交互：刷新、设备码轮询与授权码交换
 internal/access/     客户端鉴权、402 预检与 429 限额处置
 internal/route/      选路候选链：加权随机、分层与跨协议去重
 internal/observability/ 访问日志与尝试日志的字段拼装
@@ -139,7 +162,9 @@ internal/store/      MySQL 连接、迁移与 schema 读写
 internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
 internal/billing/    计费指标与用量映射
 internal/quota/      窗口限额判定：窗口计算与超限比较
+internal/plan/       上游套餐与配额：耗尽判定、声明式探针与周期采集
 internal/settlement/ 用量结算：定价解析、倍率链与账本扣减
+internal/plugin/     网关中间件：moejs 沙箱加载、三个钩子与进程内统计
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
 .github/workflows/   CI 与发布链路

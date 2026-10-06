@@ -27,6 +27,10 @@ info:
 
     转发端点的路径与请求体字段名是固定契约；未知字段一律忽略而不是拒绝，
     这是对上游协议持续扩展的兼容口径。
+
+    本机可配置网关中间件（`TOKENMP_PLUGIN_FILES`）可在选路之前改写请求体、在流式帧写回之前
+    改写或丢弃内容事件、在非流式响应体写回之前改写。可改写范围、失败静默放行与沙箱边界见
+    [docs/compatibility.md](compatibility.md) 的「中间件可改写范围」。
 servers:
   - url: http://localhost:8080
     description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
@@ -76,6 +80,7 @@ paths:
       description: |
         请求体按 [OpenAI Chat Completions 请求](#/components/schemas/ChatCompletionRequest) 解码；
         未知字段忽略。流式请求（`stream: true`）响应为 SSE 流，见下方 200 的说明。
+        配置了中间件时，请求体与响应体可能被改写，且内容事件可能被改写或丢弃。
       operationId: chatCompletions
       requestBody:
         required: true
@@ -136,6 +141,7 @@ paths:
       description: |
         请求体按 [ResponsesRequest](#/components/schemas/ResponsesRequest) 解码；
         未知字段与未知 input 条目类型忽略。`input` 只接受字符串或条目数组。
+        配置了中间件时，请求体与响应体可能被改写。
       operationId: createResponse
       requestBody:
         required: true
@@ -200,6 +206,7 @@ paths:
         `model`、`max_tokens`、`messages` 必填；`max_tokens` 必须为正整数。
         本方言的 `messages` 只接受 `user` 与 `assistant` 两种角色，工具结果以
         `tool_result` 内容块放在 user 消息里。请求体没有 `request_id` 字段。
+        配置了中间件时，请求体与响应体可能被改写，且内容事件可能被改写或丢弃。
       operationId: createMessage
       requestBody:
         required: true
@@ -313,6 +320,7 @@ paths:
         请求体按 [GeminiGenerateRequest](#/components/schemas/GeminiGenerateRequest) 解码；未知字段忽略。
         模型名由路径的 `{model}` 给出，请求体没有 `model` 字段；渠道配置了上游模型名时，
         替换发生在发往上游的路径上。客户端路径里的模型名即选路键，与既有方言一致。
+        配置了中间件时，请求体与响应体可能被改写。
       operationId: geminiGenerateContent
       parameters:
         - name: model
@@ -366,6 +374,7 @@ paths:
         与 `:generateContent` 同形，流式由路径后缀与 `alt=sse` 表达（请求体没有 `stream` 字段）。
         响应为 SSE：每帧形如 `data: <JSON>\n\n`，没有具名事件；末尾帧带 `finishReason` 与
         `usageMetadata`，流以连接关闭为终点。用量是协议固有部分，无论客户端是否索取都会出现。
+        配置了中间件时，请求体与响应体可能被改写，且内容事件可能被改写或丢弃。
       operationId: geminiStreamGenerateContent
       parameters:
         - name: model

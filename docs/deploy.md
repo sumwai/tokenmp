@@ -48,10 +48,14 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 | `TOKENMP_UPSTREAM_IDLE_CONN_TIMEOUT` | 否 | `90s` | 时长 | 上游空闲连接回收时长 |
 | `TOKENMP_USAGE_WRITE_TIMEOUT` | 否 | `5s` | 时长 | 写用量流水超时 |
 | `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN` | 否 | `60s` | 时长 | 上游凭据类失败后的冷却时长 |
+| `TOKENMP_UPSTREAM_OAUTH_REFRESH_WINDOW` | 否 | `5m` | 时长 | 订阅型凭据的提前续期窗口：访问令牌剩余有效期不足该值时先续期 |
+| `TOKENMP_UPSTREAM_OAUTH_REFRESH_TIMEOUT` | 否 | `15s` | 时长 | 单次 OAuth 续期与等待续期的上限 |
 | `TOKENMP_UPSTREAM_RATE_LIMIT_WAIT` | 否 | `2s` | 时长 | 渠道限流下等待令牌的最长时间 |
 | `TOKENMP_UPSTREAM_BREAKER_THRESHOLD` | 否 | `5` | 次 | 渠道连续失败多少次后熔断打开 |
 | `TOKENMP_UPSTREAM_BREAKER_COOLDOWN` | 否 | `30s` | 时长 | 渠道熔断打开后多久允许一笔探测 |
 | `TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY` | 否 | `1` | 条 | 半开态同时放行的探测条数 |
+| `TOKENMP_UPSTREAM_PROBE_INTERVAL` | 否 | `5m` | 时长 | 上游套餐探针的采集周期；快照超过它的两倍视为未知 |
+| `TOKENMP_PLUGIN_FILES` | 否 | 空（禁用） | 文件或包目录列表 | 逗号分隔的中间件文件或包目录；每项去空白，空值表示禁用插件层 |
 
 取值规则：
 
@@ -59,10 +63,12 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
   `TOKENMP_MYSQL_CONN_MAX_LIFETIME` 填 `0` 视为未配置，回落到上表默认值；负数报错。
 - 其余数值与时长项必须为正：填 `0` 或负数在启动前报错。
 - 时长按 Go 的 `time.ParseDuration` 解析（`120s`、`5m` 等）；非法取值在启动前报错。
+- `TOKENMP_PLUGIN_FILES` 按逗号切分并逐项去空白，空项丢弃，全为空等同于未配置。
+  每项的存在性、扩展名与能否编译在插件层加载时校验，非法项在启动前报错。
 - 非法取值一律以退出码 1 终止，进程不带着半份配置起服。
 
-各变量的运行语义（超时分级、限流、熔断、凭据轮换）见 [README](../README.md) 的转发行为
-说明与 [docs/compatibility.md](compatibility.md)。
+各变量的运行语义（超时分级、限流、熔断、凭据轮换与 OAuth 续期、上游套餐探针、网关中间件）
+见 [README](../README.md) 的转发行为说明与 [docs/compatibility.md](compatibility.md)。
 
 ## 启动与迁移
 
@@ -71,8 +77,11 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 1. 读环境变量并校验，配置非法即报错退出。
 2. 打开 MySQL 连接池并做一次 `Ping`，不可达即失败。
 3. 执行迁移：按 `schema_migrations` 跳过已应用版本，逐条执行未应用的 DDL。
-4. 装配网关：协议适配器、凭据轮换、上游客户端、渠道限流、熔断、流水与鉴权。
+4. 装配网关：协议适配器、凭据轮换、上游客户端、渠道限流、熔断、中间件插件、上游套餐采集、流水与鉴权。
 5. 监听 `TOKENMP_LISTEN`。
+
+`TOKENMP_PLUGIN_FILES` 里的中间件在装配期编译并校验，任一项不可用即启动失败；
+套餐采集器在 serve 启动后立即采一轮，随后按 `TOKENMP_UPSTREAM_PROBE_INTERVAL` 周期执行。
 
 迁移在启动时执行，表结构随二进制一同对齐，避免新版本对着旧表运行。迁移可重入：DDL 使用
 `CREATE TABLE IF NOT EXISTS`，版本登记用 `ON DUPLICATE KEY UPDATE` 去重，多实例并发启动
