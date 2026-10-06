@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.6](https://github.com/sumwai/tokenmp/compare/v0.1.5...v0.1.6) (2026-10-06)
+
+
+### Features
+
+* Gemini 协议方言 ([#69](https://github.com/sumwai/tokenmp/issues/69)) ([ce3d89f](https://github.com/sumwai/tokenmp/commit/ce3d89f0aaba6a9758686f6b1cf5d9935c260cf6))
+* 上游信标头——登录态的精准标记 ([#67](https://github.com/sumwai/tokenmp/issues/67)) ([bae29e1](https://github.com/sumwai/tokenmp/commit/bae29e12c20c7c56ed10b3c112a005c7f81c6f69))
+* 上游套餐与配额——建模、采集与路由消费 ([#70](https://github.com/sumwai/tokenmp/issues/70)) ([8d6b851](https://github.com/sumwai/tokenmp/commit/8d6b851e02e6bdb569ad67053d0b4870f475af4e))
+* 用户自助查询端点——余额、包存量与限额窗口 ([#66](https://github.com/sumwai/tokenmp/issues/66)) ([a6ed4d5](https://github.com/sumwai/tokenmp/commit/a6ed4d523a529127dddff6cdd83ddc6a95f60097))
+* 网关中间件插件层——moejs 沙箱与逐事件钩子 ([#72](https://github.com/sumwai/tokenmp/issues/72)) ([d3557e6](https://github.com/sumwai/tokenmp/commit/d3557e6c9bf850c0b6d9aa89132df8c50c46035b))
+* 订阅型上游的 OAuth 登录与凭据续期 ([#71](https://github.com/sumwai/tokenmp/issues/71)) ([31dc55e](https://github.com/sumwai/tokenmp/commit/31dc55e7f6cdafa3c318b4363687efb5aa520180))
+
+
+### Documentation
+
+* 同步并行批次落地后的 admin 组、环境变量与运营步骤 ([#75](https://github.com/sumwai/tokenmp/issues/75)) ([6aaa1bb](https://github.com/sumwai/tokenmp/commit/6aaa1bbd698ddc777783360351843c03a8514819)), closes [#73](https://github.com/sumwai/tokenmp/issues/73)
+
 ## [0.1.5](https://github.com/sumwai/tokenmp/compare/v0.1.4...v0.1.5) (2026-10-05)
 
 
