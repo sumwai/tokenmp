@@ -166,16 +166,17 @@ func crossProtocolRebuildable(client, upstream domain.Protocol) bool {
 // 端点段必须跟着上游协议走。
 func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Route {
 	return domain.Route{
-		ChannelID:            candidate.ChannelID,
-		UpstreamID:           strconv.FormatUint(candidate.ChannelID, 10),
-		Protocol:             protocol,
-		UpstreamModel:        candidate.UpstreamModel,
-		BaseURL:              endpointURL(candidate.BaseURL, protocol),
-		CredentialRef:        candidate.CredGroup,
-		RequestOverrides:     sanitizeRequestOverrides(candidate),
-		SigninHeader:         parseSigninHeader(candidate.Config),
-		RateLimitQPS:         candidate.RateLimitQPS,
-		RateLimitConcurrency: candidate.RateLimitConcurrency,
+		ChannelID:             candidate.ChannelID,
+		UpstreamID:            strconv.FormatUint(candidate.ChannelID, 10),
+		Protocol:              protocol,
+		UpstreamModel:         candidate.UpstreamModel,
+		BaseURL:               endpointURL(candidate.BaseURL, protocol),
+		CredentialRef:         candidate.CredGroup,
+		RequestOverrides:      sanitizeRequestOverrides(candidate),
+		SigninHeader:          parseSigninHeader(candidate.Config),
+		RateLimitQPS:          candidate.RateLimitQPS,
+		RateLimitConcurrency:  candidate.RateLimitConcurrency,
+		CredentialHeaderStyle: parseCredentialStyle(candidate.Config),
 	}
 }
 
@@ -185,6 +186,9 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 type channelConfig struct {
 	// SigninHeader 声明本渠道的登录态信标头映射。
 	SigninHeader signinHeaderConfig `json:"signin_header"`
+	// CredentialStyle 覆盖本渠道凭据的注入形态，取值与 domain.CredentialHeaderStyle 一致。
+	// 典型取值：query 表示改用 ?key=<凭据> 查询参数形态。
+	CredentialStyle string `json:"credential_style"`
 }
 
 // signinHeaderConfig 是 config 里 signin_header 的结构。
@@ -225,6 +229,26 @@ func parseSigninHeader(raw []byte) domain.SigninHeader {
 	return header
 }
 
+// parseCredentialStyle 从渠道 config JSON 里读凭据注入形态。
+//
+// 读取必须宽容：config 是人工写入的 JSON 列，写坏的文本、未知取值都只让本渠道回退到
+// 按协议现状注入，不得让整次选路失败。未知取值不猜：猜错会把凭据发到错误的请求头里。
+func parseCredentialStyle(raw []byte) domain.CredentialHeaderStyle {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return domain.CredentialHeaderAuto
+	}
+	var cfg channelConfig
+	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+		return domain.CredentialHeaderAuto
+	}
+	style := domain.CredentialHeaderStyle(cfg.CredentialStyle)
+	if !style.Valid() {
+		return domain.CredentialHeaderAuto
+	}
+	return style
+}
+
 // endpointURL 把库里存的根地址与协议端点段拼成完整上游地址。
 //
 // 库里只存到端点段之前（如 https://host/api/v3）：同一台主机上的不同协议端点因此共享一段根地址，
@@ -234,5 +258,11 @@ func endpointURL(base string, protocol domain.Protocol) string {
 	if root == "" {
 		return ""
 	}
-	return root + protocol.EndpointSegment()
+	segment := protocol.EndpointSegment()
+	if segment == "" {
+		// 端点段为空的协议（Gemini）由适配器在调用上游时按本次请求拼端点
+		// （/models/{model}:generateContent 含模型名），此处只回根地址。
+		return root
+	}
+	return root + segment
 }

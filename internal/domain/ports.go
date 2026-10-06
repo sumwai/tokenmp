@@ -4,17 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 // Adapter 负责一种线协议与内部统一格式的双向转换。
 //
-// 三种协议各自实现本接口：
+// 四种协议各自实现本接口：
 //
 //   - OpenAI Chat Completions（POST /v1/chat/completions）；
 //   - OpenAI Responses（POST /v1/responses）；
-//   - Anthropic Messages（POST /v1/messages）。
+//   - Anthropic Messages（POST /v1/messages）；
+//   - Gemini generateContent（POST /v1beta/models/{model}:generateContent 与 :streamGenerateContent）。
 //
 // 流水线只依赖本接口，不感知协议细节。
 //
@@ -35,7 +37,7 @@ import (
 //   - 响应解码：DecodeResponse / DecodeStreamFrame；
 //   - 流式收尾：FinishStream。
 //
-// 方法集合是三个协议实现共同遵守的公共契约：新增或删除方法必须同步全部实现，
+// 方法集合是四个协议实现共同遵守的公共契约：新增或删除方法必须同步全部实现，
 // 避免适配器各自补私有方法而破坏统一转发流水线。
 //
 // 解码失败必须返回 domain.Error，错误码用 CodeInvalidRequest。
@@ -119,6 +121,39 @@ type Adapter interface {
 	FinishStream() []Chunk
 }
 
+// EndpointFormat 由适配器声明本协议端点的格式差异，供装配层与上游调用消费。
+//
+// 既有三种方言的端点段是固定字符串，domain.Protocol 的 EndpointPath / EndpointSegment
+// 已能表达；Gemini 的端点路径含模型名（/v1beta/models/{model}:generateContent），
+// 且流式形态由路径后缀而非请求体字段表达，固定字符串表达不了。
+//
+// 因此端点的「客户端怎么匹配、上游怎么拼」由适配器声明；装配层注册与解析客户端路径、
+// 上游调用拼接请求地址时只消费本接口，不解析任何协议字面量，
+// 也不把格式差异放进路由与转发管道。
+//
+// 固定端点路径的协议不必实现本接口：调用方回退到 Protocol.EndpointPath / EndpointSegment。
+type EndpointFormat interface {
+	// ClientPathPrefix 返回客户端端点的固定前缀：以它开头的路径由本协议处理。
+	// 固定端点路径的协议返回完整路径（不带结尾斜杠）。
+	ClientPathPrefix() string
+	// MatchClientPath 报告 path 是否属于本协议；命中时返回路径携带的模型名
+	// （路径不含模型名时为空串）与本次是否为流式请求。
+	MatchClientPath(path string) (model string, stream bool, ok bool)
+	// UpstreamPath 返回上游端点相对渠道根地址的拼接段（以 / 开头）。
+	// model 是实际发往上游的模型名；stream 表示本轮是否流式。
+	UpstreamPath(model string, stream bool) string
+}
+
+// UpstreamQueryProvider 提供以 URL 查询参数注入的上游凭据项。
+//
+// 不是所有上游都接受请求头形态的凭据（例如 Gemini 兼容 ?key= 的端点），
+// 而查询参数无法经请求头承载，因此单独成一个可选能力。
+// 实现可选：未实现即为「没有查询参数凭据」，调用方不得据此报错。
+type UpstreamQueryProvider interface {
+	// UpstreamQuery 返回本次调用要追加到上游地址的查询参数项；无此项时返回 nil。
+	UpstreamQuery(ctx context.Context, route Route) (url.Values, error)
+}
+
 // CredentialHeaderStyle 描述调用上游时凭据请求头的注入形态。
 //
 // 取值由上游渠道配置给出，只决定「用哪个请求头、以什么形态拼装凭据」，
@@ -126,8 +161,8 @@ type Adapter interface {
 //
 // 零值 CredentialHeaderAuto 表示「渠道未配置」，此时按协议现状注入：
 // OpenAI Chat 与 OpenAI Responses 用 Authorization: Bearer、Anthropic Messages 用
-// x-api-key。取值域只有两个非零取值，「未配置」在数据里只能以「键缺失」表达，
-// 因此零值不是合法配置值（Valid 对它返回 false）。
+// x-api-key、Gemini 用 x-goog-api-key。取值域含四个非零取值，「未配置」在数据里只能以
+// 「键缺失」表达，因此零值不是合法配置值（Valid 对它返回 false）。
 type CredentialHeaderStyle string
 
 const (
@@ -137,15 +172,20 @@ const (
 	CredentialHeaderAuthorization CredentialHeaderStyle = "authorization"
 	// CredentialHeaderXAPIKey 注入 x-api-key: <凭据>。
 	CredentialHeaderXAPIKey CredentialHeaderStyle = "x-api-key"
+	// CredentialHeaderXGoogAPIKey 注入 x-goog-api-key: <凭据>（Gemini 原生形态）。
+	CredentialHeaderXGoogAPIKey CredentialHeaderStyle = "x-goog-api-key" //nolint:gosec // G101：这是注入形态名，不是凭据。
+	// CredentialHeaderQuery 不注入凭据请求头，改为以查询参数 key=<凭据> 追加到上游地址。
+	// 它服务只接受 ?key= 的 Gemini 兼容端点。
+	CredentialHeaderQuery CredentialHeaderStyle = "query"
 )
 
-// Valid 报告取值是否为两个受支持的非零取值之一。
+// Valid 报告取值是否为受支持的非零取值之一。
 //
 // 零值（未配置）返回 false：配置写入路径必须把「键缺失」与「键存在但取值非法」
 // 分开处理，不得把零值当成一个可写入的取值。
 func (s CredentialHeaderStyle) Valid() bool {
 	switch s {
-	case CredentialHeaderAuthorization, CredentialHeaderXAPIKey:
+	case CredentialHeaderAuthorization, CredentialHeaderXAPIKey, CredentialHeaderXGoogAPIKey, CredentialHeaderQuery:
 		return true
 	default:
 		return false
@@ -284,9 +324,9 @@ type ChannelLimiter interface {
 
 // UpstreamRequestBuilder 把内部统一请求转换为上游协议请求体。
 //
-// 之所以新增独立接口而不继续给 Adapter 加方法：Adapter 的方法集合是三个协议实现
-// 共同遵守的公共契约，且已有三个协议实现；请求侧的构建能力
-// 只有共享转发层需要，扩大 Adapter 会让三个协议实现一起被迫改动。
+// 之所以新增独立接口而不继续给 Adapter 加方法：Adapter 的方法集合是四个协议实现
+// 共同遵守的公共契约，且已有四个协议实现；请求侧的构建能力
+// 只有共享转发层需要，扩大 Adapter 会让四个协议实现一起被迫改动。
 type UpstreamRequestBuilder interface {
 	// EncodeRequest 按内部统一格式重建上游请求体，用于跨协议转发路径。
 	//

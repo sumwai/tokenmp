@@ -13,16 +13,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/sumwai/tokenmp/internal/domain"
 )
 
 // 凭据请求头的标准名。Authorization 是 OpenAI 系两家（Chat 与 Responses）的形态，
-// x-api-key 是 Anthropic Messages 的形态。写成常量避免字面量在多处漂移。
+// x-api-key 是 Anthropic Messages 的形态，x-goog-api-key 是 Gemini 的形态。
+// 写成常量避免字面量在多处漂移。
 const (
 	headerAuthorization = "Authorization"
 	headerXAPIKey       = "x-api-key"
+	headerXGoogAPIKey   = "x-goog-api-key" //nolint:gosec // G101：这是请求头名，不是凭据原文。
+	// queryAPIKeyParam 是查询参数形态凭据的参数名：Gemini 兼容端点用 ?key=<凭据>。
+	queryAPIKeyParam = "key"
 )
 
 // 凭据被打印时一律替换成占位符，且不含引用名与协议：列出任何一项都会让日志成为
@@ -76,9 +81,13 @@ type Resolver interface {
 // Provider 是凭据表的请求头提供者：按 resolver 取出本次调用该用的那一份凭据。
 //
 // 凭据解析在运行期发生，因此实现必须可并发使用。
+// 注入形态为查询参数时，头部为空、参数由 UpstreamQuery 给出。
 type Provider struct {
 	resolve Resolver
 }
+
+// 编译期断言：本提供者实现查询参数形态的凭据注入能力。
+var _ domain.UpstreamQueryProvider = (*Provider)(nil)
 
 // staticResolver 是按引用名查内存表的实现，供 New 使用。
 type staticResolver map[string]Credential
@@ -131,15 +140,23 @@ func NewWithResolver(resolver Resolver) *Provider {
 // UpstreamHeaders 实现 upstream.HeaderProvider 的契约。
 //
 // 每次调用都返回一个全新的 http.Header（调用方会直接写入，不得返回共享 map），
-// 内容 = 本次凭据头 + route.Headers。注入形态取自 route.Protocol：协议是路由（端点）的事实，
-// 凭据只回答用哪份密钥；合并规则里凭据头是被上游用来鉴权的唯一来源，
+// 内容 = 本次凭据头 + route.Headers。注入形态由渠道配置决定、未配置时按协议现状
+// （见 credentialStyle）；合并规则里凭据头是被上游用来鉴权的唯一来源，
 // 因此与 route.Headers 同名冲突时以凭据头为准，配置里的静态头不能把它覆盖掉。
 func (p *Provider) UpstreamHeaders(ctx context.Context, route domain.Route) (http.Header, error) {
+	// 查询参数形态不由请求头承载：不解析凭据。解析会推进轮换游标，
+	// 而本轮凭据由 UpstreamQuery 解析一次，两次解析会把组内凭据白消耗一条（大组还会提前耗尽试用上限）。
+	// 这里只把渠道静态头原样交回，保证返回非 nil 的新 map。
+	if credentialStyle(route) == domain.CredentialHeaderQuery {
+		headers := make(http.Header)
+		mergeRouteHeaders(headers, "", route.Headers)
+		return headers, nil
+	}
 	cred, err := p.resolve.Resolve(ctx, route)
 	if err != nil {
 		return nil, err
 	}
-	headers, credentialHeader, err := credentialHeaders(route.Protocol, cred.APIKey)
+	headers, credentialHeader, err := credentialHeaders(route, cred.APIKey)
 	if err != nil {
 		return nil, err
 	}
@@ -147,23 +164,66 @@ func (p *Provider) UpstreamHeaders(ctx context.Context, route domain.Route) (htt
 	return headers, nil
 }
 
-// credentialHeaders 按本次路由的协议产出一份全新的凭据头，并返回凭据头的标准名。
+// UpstreamQuery 实现 upstream.QueryProvider 的契约：查询参数形态的凭据在此注入。
+//
+// 只有渠道把注入形态配成 query 时才返回参数；其余形态返回 nil，上游地址不受影响。
+// 拒绝空凭据以外的错误由 resolver 给出，与请求头形态同一口径。
+func (p *Provider) UpstreamQuery(ctx context.Context, route domain.Route) (url.Values, error) {
+	if credentialStyle(route) != domain.CredentialHeaderQuery {
+		return nil, nil
+	}
+	cred, err := p.resolve.Resolve(ctx, route)
+	if err != nil {
+		return nil, err
+	}
+	values := url.Values{}
+	values.Set(queryAPIKeyParam, cred.APIKey)
+	return values, nil
+}
+
+// credentialStyle 决定本次的凭据注入形态：渠道显式配置优先，未配置时按协议现状。
+//
+// 渠道配置直到选路边界才收敛为 domain.Route.CredentialHeaderStyle，
+// 未配置时为零值；未知协议返回零值，由调用方按「不支持凭据注入」显式失败。
+func credentialStyle(route domain.Route) domain.CredentialHeaderStyle {
+	if route.CredentialHeaderStyle.Valid() {
+		return route.CredentialHeaderStyle
+	}
+	switch route.Protocol {
+	case domain.ProtocolOpenAIChat, domain.ProtocolOpenAIResponses:
+		return domain.CredentialHeaderAuthorization
+	case domain.ProtocolAnthropicMessages:
+		return domain.CredentialHeaderXAPIKey
+	case domain.ProtocolGeminiGenerate:
+		return domain.CredentialHeaderXGoogAPIKey
+	default:
+		return domain.CredentialHeaderAuto
+	}
+}
+
+// credentialHeaders 按本次路由产出一份全新的凭据头，并返回凭据头的标准名。
 //
 // 第二个返回值供合并阶段跳过同名静态头；不支持的协议按平台内部错误返回，
 // 不去猜一种注入形态——猜错会把凭据泄露到错误的请求头里，
 // 而「协议取值为空」这类装配缺陷也会因此变成显式失败，而不是悄悄发一个必然 401 的请求。
-func credentialHeaders(protocol domain.Protocol, apiKey string) (http.Header, string, error) {
+func credentialHeaders(route domain.Route, apiKey string) (http.Header, string, error) {
 	headers := make(http.Header)
-	switch protocol {
-	case domain.ProtocolOpenAIChat, domain.ProtocolOpenAIResponses:
+	switch credentialStyle(route) {
+	case domain.CredentialHeaderAuthorization:
 		headers.Set(headerAuthorization, "Bearer "+apiKey)
 		return headers, headerAuthorization, nil
-	case domain.ProtocolAnthropicMessages:
+	case domain.CredentialHeaderXAPIKey:
 		headers.Set(headerXAPIKey, apiKey)
 		return headers, http.CanonicalHeaderKey(headerXAPIKey), nil
+	case domain.CredentialHeaderXGoogAPIKey:
+		headers.Set(headerXGoogAPIKey, apiKey)
+		return headers, http.CanonicalHeaderKey(headerXGoogAPIKey), nil
+	case domain.CredentialHeaderQuery:
+		// 查询参数形态不由请求头承载：头部留空，由 UpstreamQuery 注入。
+		return headers, "", nil
 	default:
 		return nil, "", domain.NewError(domain.CodeInternal,
-			fmt.Sprintf("协议 %q 不支持凭据注入", string(protocol)))
+			fmt.Sprintf("协议 %q 不支持凭据注入", string(route.Protocol)))
 	}
 }
 

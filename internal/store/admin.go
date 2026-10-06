@@ -192,11 +192,15 @@ type Channel struct {
 	Priority   int         `json:"priority"`
 	Weight     int         `json:"weight"`
 	Enabled    bool        `json:"enabled"`
+	// Config 是渠道级扩展配置的原始 JSON，结构随协议方言演进，存储层不解释。
+	// 凭据注入形态（credential_style）是当前认识的键，由选路边界解析。
+	// 用 json.RawMessage 而不是 []byte：后者在 JSON 序列化时会被转成 base64 字符串。
+	Config json.RawMessage `json:"config,omitempty"`
 }
 
 const insertChannelSQL = `INSERT INTO upstream_channel
-  (merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+  (merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled, config)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
 
 // insertChannel 写一条渠道。新建一律启用，停用是独立动作。
 func insertChannel(ctx context.Context, ex executor, c Channel) (uint64, error) {
@@ -216,7 +220,7 @@ func insertChannel(ctx context.Context, ex executor, c Channel) (uint64, error) 
 		return 0, errors.New("store: upstream_channel.base_url 不能为空")
 	}
 	res, err := ex.ExecContext(ctx, insertChannelSQL,
-		c.MerchantID, c.Name, c.Vendor, c.Type, c.CredGroup, c.BaseURL, c.Priority, c.Weight)
+		c.MerchantID, c.Name, c.Vendor, c.Type, c.CredGroup, c.BaseURL, c.Priority, c.Weight, nullableJSON(c.Config))
 	if err != nil {
 		return 0, describeWriteError("upstream_channel", err)
 	}
@@ -228,7 +232,7 @@ func (s *Store) InsertChannel(ctx context.Context, c Channel) (uint64, error) {
 	return insertChannel(ctx, s.db, c)
 }
 
-const listChannelsSQL = `SELECT id, merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled
+const listChannelsSQL = `SELECT id, merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled, config
 FROM upstream_channel ORDER BY id`
 
 // listChannels 列出全部渠道。
@@ -246,7 +250,7 @@ func listChannels(ctx context.Context, q querier) ([]Channel, error) {
 			typeRaw string
 		)
 		if err := rows.Scan(&c.ID, &c.MerchantID, &c.Name, &c.Vendor, &typeRaw,
-			&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled); err != nil {
+			&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled, &c.Config); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
 		}
 		c.Type = ChannelTypeFromDB(typeRaw)

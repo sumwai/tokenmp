@@ -2,7 +2,10 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
+	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -56,6 +59,31 @@ type ChannelInput struct {
 	BaseURL    string
 	Priority   int
 	Weight     int
+	// CredentialStyle 覆盖该渠道凭据的注入形态；零值表示不配置，按协议现状注入。
+	// 典型取值：query 表示改用 ?key=<凭据> 查询参数形态（兼容只接受查询参数的上游）。
+	CredentialStyle domain.CredentialHeaderStyle
+}
+
+// configFieldCredentialStyle 是 upstream_channel.config 里凭据注入形态的键名，
+// 与选路边界的读取口径同源。
+const configFieldCredentialStyle = "credential_style" //nolint:gosec // G101：这是 config 键名，不是凭据。
+
+// channelConfigJSON 把渠道级凭据注入形态编码为 config JSON；零值表示不配置。
+//
+// 非法取值在写入入口报错：config 里的写坏值只会让选路时静默回退到协议现状，
+// 把「配错了」藏起来；写入是唯一能把它显式拦下的地方。
+func channelConfigJSON(style domain.CredentialHeaderStyle) (json.RawMessage, error) {
+	if style == domain.CredentialHeaderAuto {
+		return nil, nil
+	}
+	if !style.Valid() {
+		return nil, fmt.Errorf("admin: 凭据注入形态 %q 不受支持", string(style))
+	}
+	encoded, err := json.Marshal(map[string]string{configFieldCredentialStyle: string(style)})
+	if err != nil {
+		return nil, fmt.Errorf("admin: 编码渠道配置失败: %w", err)
+	}
+	return json.RawMessage(encoded), nil
 }
 
 // CreateChannel 新建一条渠道。
@@ -84,6 +112,10 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 	if in.Weight == 0 {
 		in.Weight = defaultChannelWeight
 	}
+	config, err := channelConfigJSON(in.CredentialStyle)
+	if err != nil {
+		return 0, err
+	}
 	return s.store.InsertChannel(ctx, store.Channel{
 		MerchantID: in.MerchantID,
 		Name:       in.Name,
@@ -93,6 +125,7 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 		BaseURL:    in.BaseURL,
 		Priority:   in.Priority,
 		Weight:     in.Weight,
+		Config:     config,
 	})
 }
 

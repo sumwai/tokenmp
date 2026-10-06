@@ -56,9 +56,15 @@ $ tokenmp admin channel create --merchant 2 --name upstream-chat \
 已创建渠道 id=1
 ```
 
-`--type` 取 `openai_chat` / `openai_responses` / `anthropic_messages`，决定该渠道能服务的
-协议方言。`--base-url` 只填到端点段之前，端点段由协议决定；`--priority` 与 `--weight`
+`--type` 取 `openai_chat` / `openai_responses` / `anthropic_messages` / `gemini_generate`，
+决定该渠道能服务的协议方言。`--base-url` 只填到端点段之前，端点段由协议决定；
+Gemini 的端点含模型名与流式后缀，由适配器在调用上游时拼接，`--base-url` 填到版本根
+（如 `https://generativelanguage.googleapis.com/v1beta`）。`--priority` 与 `--weight`
 不填默认 100。
+
+`--credential-style` 可选，覆盖该渠道的凭据注入形态：`authorization` / `x-api-key` /
+`x-goog-api-key` / `query`；留空按协议现状。`query` 表示把凭据写成上游地址的 `?key=`
+查询参数，服务只接受查询参数、不接受凭据请求头的上游（如部分 Gemini 兼容端点）。
 
 ```
 $ tokenmp admin credential add --merchant 2 --group grp-chat --name primary \

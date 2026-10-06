@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/sumwai/tokenmp/internal/admin"
+	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -103,12 +104,13 @@ func adminChannelCreate(ctx context.Context, args []string, env *adminEnv) int {
 	fs := env.newFlagSet("admin channel create")
 	merchant := fs.Uint64(flagMerchant, 0, "归属商家 id")
 	name := fs.String(flagName, "", "渠道名")
-	channelType := fs.String(flagType, "", "协议方言：openai_chat | openai_responses | anthropic_messages")
+	channelType := fs.String(flagType, "", "协议方言：openai_chat | openai_responses | anthropic_messages | gemini_generate")
 	baseURL := fs.String(flagBaseURL, "", "上游根地址")
 	credGroup := fs.String(flagCredGroup, "", "凭据分组")
 	vendor := fs.String(flagVendor, "", "上游厂商标签")
 	priority := fs.Int(flagPriority, 0, "路由优先级，默认 100")
 	weight := fs.Int(flagWeight, 0, "加权随机权重，默认 100")
+	credentialStyle := fs.String(flagCredentialStyle, "", "凭据注入形态：authorization | x-api-key | x-goog-api-key | query；留空按协议现状")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -116,15 +118,20 @@ func adminChannelCreate(ctx context.Context, args []string, env *adminEnv) int {
 	if err := store.ValidateChannelType(kind); err != nil {
 		return env.usageError(err.Error())
 	}
+	style := domain.CredentialHeaderStyle(*credentialStyle)
+	if *credentialStyle != "" && !style.Valid() {
+		return env.usageErrorf("凭据注入形态 %q 不受支持", *credentialStyle)
+	}
 	id, err := env.service.CreateChannel(ctx, admin.ChannelInput{
-		MerchantID: *merchant,
-		Name:       *name,
-		Vendor:     *vendor,
-		Type:       kind,
-		CredGroup:  *credGroup,
-		BaseURL:    *baseURL,
-		Priority:   *priority,
-		Weight:     *weight,
+		MerchantID:      *merchant,
+		Name:            *name,
+		Vendor:          *vendor,
+		Type:            kind,
+		CredGroup:       *credGroup,
+		BaseURL:         *baseURL,
+		Priority:        *priority,
+		Weight:          *weight,
+		CredentialStyle: style,
 	})
 	if err != nil {
 		return env.fail(err)

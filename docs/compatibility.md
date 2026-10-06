@@ -1,26 +1,28 @@
 # 协议兼容性与参数处理
 
-本文件是 `docs/openapi.yaml` 的行为补充，描述机器可读规范表达不了的内容：三个方言之间
+本文件是 `docs/openapi.yaml` 的行为补充，描述机器可读规范表达不了的内容：四个方言之间
 的参数取舍、跨协议降级时客户端能观察到的差异、流式用量帧的两种行为，以及用量分量与计费的关系。
 
 规范文件给结构与状态码，本文件给取舍与原因。两者都只描述当前实现已经存在的行为；
 实现变则同步改本文件（见 [CONTRIBUTING.md](../CONTRIBUTING.md) 的「行为变更与规范同步」）。
 
-三个转发端点：
+四个方言的转发端点：
 
 | 端点 | 方言 | 适配器 |
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | `internal/adapters/openaichat` |
 | `POST /v1/responses` | OpenAI Responses | `internal/adapters/openairesponses` |
 | `POST /v1/messages` | Anthropic Messages | `internal/adapters/anthropic` |
+| `POST /v1beta/models/{model}:generateContent` | Gemini generateContent | `internal/adapters/gemini` |
+| `POST /v1beta/models/{model}:streamGenerateContent` | Gemini generateContent | `internal/adapters/gemini` |
 
 ## 账户自助查询端点
 
 `GET /v1/me/account` 让接入方自助读取自身权益，不需要运维执行 admin CLI：
 
-- **鉴权**：与三个转发端点共用同一鉴权中间件，因此 401 口径完全一致（头格式非法、密钥无效或
+- **鉴权**：与转发端点共用同一鉴权中间件，因此 401 口径完全一致（头格式非法、密钥无效或
   已过期、账户停用三类失败一律回同一种 401）。鉴权通过后的额度预检与窗口限额判定同样生效，
-  账户无可用额度或已超限时本端点也会回 402 / 429 —— 这三个转发端点与本端点是同一条鉴权链。
+  账户无可用额度或已超限时本端点也会回 402 / 429 —— 转发端点与本端点是同一条鉴权链。
 - **只读**：不改表、不写流水，每次请求直查数据库，不做缓存。后续若加缓存，失效时刻取
   「最短的包到期时间」与「限额重置时间」中较早的一个。
 - **响应字段**：账户 `id` / `code`、可用包存量（未过期且 `remaining > 0`，按 `unit` 归拢）、
@@ -43,7 +45,7 @@
 
 跨协议重建是降级，不是等价转换：同协议透传保真度更高，因此同协议候选始终排在跨协议候选之前。
 
-## 三方言参数处理清单
+## 四方言参数处理清单
 
 ### 同协议透传
 
@@ -67,23 +69,29 @@
 > 输出上限改写字段（渠道 × 模型的有效输出上限）在当前装配下不由选路结果填充，
 > 因此线上不产生该改写；上表保留它是因为适配器与内部格式已经建模该字段。
 
+Gemini 的模型名与流式形态不在请求体里，而在 URL 路径上（`/v1beta/models/{model}:generateContent`
+与 `:streamGenerateContent?alt=sse`），因此它的同协议透传改写有两处不同：
+
+- `model`：模型名替换发生在发往上游的路径上，请求体里没有任何 `model` 字段；
+- 输出上限：字段是嵌套的 `generationConfig.maxOutputTokens`，口径仍与其它方言相同。
+
 ### 跨协议重建
 
-按内部统一格式重建上游请求体。以下字段在三方言之间映射：
+按内部统一格式重建上游请求体。以下字段在四方言之间映射：
 
-| 内部字段 | OpenAI Chat Completions | OpenAI Responses | Anthropic Messages |
-|---|---|---|---|
-| `model` | `model` | `model` | `model` |
-| messages | `messages` | `input` | `messages` + 顶层 `system` |
-| system 消息 | `system` 角色消息 | `instructions` | 顶层 `system` |
-| 工具结果 | 独立 `tool` 消息 | `function_call_output` 条目 | user 消息里的 `tool_result` 块 |
-| 工具调用 | assistant 消息的 `tool_calls` | `function_call` 条目 | assistant 消息的 `tool_use` 块 |
-| 图片 | `image_url` 内容片段 | `input_image` 内容片段 | `image` 块（`url` 或 base64 `source`） |
-| 工具定义 | `tools[].function` | `tools`（扁平或嵌套） | `tools[].input_schema` |
-| 工具选择 | 字符串或 `{"type":"function",...}` | 字符串或 `{"type":"function","name":...}` | `{"type":...}`；`required` 映射为 `any` |
-| 输出上限 | `max_tokens` / `max_completion_tokens` | `max_output_tokens` | `max_tokens` |
-| `temperature` | 原值 | 原值 | 原值 |
-| `stream` | 原值 | 原值 | 原值 |
+| 内部字段 | OpenAI Chat Completions | OpenAI Responses | Anthropic Messages | Gemini generateContent |
+|---|---|---|---|---|
+| `model` | `model` | `model` | `model` | URL 路径的 `{model}` 段（请求体无此字段） |
+| messages | `messages` | `input` | `messages` + 顶层 `system` | `contents` + 顶层 `systemInstruction` |
+| system 消息 | `system` 角色消息 | `instructions` | 顶层 `system` | 顶层 `systemInstruction` |
+| 工具结果 | 独立 `tool` 消息 | `function_call_output` 条目 | user 消息里的 `tool_result` 块 | user 消息里的 `functionResponse` 片段 |
+| 工具调用 | assistant 消息的 `tool_calls` | `function_call` 条目 | assistant 消息的 `tool_use` 块 | model 消息的 `functionCall` 片段 |
+| 图片 | `image_url` 内容片段 | `input_image` 内容片段 | `image` 块（`url` 或 base64 `source`） | `inlineData`（base64）或 `fileData`（URI） |
+| 工具定义 | `tools[].function` | `tools`（扁平或嵌套） | `tools[].input_schema` | `tools[].functionDeclarations` |
+| 工具选择 | 字符串或 `{"type":"function",...}` | 字符串或 `{"type":"function","name":...}` | `{"type":...}`；`required` 映射为 `any` | `functionCallingConfig.mode`；指定工具用 `ANY` + `allowedFunctionNames` |
+| 输出上限 | `max_tokens` / `max_completion_tokens` | `max_output_tokens` | `max_tokens` | `generationConfig.maxOutputTokens` |
+| `temperature` | 原值 | 原值 | 原值 | `generationConfig.temperature` |
+| `stream` | 原值 | 原值 | 原值 | 无此字段，由路径后缀表达 |
 
 重建过程中对消息顺序做归一化：
 
@@ -100,7 +108,7 @@
 `metadata`、`thinking` 等）同理。
 
 推理内容也在丢弃之列：响应方向的 `reasoning_content` / `reasoning` 条目 / `thinking` 块
-会被解码，但**不会重新编码**给客户端。三种协议对可回传形态的要求不同
+会被解码，但**不会重新编码**给客户端。四方言对可回传形态的要求不同
 （Anthropic 的 thinking 块要求签名、Responses 的 reasoning 条目要求上下文标识），
 从别的协议取到的纯文本无法重建。
 
@@ -130,6 +138,20 @@
   建模反而会让跨协议重建产出缺签名的请求。
 - 未识别的消息角色、内容块类型、图片 `source` 类型跳过。
 
+### Gemini generateContent 专有项
+
+- `contents` 必填；模型名与流式形态由 URL 路径给出，请求体没有 `model` 与 `stream` 字段。
+  两者由适配器在端点边界解析，入口层回填到内部请求。
+- 角色只有 `user` 与 `model`：`model` 归一化为内部 `assistant`，角色缺失按 `user` 处理。
+- 顶层 `systemInstruction` 归一化为内部 system 消息；它只承载文本。
+- 工具定义在 `tools[].functionDeclarations`；工具选择在 `toolConfig.functionCallingConfig.mode`，
+  `AUTO` / `NONE` 原样映射，`ANY` 映射为内部「必须调用」，`ANY` 且只允许一个函数名时映射为指定工具。
+  未识别模式回 `invalid_request`。
+- 工具调用与结果按函数名关联：`functionCall` 不带 id，适配器合成内部 id，
+  并用同名工具调用把它与后续的 `functionResponse` 对上。
+- 请求方向的 `thought` 片段与未识别片段类型跳过；`generationConfig` 只建模
+  `maxOutputTokens` 与 `temperature`，其余键忽略。
+
 ### 请求 id
 
 优先取客户端透传的 `X-Request-Id`，其次请求体自带的 `request_id`（Chat 与 Responses 支持），
@@ -138,7 +160,8 @@
 ## 模型名替换
 
 - 客户端请求的模型名是对外别名，也是选路键：网关按它查候选渠道与渠道倍率。
-- 渠道配置了上游模型名时，该名字替换（或补齐）上游请求体里的 `model`。
+- 渠道配置了上游模型名时，该名字替换（或补齐）上游请求里的 `model`；
+  Gemini 没有请求体模型字段，替换发生在发往上游的 URL 路径上。
 - 响应体里的 `model` 由上游回显，可能与客户端请求的别名不同。
 - `x-tokenmp-routed-model` 响应标头给出网关本次实际履约的模型名；渠道未配置上游模型名时
   不出现该标头。已向客户端写出字节后该标头不再改动。
@@ -204,13 +227,14 @@ X-Accel-Buffering: no
 
 ### 用量帧的两种行为
 
-只有 OpenAI Chat Completions 有「索取用量」的开关，另外两个方言的用量是协议固有事件。
+只有 OpenAI Chat Completions 有「索取用量」的开关，另外三个方言的用量是协议固有事件。
 
 | 方言 | 用量出现位置 | 客户端索取与否的影响 |
 |---|---|---|
 | OpenAI Chat Completions | 末尾一帧 `choices` 为空、`usage` 非空的 chunk | **有影响**。索取（`stream_options.include_usage: true`）时下发；未索取时不下发 |
 | OpenAI Responses | 终止事件内嵌的 `response.usage` | 无影响，始终下发 |
 | Anthropic Messages | `message_start.usage`（输入侧）与 `message_delta.usage`（累计值） | 无影响，始终下发 |
+| Gemini generateContent | 末尾帧的 `usageMetadata`（每帧可能携带累计值） | 无影响，始终下发 |
 
 Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: true`。上游因此多发的那一帧，
 只在客户端**也**索取过时才写回客户端；客户端未索取时网关丢弃该帧的原始字节，用量照常记账。
@@ -223,7 +247,7 @@ Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: tru
 
 | 情形 | 客户端观察 |
 |---|---|
-| 上游在结束标记前断开 | 若已写出字节：状态码与响应头已是 200，Anthropic 与 Responses 下发 `error` 事件，Chat 直接关闭连接（本方言没有流内错误帧）。若尚未写出字节：回普通错误响应，错误码 `upstream_unavailable`（502） |
+| 上游在结束标记前断开 | 若已写出字节：状态码与响应头已是 200，Anthropic 与 Responses 下发 `error` 事件，Chat 与 Gemini 直接关闭连接（这两个方言没有流内错误帧）。若尚未写出字节：回普通错误响应，错误码 `upstream_unavailable`（502） |
 | 上游空闲超时或首字节超时 | 同上；错误码 `upstream_timeout`（504） |
 | 客户端断开 | 取消上游调用，不再换渠道重试；已经收到的用量仍写入流水 |
 | 帧超过读取上限 | 错误码 `upstream_unavailable`（502） |
@@ -286,7 +310,8 @@ Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: tru
 - 发生在协议分派**之前或之外**的错误（401、402、429，以及未注册路径的 404）一律使用共享
   `ErrorEnvelope`（`{"error":{"message","type","code"}}`），**与请求方言无关**。
 - 已注册路径上由方言适配器编码的错误（400、404、405、5xx）使用该方言的错误体，
-  Anthropic 使用 `{"type":"error","error":{"type","message"}}`。
+  Anthropic 使用 `{"type":"error","error":{"type","message"}}`，
+  Gemini 使用 `{"error":{"code","message","status"}}`（`status` 是 gRPC 状态名）。
 
 | HTTP | 错误码 | 触发点 | 错误体 |
 |---|---|---|---|

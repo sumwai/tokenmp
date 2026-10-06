@@ -3,7 +3,7 @@
 //   - 选路与请求定稿
 //   - 上游调用与候选回退
 //
-// 三种线协议共用本流水线，协议差异只由注入的适配器表达，流水线内不出现协议分支。
+// 四种线协议共用本流水线，协议差异只由注入的适配器表达，流水线内不出现协议分支。
 //
 // 本包只依赖 internal/domain：上游客户端由装配层以 domain.UpstreamCaller 注入，
 // 因此本包不得、也不需要导入 internal/upstream。
@@ -579,7 +579,7 @@ func (p *Pipeline) recordAttemptInfo(out io.Writer, req *domain.Request, route d
 
 // upstreamStatusOf 从一次尝试的结果里取出上游 HTTP 状态码。
 //
-// 成功固定记为 200：三种协议的 2xx 成功响应都按 200 处理；失败时由上游客户端把实际状态码
+// 成功固定记为 200：各协议的 2xx 成功响应都按 200 处理；失败时由上游客户端把实际状态码
 // 附在错误的 UpstreamStatus 能力上，连接类失败没有该能力，记为 0 表示未取得。
 func upstreamStatusOf(err error) int {
 	if err == nil {

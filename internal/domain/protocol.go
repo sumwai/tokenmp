@@ -13,12 +13,19 @@ const (
 	ProtocolOpenAIChat        Protocol = "openai_chat"        // POST /v1/chat/completions
 	ProtocolOpenAIResponses   Protocol = "openai_responses"   // POST /v1/responses
 	ProtocolAnthropicMessages Protocol = "anthropic_messages" // POST /v1/messages
+	// ProtocolGeminiGenerate 是 Gemini 原生 generateContent 协议。
+	//
+	// 它的客户端端点与上游端点都含模型名（/v1beta/models/{model}:generateContent），
+	// 流式形态由路径后缀 :streamGenerateContent?alt=sse 表达而不是请求体字段，
+	// 固定字符串表达不了，因此端点格式由适配器经 EndpointFormat 声明；
+	// 本枚举只登记协议取值，EndpointPath / EndpointSegment 对它返回空串。
+	ProtocolGeminiGenerate Protocol = "gemini_generate"
 )
 
 // Valid 报告协议取值是否受支持。
 func (p Protocol) Valid() bool {
 	switch p {
-	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages:
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
 		return true
 	default:
 		return false
@@ -32,6 +39,9 @@ func (p Protocol) Valid() bool {
 // 因为不同供应商对「版本根 + 端点路径」的拼法并不一致。
 //
 // 取值恒等于 "/v1" 与 EndpointSegment() 的拼接，两条事实同源，由测试守住这层关系。
+//
+// Gemini 的端点路径含模型名、且客户端路径同样区分流式形态，固定字符串表达不了，
+// 本方法对它返回空串；它的端点由适配器的 EndpointFormat 声明（见 ports.go）。
 func (p Protocol) EndpointPath() string {
 	switch p {
 	case ProtocolOpenAIChat:
@@ -90,18 +100,18 @@ func ProtocolForEndpointPath(path string) (Protocol, bool) {
 
 // CrossProtocolRebuildable 报告本协议能否与其它协议互相重建请求与响应。
 //
-// 三种会话式协议在内部统一协议里有完整字段可以互相表达，选路因此允许把一个协议的
+// 四种会话式协议在内部统一协议里有完整字段可以互相表达，选路因此允许把一个协议的
 // 请求交给另一个协议的渠道，由适配器重建。
 func (p Protocol) CrossProtocolRebuildable() bool {
 	switch p {
-	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages:
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGeminiGenerate:
 		return true
 	default:
 		return false
 	}
 }
 
-// Role 是消息角色，已归一化到三种协议的交集。
+// Role 是消息角色，已归一化到各协议的公共表示。
 type Role string
 
 const (
@@ -124,7 +134,7 @@ const (
 	// 不新增字段：Kind 决定哪些字段有效的既有约定可以表达它。
 	//
 	// 它只在解码方向建模：编码方向（EncodeResponse 与跨协议请求重建）不下发推理内容，
-	// 因为三种协议对可回传形态的要求不同——Anthropic 的 thinking 块要求签名、
+	// 因为各协议对可回传形态的要求不同——Anthropic 的 thinking 块要求签名、
 	// OpenAI Responses 的 reasoning 条目要求上下文标识，从别的协议取到的纯文本无法重建。
 	PartReasoning PartKind = "reasoning"
 )
@@ -171,7 +181,7 @@ type ToolSpec struct {
 // ToolChoiceMode 是归一化后的工具选择模式。
 //
 // 各协议的工具选择字面量与对象形态各不相同，
-// 映射到本枚举由各适配器负责：`auto`、`none`、`required` 三种字符串取值在三种协议间
+// 映射到本枚举由各适配器负责：`auto`、`none`、`required` 三种字符串取值在各协议间
 // 通用，指定具体工具在各协议上是对象形态。
 type ToolChoiceMode string
 
@@ -327,7 +337,7 @@ func (p Part) validate() error {
 	return nil
 }
 
-// FinishReason 是归一化后的结束原因，取三种协议语义的交集。
+// FinishReason 是归一化后的结束原因，取各协议语义的交集。
 //
 // 各上游的具体字面量（如 `end_turn`、`max_output_tokens`）由各自的适配器
 // 负责映射到本枚举：字面量属于协议差异，放在这里会迫使新增协议修改本包。

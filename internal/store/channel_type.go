@@ -17,6 +17,7 @@ var knownChannelTypes = map[ChannelType]struct{}{
 	ChannelTypeOpenAIChat:        {},
 	ChannelTypeOpenAIResponses:   {},
 	ChannelTypeAnthropicMessages: {},
+	ChannelTypeGeminiGenerate:    {},
 }
 
 const (
@@ -26,6 +27,8 @@ const (
 	ChannelTypeOpenAIResponses ChannelType = "openai_responses"
 	// ChannelTypeAnthropicMessages 是 Anthropic Messages 协议。
 	ChannelTypeAnthropicMessages ChannelType = "anthropic_messages"
+	// ChannelTypeGeminiGenerate 是 Gemini 原生 generateContent 协议。
+	ChannelTypeGeminiGenerate ChannelType = "gemini_generate"
 )
 
 // Known 报告该协议方言是否在写入白名单内。

@@ -25,6 +25,7 @@ import (
 
 	"github.com/sumwai/tokenmp/internal/access"
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
+	"github.com/sumwai/tokenmp/internal/adapters/gemini"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
 	"github.com/sumwai/tokenmp/internal/circuit"
@@ -59,14 +60,16 @@ const (
 	shutdownTimeout = 15 * time.Second
 )
 
-// supportedProtocols 是网关暴露的三种协议；顺序即端点的声明顺序。
+// supportedProtocols 是网关暴露的四种协议；顺序即端点的声明顺序。
 //
-// 端点路径只有 domain.Protocol.EndpointPath 一处来源，mux 注册与路径到适配器的映射
-// 共用它，两处不会分叉。
+// 端点前缀只有一处来源：固定端点路径取 domain.Protocol.EndpointPath，
+// 路径含模型名或流式形态的协议取适配器声明的 domain.EndpointFormat.ClientPathPrefix。
+// mux 注册与路径到适配器的映射共用该前缀，两处不会分叉。
 var supportedProtocols = []domain.Protocol{
 	domain.ProtocolOpenAIChat,
 	domain.ProtocolOpenAIResponses,
 	domain.ProtocolAnthropicMessages,
+	domain.ProtocolGeminiGenerate,
 }
 
 // gatewayStore 是装配层需要的存储能力。
@@ -175,6 +178,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		domain.ProtocolOpenAIChat:        openaichat.New(),
 		domain.ProtocolOpenAIResponses:   openairesponses.New(),
 		domain.ProtocolAnthropicMessages: anthropic.New(),
+		domain.ProtocolGeminiGenerate:    gemini.New(),
 	}
 	lookupAdapter := func(protocol domain.Protocol) (domain.Adapter, error) {
 		adapter, ok := adapters[protocol]
@@ -185,9 +189,20 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	}
 	resolveAdapter := func(path string) (domain.Adapter, bool) {
 		for _, protocol := range supportedProtocols {
+			adapter, ok := adapters[protocol]
+			if !ok {
+				continue
+			}
+			// 端点格式由适配器声明：路径含模型名或流式后缀的协议经 MatchClientPath 判定，
+			// 其余协议比对固定端点路径。
+			if format, isFormatted := adapter.(domain.EndpointFormat); isFormatted {
+				if _, _, matched := format.MatchClientPath(path); matched {
+					return adapter, true
+				}
+				continue
+			}
 			if protocol.EndpointPath() == path {
-				adapter, ok := adapters[protocol]
-				return adapter, ok
+				return adapter, true
 			}
 		}
 		return nil, false
@@ -251,9 +266,10 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	mux := http.NewServeMux()
 	// 健康检查独立于转发与鉴权：探活只关心进程是否在线，不应因密钥配置而失败。
 	mux.HandleFunc(HealthzPath, healthz)
-	// 三个端点各自注册精确路径并套上鉴权；其余路径一律走下面的 JSON 404。
+	// 四条端点各自注册前缀并套上鉴权；其余路径一律走下面的 JSON 404。
+	// 固定端点用完整路径精确匹配，含模型名的端点用前缀匹配子树。
 	for _, protocol := range supportedProtocols {
-		mux.Handle(protocol.EndpointPath(), auth.Middleware(handler))
+		mux.Handle(clientEndpointPrefix(adapters[protocol]), auth.Middleware(handler))
 	}
 	// 自助查询共用数据面同一鉴权中间件：头格式、密钥失效与账户停用三类失败
 	// 与转发端点回同一种 401，不另写一套鉴权口径。
@@ -300,6 +316,18 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 // 这里只能给一个与协议无关的统一错误体。
 func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
 	access.WriteJSONError(w, http.StatusNotFound, domain.CodeNotFound, "路径不存在")
+}
+
+// clientEndpointPrefix 返回协议在客户端侧的注册前缀。
+//
+// 端点路径含模型名或流式后缀的协议由适配器声明（domain.EndpointFormat.ClientPathPrefix）；
+// 固定端点路径的协议回退到 Protocol.EndpointPath。注册前缀与解析用的判定必须同源，
+// 否则会出现「注册了路径却解析不出协议」或反之。
+func clientEndpointPrefix(adapter domain.Adapter) string {
+	if format, ok := adapter.(domain.EndpointFormat); ok {
+		return format.ClientPathPrefix()
+	}
+	return adapter.Protocol().EndpointPath()
 }
 
 // storeRouteResolver 是按数据库选路的 domain.RouteResolver。
