@@ -174,6 +174,7 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 		CredentialRef:         candidate.CredGroup,
 		RequestOverrides:      sanitizeRequestOverrides(candidate),
 		SigninHeader:          parseSigninHeader(candidate.Config),
+		OAuthProfile:          ParseOAuthProfile(candidate.Config),
 		RateLimitQPS:          candidate.RateLimitQPS,
 		RateLimitConcurrency:  candidate.RateLimitConcurrency,
 		CredentialHeaderStyle: parseCredentialStyle(candidate.Config),
@@ -189,6 +190,43 @@ type channelConfig struct {
 	// CredentialStyle 覆盖本渠道凭据的注入形态，取值与 domain.CredentialHeaderStyle 一致。
 	// 典型取值：query 表示改用 ?key=<凭据> 查询参数形态。
 	CredentialStyle string `json:"credential_style"`
+	// OAuth 声明本渠道的 OAuth 端点画像，供订阅型凭据登录与续期使用。
+	OAuth oauthProfileConfig `json:"oauth"`
+}
+
+// oauthProfileConfig 是 config 里 oauth 的结构。
+type oauthProfileConfig struct {
+	AuthorizeURL string `json:"authorize_url"`
+	TokenURL     string `json:"token_url"`
+	DeviceURL    string `json:"device_url"`
+	ClientID     string `json:"client_id"`
+	Scope        string `json:"scope"`
+}
+
+// ParseOAuthProfile 从渠道 config JSON 里读 OAuth 端点画像。
+//
+// 读取口径与 parseSigninHeader 一致：config 是人工写入的 JSON 列，写坏的文本、
+// 缺键或类型不符都只让本渠道退化为「未声明画像」，不得让整次选路失败。
+func ParseOAuthProfile(raw []byte) domain.OAuthProfile {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return domain.OAuthProfile{}
+	}
+	var cfg channelConfig
+	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+		return domain.OAuthProfile{}
+	}
+	profile := domain.OAuthProfile{
+		AuthorizeURL: strings.TrimSpace(cfg.OAuth.AuthorizeURL),
+		TokenURL:     strings.TrimSpace(cfg.OAuth.TokenURL),
+		DeviceURL:    strings.TrimSpace(cfg.OAuth.DeviceURL),
+		ClientID:     strings.TrimSpace(cfg.OAuth.ClientID),
+		Scope:        strings.TrimSpace(cfg.OAuth.Scope),
+	}
+	if !profile.Configured() {
+		return domain.OAuthProfile{}
+	}
+	return profile
 }
 
 // signinHeaderConfig 是 config 里 signin_header 的结构。
