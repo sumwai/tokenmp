@@ -77,6 +77,10 @@ const (
 	flagBaseline      = "baseline"
 )
 
+// flagCredentialStyle 单独声明：它的名字长度会改变上面整块的对齐，
+// 为了不给已有的 flag 常量列表带出一大片纯格式改动。
+const flagCredentialStyle = "credential-style" //nolint:gosec // G101：这是 CLI flag 名，不是凭据。
+
 // 管理动作名集中声明：同一动作名在多个组里出现。
 const (
 	actionCreate        = "create"
