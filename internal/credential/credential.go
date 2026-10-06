@@ -25,7 +25,7 @@ import (
 const (
 	headerAuthorization = "Authorization"
 	headerXAPIKey       = "x-api-key"
-	headerXGoogAPIKey   = "x-goog-api-key"
+	headerXGoogAPIKey   = "x-goog-api-key" //nolint:gosec // G101：这是请求头名，不是凭据原文。
 	// queryAPIKeyParam 是查询参数形态凭据的参数名：Gemini 兼容端点用 ?key=<凭据>。
 	queryAPIKeyParam = "key"
 )
@@ -144,6 +144,14 @@ func NewWithResolver(resolver Resolver) *Provider {
 // （见 credentialStyle）；合并规则里凭据头是被上游用来鉴权的唯一来源，
 // 因此与 route.Headers 同名冲突时以凭据头为准，配置里的静态头不能把它覆盖掉。
 func (p *Provider) UpstreamHeaders(ctx context.Context, route domain.Route) (http.Header, error) {
+	// 查询参数形态不由请求头承载：不解析凭据。解析会推进轮换游标，
+	// 而本轮凭据由 UpstreamQuery 解析一次，两次解析会把组内凭据白消耗一条（大组还会提前耗尽试用上限）。
+	// 这里只把渠道静态头原样交回，保证返回非 nil 的新 map。
+	if credentialStyle(route) == domain.CredentialHeaderQuery {
+		headers := make(http.Header)
+		mergeRouteHeaders(headers, "", route.Headers)
+		return headers, nil
+	}
 	cred, err := p.resolve.Resolve(ctx, route)
 	if err != nil {
 		return nil, err
