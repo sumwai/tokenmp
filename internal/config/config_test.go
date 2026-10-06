@@ -281,3 +281,35 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+// TestLookupPluginFiles 验证插件列表的逗号分隔与空白处理：空串与全空白项都不算插件，
+// 缺失项与空列表都返回 nil（禁用插件层）。
+func TestLookupPluginFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want []string
+	}{
+		{name: "未配置时禁用", env: map[string]string{}},
+		{name: "空串时禁用", env: map[string]string{envPluginFiles: ""}},
+		{name: "纯分隔符时禁用", env: map[string]string{envPluginFiles: " , , "}},
+		{
+			name: "逗号分隔并去空白",
+			env:  map[string]string{envPluginFiles: " a.mw.js , pkg/b.mw.mjs "},
+			want: []string{"a.mw.js", "pkg/b.mw.mjs"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lookupPluginFiles(fakeEnv(tt.env))
+			if len(got) != len(tt.want) {
+				t.Fatalf("插件列表 = %v，期望 %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("第 %d 项 = %q，期望 %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

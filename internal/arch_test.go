@@ -528,6 +528,58 @@ func TestCapabilityPackagesHaveNoAssemblyImports(t *testing.T) {
 	t.Logf("已检查 internal/ 下 %d 个生产代码文件", checked)
 }
 
+// forwardingCorePackages 是转发内核的六个包：统一协议、唯一转发流水线、通用入口、
+// 协议适配器、上游客户端与选路。
+//
+// 中间件插件层是这些包之上的能力，只能经 internal/domain 的端口与装配层的选项注入；
+// 一旦被反向导入，插件实现（含 moejs 依赖）就会进入转发内核，端口注入这条边界失效。
+var forwardingCorePackages = []string{"domain", "pipeline", "transport", "adapters", "upstream", "route"}
+
+// TestForwardingCoreHasNoPluginImports 守护「插件层经端口注入」：转发内核六个包的生产代码
+// 不得导入 internal/plugin。插件钩子的消费者只依赖 internal/domain 里的
+// StreamMiddleware / ResponseMiddleware 端口，请求改写在装配层的转发装饰器里完成。
+func TestForwardingCoreHasNoPluginImports(t *testing.T) {
+	const pluginPackagePath = internalPrefix + "plugin"
+
+	fset := token.NewFileSet()
+	checked := 0
+
+	for _, layer := range forwardingCorePackages {
+		err := filepath.WalkDir(layer, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			checked++
+
+			file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+			if err != nil {
+				return fmt.Errorf("解析 %s 失败: %w", path, err)
+			}
+			for _, spec := range file.Imports {
+				importPath, err := strconv.Unquote(spec.Path.Value)
+				if err != nil {
+					continue
+				}
+				if importPath == pluginPackagePath || strings.HasPrefix(importPath, pluginPackagePath+"/") {
+					t.Errorf("%s 导入了 %s：插件层只能经 internal/domain 端口与装配层选项注入",
+						path, importPath)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("转发内核下没有生产代码文件，扫描失去意义")
+	}
+	t.Logf("已检查转发内核 %d 个生产代码文件的插件依赖", checked)
+}
+
 // cmdForwardingForbiddenImports 是命令包生产代码不得直接导入的转发能力实现。
 //
 // 这些实现由 internal/gateway 组装后注入，命令包只经装配入口调用；直接导入会把

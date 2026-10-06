@@ -75,6 +75,11 @@ type Options struct {
 	CrossProtocolAttempts int
 	// Backoff 是换下一候选前的退避策略；零值字段取对应默认值。
 	Backoff BackoffOptions
+	// Stream 在流式分片写回客户端之前逐片介入；可为 nil（不介入）。
+	// 中间件层由装配层按配置注入，流水线只消费 domain.StreamMiddleware 端口。
+	Stream domain.StreamMiddleware
+	// Response 在非流式响应体写回客户端之前介入；可为 nil（不介入）。
+	Response domain.ResponseMiddleware
 }
 
 // Pipeline 是唯一的核心转发流水线。
@@ -89,6 +94,8 @@ type Pipeline struct {
 	limiter     domain.ChannelLimiter
 	budget      attemptBudget
 	backoff     backoff
+	stream      domain.StreamMiddleware
+	response    domain.ResponseMiddleware
 }
 
 // attemptBudget 是一次请求的按段尝试预算。
@@ -187,7 +194,9 @@ func New(opts Options) (*Pipeline, error) {
 			crossProtocol: crossAttempts,
 			total:         maxTotalAttempts,
 		},
-		backoff: newBackoff(opts.Backoff),
+		backoff:  newBackoff(opts.Backoff),
+		stream:   opts.Stream,
+		response: opts.Response,
 	}, nil
 }
 
@@ -239,7 +248,7 @@ func (p *Pipeline) completeAttempt(
 	// 先落 billing_usage 再回写客户端：流水是扣费与对账的事实来源，
 	// 客户端拿到响应时它必须已经存在。客户端写出失败不回滚流水——上游已经产生过用量。
 	p.recordUsage(ctx, req, route, result.Usage)
-	parts, writeErr := p.writeCompletion(client, req, route, completion, out)
+	parts, writeErr := p.writeCompletion(ctx, client, req, route, completion, out)
 	result.ResponseParts = parts
 	if writeErr != nil {
 		result.Err = writeErr
@@ -250,7 +259,11 @@ func (p *Pipeline) completeAttempt(
 }
 
 // writeCompletion 把一次成功的非流式尝试的响应体写入 out，并返回本次写出的响应侧改写标注。
+//
+// 非流式响应体写回之前先交给中间件层：同协议与跨协议两条路径产出的都是面向客户端的
+// 最终字节，中间件看到的就是客户端将看到的内容。
 func (p *Pipeline) writeCompletion(
+	ctx context.Context,
 	client domain.Adapter,
 	req *domain.Request,
 	route domain.Route,
@@ -260,18 +273,25 @@ func (p *Pipeline) writeCompletion(
 	if completion == nil || completion.Response == nil {
 		return nil, domain.NewError(domain.CodeInternal, "上游返回了空响应")
 	}
-	if route.Protocol == req.Protocol {
-		if _, err := out.Write(completion.Raw); err != nil {
-			return nil, clientWriteError(err)
+	sameProtocol := route.Protocol == req.Protocol
+	body := completion.Raw
+	if !sameProtocol {
+		encoded, err := client.EncodeResponse(completion.Response)
+		if err != nil {
+			return nil, err
 		}
-		return nil, nil
+		body = encoded
 	}
-	body, err := client.EncodeResponse(completion.Response)
-	if err != nil {
-		return nil, err
+	if p.response != nil {
+		if rewritten := p.response.OnResponse(ctx, req, body); len(rewritten) > 0 {
+			body = rewritten
+		}
 	}
 	if _, err := out.Write(body); err != nil {
-		return domain.RewriteParts{domain.RewritePartResponseReencoded}, clientWriteError(err)
+		return nil, clientWriteError(err)
+	}
+	if sameProtocol {
+		return nil, nil
 	}
 	return domain.RewriteParts{domain.RewritePartResponseReencoded}, nil
 }
@@ -289,7 +309,7 @@ func (p *Pipeline) streamAttempt(
 	if streamClient == nil {
 		return attemptResult{Err: domain.NewError(domain.CodeInternal, "派生流式适配器失败")}
 	}
-	sink, err := newSink(req, route, out, streamClient)
+	sink, err := p.newSink(req, route, out, streamClient)
 	if err != nil {
 		return attemptResult{Err: err}
 	}
@@ -305,7 +325,9 @@ func (p *Pipeline) streamAttempt(
 }
 
 // newSink 按客户端协议与上游协议是否一致选择下沉目标：一致时按原始帧透传，不一致时按客户端协议重建。
-func newSink(req *domain.Request, route domain.Route, out io.Writer, streamClient domain.Adapter) (attemptSink, error) {
+//
+// 两条路径都套上中间件层的事件改写：网关侧没有中间件时对应字段为 nil，行为与既有透传一致。
+func (p *Pipeline) newSink(req *domain.Request, route domain.Route, out io.Writer, streamClient domain.Adapter) (attemptSink, error) {
 	if route.Protocol == req.Protocol {
 		return &passthroughSink{
 			out: out,
@@ -313,10 +335,13 @@ func newSink(req *domain.Request, route domain.Route, out io.Writer, streamClien
 			// 上游因此多发的那一帧不该写回给未索取的客户端。跨协议重建路径不走本目标，
 			// anthropic / responses 的用量是协议固有事件，不在此抑制。
 			suppressUsageFrames: !req.UsageFramesRequested,
+			events:              p.stream,
+			req:                 req,
+			client:              streamClient,
 		}, nil
 	}
 	model := domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel})
-	return newRebuildSink(out, streamClient, model)
+	return newRebuildSink(out, streamClient, model, p.stream, req)
 }
 
 // writeStreamError 向客户端下发协议自身的流式错误帧；协议没有该能力时不下发，

@@ -51,6 +51,9 @@ const (
 
 	// 上游套餐探针的采集周期。
 	envProbeInterval = "TOKENMP_UPSTREAM_PROBE_INTERVAL"
+
+	// 网关中间件插件：逗号分隔的文件或包目录列表，空值表示禁用插件层。
+	envPluginFiles = "TOKENMP_PLUGIN_FILES"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -127,6 +130,10 @@ type Serve struct {
 	BreakerProbes int
 	// ProbeInterval 是上游套餐探针的采集周期；快照超过它的两倍视为未知。
 	ProbeInterval time.Duration
+	// PluginFiles 是网关中间件插件的文件或包目录列表；空表示禁用插件层。
+	// 列表内每一项的合法性（存在性、扩展名、能否编译）在插件层加载时校验，
+	// 非法项在启动期报错而不是拖到第一个请求。
+	PluginFiles []string
 }
 
 // Load 从进程环境读出存储层配置。
@@ -137,6 +144,14 @@ func Load() (store.Config, error) {
 // LoadServe 从进程环境读出 serve 子命令的运行配置。
 func LoadServe() (Serve, error) {
 	return loadServe(os.LookupEnv)
+}
+
+// LoadPluginFiles 从进程环境读出网关中间件插件列表。
+//
+// 单独提供一个入口：管理面的 `plugin list` 只读这项配置，不应为了列插件而
+// 要求 MySQL 连接配置已就绪。
+func LoadPluginFiles() []string {
+	return lookupPluginFiles(os.LookupEnv)
 }
 
 // loadServe 在存储配置之上补出监听、超时分级与连接池参数；缺失项用默认值。
@@ -227,7 +242,29 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		BreakerCooldown:             breakerCooldown,
 		BreakerProbes:               breakerProbes,
 		ProbeInterval:               probeInterval,
+		PluginFiles:                 lookupPluginFiles(lookup),
 	}, nil
+}
+
+// lookupPluginFiles 读取逗号分隔的插件文件列表；缺失、空值或全空白项返回 nil，
+// 表示禁用插件层。列表项只做去空白，存在性与扩展名由插件层校验。
+func lookupPluginFiles(lookup func(string) (string, bool)) []string {
+	raw, ok := lookup(envPluginFiles)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	fields := strings.Split(raw, ",")
+	files := make([]string, 0, len(fields))
+	for _, field := range fields {
+		trimmed := strings.TrimSpace(field)
+		if trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	return files
 }
 
 // load 接受一个查找函数而不是直接读 os，便于测试构造各种环境。
