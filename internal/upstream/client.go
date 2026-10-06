@@ -355,6 +355,12 @@ var credentialFailureTokens = []string{
 	"insufficient_permissions",
 	"invalid api key",
 	"incorrect api key",
+	// Gemini 的错误体用 gRPC 状态与文案表达凭据失败：状态 UNAUTHENTICATED / PERMISSION_DENIED
+	// 与下面的 API_KEY_INVALID、"API key not valid" 是它常见的两种取值。
+	"unauthenticated",
+	"permission_denied",
+	"api_key_invalid",
+	"api key not valid",
 }
 
 // isCredentialRejection 判定一次非 2xx 上游响应是否属于「凭据不被接受」。
