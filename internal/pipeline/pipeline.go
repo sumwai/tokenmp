@@ -138,6 +138,9 @@ type attemptResult struct {
 	// ResponseParts 是响应侧改写标注，由下沉目标或非流式写出分支填写，
 	// 与请求侧标注合并后写入尝试记录。
 	ResponseParts domain.RewriteParts
+	// CredentialRenewed 报告本次上游响应声明本次凭据登录态已续期：
+	// 非流式取自 UpstreamResult，流式取自下沉目标回流。
+	CredentialRenewed bool
 	// WroteBytes 报告本次尝试是否已向客户端写出过字节：一旦写出就不再换渠道重试。
 	WroteBytes bool
 	// clientWriteFailed 报告本次尝试的终止错误是否本端向客户端写出失败：
@@ -232,6 +235,7 @@ func (p *Pipeline) completeAttempt(
 	}
 	result.Completion = completion
 	result.Usage = completion.Response.Usage
+	result.CredentialRenewed = completion.CredentialRenewed
 	// 先落 billing_usage 再回写客户端：流水是扣费与对账的事实来源，
 	// 客户端拿到响应时它必须已经存在。客户端写出失败不回滚流水——上游已经产生过用量。
 	p.recordUsage(ctx, req, route, result.Usage)
@@ -296,6 +300,7 @@ func (p *Pipeline) streamAttempt(
 	result.WroteBytes = sink.wroteBytes()
 	result.clientWriteFailed = sink.writeFailed()
 	result.ResponseParts = sink.rewriteParts()
+	result.CredentialRenewed = sink.credentialRenewed()
 	return result
 }
 
@@ -418,6 +423,7 @@ func (p *Pipeline) forward(
 		for credentialAttempt := 0; ; credentialAttempt++ {
 			upstreamCalls++
 			attempt = p.limitedAttempt(attemptCtx, route, body, requestParts, doAttempt)
+			p.renewCredential(attemptCtx, route, attempt)
 			// 在尝试结束后立即回流渠道 id、上游状态码与是否跨协议：重试时后一次覆盖前一次，
 			// 请求结束时保留的是最终履约（或最终失败）的那次。
 			p.recordAttemptInfo(out, req, route, attempt)
@@ -521,6 +527,33 @@ func (p *Pipeline) advanceCredential(ctx context.Context, route domain.Route, fa
 		return ctx, false
 	}
 	return p.credentials.Advance(ctx, route, failure)
+}
+
+// credentialRenewer 是凭据轮换实现可选具备的能力：解除本次尝试所用凭据的既有冷却。
+//
+// 声明为消费者侧的可选接口（同 BreakerProber）：解除冷却只对声明续期的厂商有意义，
+// 不放进 domain.CredentialRotation 的必备方法集，免得每个实现都被追着补一个空方法。
+// 实现未提供本能力时按「无法解除」处理，不影响转发。
+type credentialRenewer interface {
+	// Renew 解除本次尝试所用凭据的既有冷却；无尝试级状态时为空操作。
+	Renew(ctx context.Context, route domain.Route)
+}
+
+// renewCredential 在上游声明本次凭据登录态已续期时解除其既有冷却；未装配轮换器时为空操作。
+//
+// 续期事实有两个来源：错误（非 2xx 响应带 renewed 信标）与成功结果（2xx 响应带 renewed 信标）。
+// 除解除冷却外不改变本次尝试的处置：是否换凭据、是否换渠道仍由错误分级与凭据类判定决定。
+func (p *Pipeline) renewCredential(ctx context.Context, route domain.Route, attempt attemptResult) {
+	if p.credentials == nil {
+		return
+	}
+	if !attempt.CredentialRenewed && !domain.CredentialRenewed(attempt.Err) {
+		return
+	}
+	// 解除冷却不是轮换端口的必备能力：实现未提供时按「无法解除」处理，不影响转发。
+	if renewer, ok := p.credentials.(credentialRenewer); ok {
+		renewer.Renew(ctx, route)
+	}
 }
 
 // markRoutedModel 把本次尝试实际使用的事由模型名注入客户端写出目标；目标不支持该能力时为空操作。

@@ -175,6 +175,20 @@ func (r *Rotator) Advance(ctx context.Context, route domain.Route, failure error
 	return ctx, true
 }
 
+// Renew 解除本次尝试所用凭据的既有冷却：满足流水线的可选能力 credentialRenewer。
+//
+// 只认「上游明确声明」这一事实，不把一次成功的上游调用当作续期事后补记：
+// 成功只说明本次请求可用，并不意味着此前那次凭据类失败已经恢复。
+func (r *Rotator) Renew(ctx context.Context, route domain.Route) {
+	state, _ := ctx.Value(rotationStateKey{}).(*attemptState)
+	if state == nil || !state.loaded || state.current == nil {
+		return
+	}
+	if r.clearCooling(state.group.Scope, state.current.Name) {
+		r.logRenew(route, *state.current)
+	}
+}
+
 // prepare 在第一次解析时加载分组并算出本次尝试的试用顺序。
 func (r *Rotator) prepare(ctx context.Context, route domain.Route, state *attemptState) error {
 	if state.loaded {
@@ -281,6 +295,21 @@ func (r *Rotator) markCooling(scope, name string) {
 	r.cooling[key] = r.clock().Add(r.cooldown)
 }
 
+// clearCooling 解除一条凭据的冷却，返回它此前是否处于冷却中。
+func (r *Rotator) clearCooling(scope, name string) bool {
+	if name == "" {
+		return false
+	}
+	key := coolingKey(scope, name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.cooling[key]; !ok {
+		return false
+	}
+	delete(r.cooling, key)
+	return true
+}
+
 // coolingUntil 报告一条凭据是否仍在冷却中，并顺手清掉已到期的记录。
 func (r *Rotator) coolingUntil(scope, name string, now time.Time) bool {
 	key := coolingKey(scope, name)
@@ -329,6 +358,17 @@ func (r *Rotator) logSwitch(route domain.Route, failed NamedCredential, tried, l
 		"credential_prefix", keyPrefix(failed.APIKey),
 		"tried", tried,
 		"limit", limit,
+	)
+}
+
+// logRenew 记录一次由上游声明登录态续期导致的冷却解除；只列出凭据名，不含 secret。
+func (r *Rotator) logRenew(route domain.Route, renewed NamedCredential) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Info("上游声明凭据登录态已续期，解除冷却",
+		"cred_group", route.CredentialRef,
+		"credential", renewed.Name,
 	)
 }
 
