@@ -245,13 +245,16 @@ func (s *Store) RouteCandidatesAnyType(ctx context.Context, model string, mercha
 
 // Credential 是 upstream_credential 的一行：同组内用于轮换的一份上游凭据。
 type Credential struct {
+	// ID 是凭据行主键，供续期写回定位到具体行。
+	ID uint64
+	// Name 是凭据名。
 	Name string
 	// Secret 是凭据原文 JSON，结构由渠道协议与厂商约定，存储层不解释。
 	Secret []byte
 }
 
 //nolint:gosec // G101：这是 SQL 语句；命中的是表名与列名里的 credential，不是凭据原文。
-const credentialsByGroupSQL = `SELECT name, secret
+const credentialsByGroupSQL = `SELECT id, name, secret
 FROM upstream_credential
 WHERE merchant_id = ? AND cred_group = ? AND enabled = 1
 ORDER BY id`
@@ -276,7 +279,7 @@ func credentialsByGroup(ctx context.Context, q querier, credGroup string, mercha
 	var credentials []Credential
 	for rows.Next() {
 		var c Credential
-		if err := rows.Scan(&c.Name, &c.Secret); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Secret); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_credential 行失败: %w", err)
 		}
 		credentials = append(credentials, c)

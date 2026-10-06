@@ -1,13 +1,13 @@
 package admin
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -26,21 +26,12 @@ const visiblePrefixLen = 8
 // maskedFull 是无法展示前缀时的整段掩码。
 const maskedFull = "********"
 
-// credentialSecret 是 upstream_credential.secret 里管理面认识的字段。
-type credentialSecret struct {
-	APIKey string `json:"api_key"`
-}
+// credentialSecret 已下沉到 internal/credential：管理面与数据面共用同一份 secret 结构定义，
+// 避免两处各自演化出不同的字段名。maskSecret 保留为薄封装，使既有调用方与测试不必改路径。
 
-// maskSecret 从凭据 JSON 里取出 api_key 并脱敏成前缀。
-//
-// 解析失败时返回固定掩码而不是原文：宁可看不出这条凭据是什么，也不能把
-// 结构不确定的 JSON 片段当明文漏出去。
+// maskSecret 从凭据 JSON 里取出可展示前缀并脱敏。
 func maskSecret(secret []byte) string {
-	var parsed credentialSecret
-	if err := json.Unmarshal(secret, &parsed); err != nil {
-		return maskedFull
-	}
-	return maskPrefix(parsed.APIKey)
+	return credential.MaskSecret(secret)
 }
 
 // maskPrefix 保留取值的前 visiblePrefixLen 个字符，其余以省略号代替。
@@ -60,8 +51,33 @@ type CredentialView struct {
 	MerchantID uint64 `json:"merchant_id"`
 	CredGroup  string `json:"cred_group"`
 	Name       string `json:"name"`
-	Prefix     string `json:"prefix"`
-	Enabled    bool   `json:"enabled"`
+	// Kind 是凭据形态：api 或 oauth。
+	Kind string `json:"kind"`
+	// Prefix 是可展示的明文前缀。
+	Prefix string `json:"prefix"`
+	// Expires 是 oauth 凭据的过期时刻（RFC3339）；api 凭据为空。
+	Expires string `json:"expires,omitempty"`
+	// Expired 报告 oauth 凭据的访问令牌是否已过期；api 凭据恒为 false。
+	Expired bool `json:"expired"`
+	Enabled bool `json:"enabled"`
+}
+
+// credentialState 从一行 secret 提取展示用的形态、过期时刻与过期标记。
+//
+// 解析失败时不虚构形态：kind 置为 unknown，过期信息留空，由 maskSecret 继续给出整段掩码。
+func credentialState(secret []byte, now time.Time) (kind, expires string, expired bool) {
+	parsed, err := credential.ParseSecret(secret)
+	if err != nil {
+		return "unknown", "", false
+	}
+	if parsed.Kind != credential.KindOAuth {
+		return string(credential.KindAPI), "", false
+	}
+	state := string(credential.KindOAuth)
+	if parsed.Expires.IsZero() {
+		return state, "", false
+	}
+	return state, parsed.Expires.UTC().Format(time.RFC3339), !parsed.Expires.After(now)
 }
 
 // plaintextPrefix 返回明文的前 visiblePrefixLen 个字符，作为 key_prefix 列的取值。

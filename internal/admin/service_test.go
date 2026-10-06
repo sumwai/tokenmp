@@ -33,6 +33,7 @@ type fakeStore struct {
 	insertCredential     func(context.Context, store.CredentialRow) (uint64, error)
 	listCredentials      func(context.Context) ([]store.CredentialRow, error)
 	setCredentialEnabled func(context.Context, uint64, bool) error
+	channelConfigByGroup func(context.Context, uint64, string) ([]byte, error)
 	upsertModelMap       func(context.Context, store.ModelMap) (uint64, error)
 	listModelMaps        func(context.Context) ([]store.ModelMap, error)
 	setModelMapEnabled   func(context.Context, uint64, bool) error
@@ -143,6 +144,14 @@ func (f *fakeStore) SetCredentialEnabled(ctx context.Context, id uint64, enabled
 		return f.setCredentialEnabled(ctx, id, enabled)
 	}
 	return nil
+}
+
+func (f *fakeStore) ChannelConfigByCredGroup(ctx context.Context, merchantID uint64, credGroup string) ([]byte, error) {
+	f.record("ChannelConfigByCredGroup")
+	if f.channelConfigByGroup != nil {
+		return f.channelConfigByGroup(ctx, merchantID, credGroup)
+	}
+	return nil, sql.ErrNoRows
 }
 
 func (f *fakeStore) UpsertModelMap(ctx context.Context, m store.ModelMap) (uint64, error) {

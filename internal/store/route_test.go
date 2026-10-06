@@ -339,8 +339,8 @@ func TestRouteCandidatesWrapsDriverError(t *testing.T) {
 
 func TestCredentialsByGroup(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{"primary", []byte(`{"api_key":"sk-1"}`)},
-		{"backup", []byte(`{"api_key":"sk-2"}`)},
+		{uint64(11), "primary", []byte(`{"api_key":"sk-1"}`)},
+		{uint64(12), "backup", []byte(`{"api_key":"sk-2"}`)},
 	}}
 
 	got, err := credentialsByGroup(context.Background(), fake, "group-a", 7)
@@ -355,8 +355,8 @@ func TestCredentialsByGroup(t *testing.T) {
 		t.Errorf("参数 = %#v，期望 %#v", fake.args, wantArgs)
 	}
 	want := []Credential{
-		{Name: "primary", Secret: []byte(`{"api_key":"sk-1"}`)},
-		{Name: "backup", Secret: []byte(`{"api_key":"sk-2"}`)},
+		{ID: 11, Name: "primary", Secret: []byte(`{"api_key":"sk-1"}`)},
+		{ID: 12, Name: "backup", Secret: []byte(`{"api_key":"sk-2"}`)},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("结果 = %#v，期望 %#v", got, want)

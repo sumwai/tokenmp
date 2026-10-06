@@ -315,6 +315,49 @@ func (s *Store) SetChannelEnabled(ctx context.Context, id uint64, enabled bool) 
 	return setChannelEnabled(ctx, s.db, id, enabled)
 }
 
+//nolint:gosec // G101：这是 SQL 语句；命中的是列名，不是凭据原文。
+const channelConfigByCredGroupSQL = `SELECT config FROM upstream_channel
+WHERE merchant_id = ? AND cred_group = ? AND enabled = 1 ORDER BY id LIMIT 1`
+
+// channelConfigByCredGroup 读某商家某凭据分组对应渠道的 config JSON。
+//
+// 同一分组可能被多条渠道引用（同厂商多端点共享一份凭据），它们声明的 OAuth 画像
+// 应当一致；取 id 最小的一条即可，差异不在这里裁定。
+// 无匹配行时返回的错误可用 errors.Is(err, sql.ErrNoRows) 判断。
+func channelConfigByCredGroup(ctx context.Context, q querier, merchantID uint64, credGroup string) ([]byte, error) {
+	if merchantID == 0 {
+		return nil, errors.New("store: upstream_channel.merchant_id 不能为 0")
+	}
+	if strings.TrimSpace(credGroup) == "" {
+		return nil, errors.New("store: upstream_channel.cred_group 不能为空")
+	}
+	rows, err := q.QueryContext(ctx, channelConfigByCredGroupSQL, merchantID, credGroup)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 upstream_channel.config 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("store: 遍历 upstream_channel.config 行失败: %w", err)
+		}
+		return nil, fmt.Errorf("store: 查询 upstream_channel.config 失败: %w", sql.ErrNoRows)
+	}
+	var config []byte
+	if err := rows.Scan(&config); err != nil {
+		return nil, fmt.Errorf("store: 解析 upstream_channel.config 失败: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: 遍历 upstream_channel.config 行失败: %w", err)
+	}
+	return config, nil
+}
+
+// ChannelConfigByCredGroup 读某商家某凭据分组对应渠道的 config JSON。
+func (s *Store) ChannelConfigByCredGroup(ctx context.Context, merchantID uint64, credGroup string) ([]byte, error) {
+	return channelConfigByCredGroup(ctx, dbQuerier{db: s.db}, merchantID, credGroup)
+}
+
 // CredentialRow 是 upstream_credential 的一行。
 //
 // Secret 带 `json:"-"`：它只在读取时用于脱敏成前缀，不进入任何 JSON 输出，
@@ -404,6 +447,31 @@ func setCredentialEnabled(ctx context.Context, ex executor, id uint64, enabled b
 // SetCredentialEnabled 置位凭据启用标志。
 func (s *Store) SetCredentialEnabled(ctx context.Context, id uint64, enabled bool) error {
 	return setCredentialEnabled(ctx, s.db, id, enabled)
+}
+
+//nolint:gosec // G101：这是 SQL 语句；命中的是表名与列名里的 credential/secret，不是凭据原文。
+const updateCredentialSecretSQL = "UPDATE upstream_credential SET secret = ? WHERE id = ? AND enabled = 1"
+
+// updateCredentialSecret 覆盖一行凭据的 secret。
+//
+// 只允许改写仍是启用态的行：续期写回与并发停用竞争时，停用应当胜出。
+// 单条按主键的 UPDATE 在行级原子，不需要额外事务；secret 必须是合法 JSON。
+func updateCredentialSecret(ctx context.Context, ex executor, id uint64, secret []byte) error {
+	if id == 0 {
+		return errors.New("store: upstream_credential.id 不能为 0")
+	}
+	if len(secret) == 0 || !json.Valid(secret) {
+		return errors.New("store: upstream_credential.secret 必须是合法 JSON")
+	}
+	if _, err := ex.ExecContext(ctx, updateCredentialSecretSQL, secret, id); err != nil {
+		return fmt.Errorf("store: 更新 upstream_credential.secret 失败: %w", err)
+	}
+	return nil
+}
+
+// UpdateCredentialSecret 覆盖一行凭据的 secret，供 OAuth 惰性续期写回。
+func (s *Store) UpdateCredentialSecret(ctx context.Context, id uint64, secret []byte) error {
+	return updateCredentialSecret(ctx, s.db, id, secret)
 }
 
 // ModelMap 是 upstream_model_map 的一行。
