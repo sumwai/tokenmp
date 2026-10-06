@@ -30,6 +30,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/circuit"
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/me"
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
@@ -80,6 +81,9 @@ type gatewayStore interface {
 	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
 	// InsertUsage 写一条 billing_usage 流水（占位口径，结算失败时使用），返回新行 id。
 	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
+	// Account 与 RecentUsage 供自助查询端点回账户编码与最近流水。
+	Account(ctx context.Context, id uint64) (*store.Account, error)
+	RecentUsage(ctx context.Context, accountID uint64, limit int) ([]store.UsageListRow, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
@@ -251,6 +255,9 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	for _, protocol := range supportedProtocols {
 		mux.Handle(protocol.EndpointPath(), auth.Middleware(handler))
 	}
+	// 自助查询共用数据面同一鉴权中间件：头格式、密钥失效与账户停用三类失败
+	// 与转发端点回同一种 401，不另写一套鉴权口径。
+	mux.Handle(me.AccountPath, auth.Middleware(me.NewHandler(me.New(st, opts.Now))))
 	mux.HandleFunc("/", notFoundJSON)
 
 	return &Gateway{handler: mux, upstream: upstreamHTTP}, nil
