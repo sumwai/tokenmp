@@ -12,6 +12,7 @@ import (
 
 	"github.com/shopspring/decimal"
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
 )
@@ -65,6 +66,8 @@ type fakeStore struct {
 	deleteQuota          func(context.Context, uint64) error
 	quotas               func(context.Context, billing.Scope, uint64) ([]quota.Limit, error)
 	quotaUsage           func(context.Context, quota.UsageQuery) (decimal.Decimal, error)
+	insertUpstreamPlan   func(context.Context, plan.UpstreamPlan, []plan.Quota) (uint64, error)
+	plans                func(context.Context, uint64) ([]plan.UpstreamPlan, error)
 }
 
 // record 记下一次调用并返回调用名是否已记录。
@@ -404,6 +407,22 @@ func (f *fakeStore) Usage(ctx context.Context, q quota.UsageQuery) (decimal.Deci
 		return f.quotaUsage(ctx, q)
 	}
 	return decimal.Zero, nil
+}
+
+func (f *fakeStore) InsertUpstreamPlan(ctx context.Context, p plan.UpstreamPlan, quotas []plan.Quota) (uint64, error) {
+	f.record("InsertUpstreamPlan")
+	if f.insertUpstreamPlan != nil {
+		return f.insertUpstreamPlan(ctx, p, quotas)
+	}
+	return 1, nil
+}
+
+func (f *fakeStore) Plans(ctx context.Context, merchantID uint64) ([]plan.UpstreamPlan, error) {
+	f.record("Plans")
+	if f.plans != nil {
+		return f.plans(ctx, merchantID)
+	}
+	return nil, nil
 }
 
 // called 报告某动作是否被调用过。

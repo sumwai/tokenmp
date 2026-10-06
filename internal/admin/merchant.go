@@ -3,7 +3,9 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -50,6 +52,8 @@ const (
 )
 
 // ChannelInput 是新建渠道的输入。
+//
+// Config 是渠道级扩展配置原始 JSON（探针声明即写在这里），空值表示不配置。
 type ChannelInput struct {
 	MerchantID uint64
 	Name       string
@@ -59,6 +63,8 @@ type ChannelInput struct {
 	BaseURL    string
 	Priority   int
 	Weight     int
+	// Config 是渠道级扩展配置原始 JSON（探针声明即写在这里），空值表示不配置。
+	Config string
 	// CredentialStyle 覆盖该渠道凭据的注入形态；零值表示不配置，按协议现状注入。
 	// 典型取值：query 表示改用 ?key=<凭据> 查询参数形态（兼容只接受查询参数的上游）。
 	CredentialStyle domain.CredentialHeaderStyle
@@ -68,22 +74,38 @@ type ChannelInput struct {
 // 与选路边界的读取口径同源。
 const configFieldCredentialStyle = "credential_style" //nolint:gosec // G101：这是 config 键名，不是凭据。
 
-// channelConfigJSON 把渠道级凭据注入形态编码为 config JSON；零值表示不配置。
+// channelConfigJSON 合并渠道级扩展配置与凭据注入形态，编码为 config JSON。
 //
-// 非法取值在写入入口报错：config 里的写坏值只会让选路时静默回退到协议现状，
+// raw 是探针声明等扩展配置的原文，空值表示不配置；两者同时给出时并进同一个 JSON 对象。
+// 非法注入形态在写入入口报错：config 里的写坏值只会让选路时静默回退到协议现状，
 // 把「配错了」藏起来；写入是唯一能把它显式拦下的地方。
-func channelConfigJSON(style domain.CredentialHeaderStyle) (json.RawMessage, error) {
+func channelConfigJSON(raw string, style domain.CredentialHeaderStyle) (json.RawMessage, error) {
+	config, err := channelConfigArg(raw)
+	if err != nil {
+		return nil, err
+	}
 	if style == domain.CredentialHeaderAuto {
-		return nil, nil
+		return config, nil
 	}
 	if !style.Valid() {
 		return nil, fmt.Errorf("admin: 凭据注入形态 %q 不受支持", string(style))
 	}
-	encoded, err := json.Marshal(map[string]string{configFieldCredentialStyle: string(style)})
+	object := map[string]json.RawMessage{}
+	if len(config) > 0 {
+		if uerr := json.Unmarshal(config, &object); uerr != nil {
+			return nil, errors.New("渠道 config 必须是 JSON 对象")
+		}
+	}
+	encoded, err := json.Marshal(string(style))
 	if err != nil {
 		return nil, fmt.Errorf("admin: 编码渠道配置失败: %w", err)
 	}
-	return json.RawMessage(encoded), nil
+	object[configFieldCredentialStyle] = encoded
+	merged, err := json.Marshal(object)
+	if err != nil {
+		return nil, fmt.Errorf("admin: 编码渠道配置失败: %w", err)
+	}
+	return json.RawMessage(merged), nil
 }
 
 // CreateChannel 新建一条渠道。
@@ -112,7 +134,7 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 	if in.Weight == 0 {
 		in.Weight = defaultChannelWeight
 	}
-	config, err := channelConfigJSON(in.CredentialStyle)
+	config, err := channelConfigJSON(in.Config, in.CredentialStyle)
 	if err != nil {
 		return 0, err
 	}
@@ -127,6 +149,22 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 		Weight:     in.Weight,
 		Config:     config,
 	})
+}
+
+// channelConfigArg 校验渠道扩展配置是 JSON 对象，空值表示不配置。
+func channelConfigArg(raw string) (json.RawMessage, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
+		return nil, errors.New("渠道 config 必须是 JSON 对象")
+	}
+	if object == nil {
+		return nil, errors.New("渠道 config 必须是 JSON 对象")
+	}
+	return json.RawMessage(trimmed), nil
 }
 
 // ListChannels 列出全部渠道。

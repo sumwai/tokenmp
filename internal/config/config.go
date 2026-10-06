@@ -44,6 +44,9 @@ const (
 	envBreakerThreshold = "TOKENMP_UPSTREAM_BREAKER_THRESHOLD"
 	envBreakerCooldown  = "TOKENMP_UPSTREAM_BREAKER_COOLDOWN"
 	envBreakerProbes    = "TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY"
+
+	// 上游套餐探针的采集周期。
+	envProbeInterval = "TOKENMP_UPSTREAM_PROBE_INTERVAL"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -73,6 +76,9 @@ const (
 	defaultBreakerCooldown  = 30 * time.Second
 	// defaultBreakerProbes 是半开态同时放行的探测条数默认值，与 internal/circuit 一致。
 	defaultBreakerProbes = 1
+	// defaultProbeInterval 是上游套餐探针的默认采集周期。
+	// 快照新鲜度按它的两倍判定，路由与采集器都不再各写一份取值。
+	defaultProbeInterval = 5 * time.Minute
 )
 
 // Serve 是 serve 子命令的运行配置。
@@ -108,6 +114,8 @@ type Serve struct {
 	BreakerCooldown time.Duration
 	// BreakerProbes 是半开态同时放行的探测条数。
 	BreakerProbes int
+	// ProbeInterval 是上游套餐探针的采集周期；快照超过它的两倍视为未知。
+	ProbeInterval time.Duration
 }
 
 // Load 从进程环境读出存储层配置。
@@ -178,6 +186,10 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	probeInterval, err := lookupPositiveDuration(lookup, envProbeInterval, defaultProbeInterval)
+	if err != nil {
+		return Serve{}, err
+	}
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -193,6 +205,7 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		BreakerThreshold:            breakerThreshold,
 		BreakerCooldown:             breakerCooldown,
 		BreakerProbes:               breakerProbes,
+		ProbeInterval:               probeInterval,
 	}, nil
 }
 

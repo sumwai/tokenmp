@@ -40,6 +40,11 @@ func cmdServe(stderr io.Writer) int {
 		return exitFailure
 	}
 
+	// 信号只决定「何时开始关」，退出码由 gateway.Run 的返回值统一决定。
+	// 在装配之前建立：探针采集器与 HTTP 服务共用同一个可取消的上下文。
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	gw, err := gateway.New(st, gateway.Options{
 		CompleteTimeout:             cfg.CompleteTimeout,
 		StreamFirstByteTimeout:      cfg.StreamFirstByteTimeout,
@@ -53,8 +58,10 @@ func cmdServe(stderr io.Writer) int {
 		BreakerThreshold:            cfg.BreakerThreshold,
 		BreakerCooldown:             cfg.BreakerCooldown,
 		BreakerProbes:               cfg.BreakerProbes,
+		ProbeInterval:               cfg.ProbeInterval,
 		CredentialLogger:            observability.NewJSONLogger(os.Stdout),
 		BreakerLogger:               observability.NewJSONLogger(os.Stdout),
+		ProbeLogger:                 observability.NewJSONLogger(os.Stdout),
 		Logger:                      observability.NewAccessLogger(os.Stdout),
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
 	})
@@ -63,6 +70,9 @@ func cmdServe(stderr io.Writer) int {
 		return exitFailure
 	}
 	defer gw.Close()
+
+	// 探针采集是转发的旁路：启动即开，随信号停止；失败只记日志，不影响 HTTP 服务。
+	gw.StartProbes(sigCtx)
 
 	// 用 ListenConfig 而不是裸 net.Listen：监听也接受 context，
 	// 使启动阶段的取消与超时有一条统一路径。
@@ -77,9 +87,6 @@ func cmdServe(stderr io.Writer) int {
 		Handler:           gw.Handler(),
 		ReadHeaderTimeout: gateway.ReadHeaderTimeout,
 	}
-	// 信号只决定「何时开始关」，退出码由 gateway.Run 的返回值统一决定。
-	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if err := gateway.Run(sigCtx, server, ln); err != nil {
 		_, _ = fmt.Fprintf(stderr, "运行失败：%v\n", err)
 		return exitFailure

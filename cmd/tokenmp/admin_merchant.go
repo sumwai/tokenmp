@@ -111,6 +111,7 @@ func adminChannelCreate(ctx context.Context, args []string, env *adminEnv) int {
 	priority := fs.Int(flagPriority, 0, "路由优先级，默认 100")
 	weight := fs.Int(flagWeight, 0, "加权随机权重，默认 100")
 	credentialStyle := fs.String(flagCredentialStyle, "", "凭据注入形态：authorization | x-api-key | x-goog-api-key | query；留空按协议现状")
+	config := fs.String(flagConfig, "", "渠道级扩展配置 JSON；上游套餐探针声明写在这里")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -131,6 +132,7 @@ func adminChannelCreate(ctx context.Context, args []string, env *adminEnv) int {
 		BaseURL:         *baseURL,
 		Priority:        *priority,
 		Weight:          *weight,
+		Config:          *config,
 		CredentialStyle: style,
 	})
 	if err != nil {

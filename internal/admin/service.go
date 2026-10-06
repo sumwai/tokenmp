@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
 )
@@ -84,6 +85,11 @@ type Store interface {
 	DeleteQuota(ctx context.Context, id uint64) error
 	// quota.Repo 提供限额定义读取与窗口用量聚合，与判定路径共用同一口径。
 	quota.Repo
+
+	// 上游套餐与配额：写入套餐及限额行，读取供展示。
+	InsertUpstreamPlan(ctx context.Context, p plan.UpstreamPlan, quotas []plan.Quota) (uint64, error)
+	// plan.Reader 提供套餐与限额行读取，与采集、路由消费共用同一模型。
+	plan.Reader
 
 	// 用量流水。
 	ListUsage(ctx context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error)

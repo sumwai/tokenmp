@@ -33,6 +33,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/me"
 	"github.com/sumwai/tokenmp/internal/pipeline"
+	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
 	"github.com/sumwai/tokenmp/internal/route"
@@ -58,6 +59,12 @@ const (
 	ReadHeaderTimeout = 30 * time.Second
 	// shutdownTimeout 是收到退出信号后等待在途请求完成的最长时间。
 	shutdownTimeout = 15 * time.Second
+	// defaultProbeInterval 是未配置上游套餐探针周期时的兜底值，
+	// 与 internal/config 的默认值一致；快照新鲜度按它的两倍判定。
+	defaultProbeInterval = 5 * time.Minute
+	// snapshotStaleFactor 是快照过期判定的采集周期倍数：
+	// 超过两个采集周期未采集成功的快照视为未知，路由放行而不是拿旧窗口数据误杀渠道。
+	snapshotStaleFactor = 2
 )
 
 // supportedProtocols 是网关暴露的四种协议；顺序即端点的声明顺序。
@@ -91,6 +98,10 @@ type gatewayStore interface {
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
 	quota.Repo
+	// plan.Reader 提供上游套餐与限额行，供候选阶段跳过配额耗尽渠道。
+	plan.Reader
+	// plan.Repo 提供采集器所需的数据面（探针目标读取与采集结果写回）。
+	plan.Repo
 }
 
 // 编译期断言：真实存储层满足装配层的依赖面。
@@ -133,10 +144,15 @@ type Options struct {
 	BreakerCooldown time.Duration
 	// BreakerProbes 是半开态同时放行的探测条数；非正时取熔断包的默认值。
 	BreakerProbes int
+	// ProbeInterval 是上游套餐探针的采集周期；<= 0 时取 defaultProbeInterval。
+	// 快照超过它的两倍视为未知，路由据此放行而不是拿过期快照误杀渠道。
+	ProbeInterval time.Duration
 	// BreakerLogger 记录熔断状态迁移；nil 时不记录。
 	BreakerLogger *slog.Logger
 	// CredentialLogger 记录凭据冷却与切换；nil 时不记录。
 	CredentialLogger *slog.Logger
+	// ProbeLogger 记录上游套餐采集结果；nil 时不记录。
+	ProbeLogger *slog.Logger
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
 	Now func() time.Time
 	// UsageWriteTimeout 是写用量流水的耗时上限；非正时取默认值。
@@ -151,10 +167,21 @@ type Options struct {
 type Gateway struct {
 	handler  http.Handler
 	upstream *http.Client
+	probes   *plan.Collector
 }
 
 // Handler 返回网关的 HTTP 入口，供命令包构造 http.Server。
 func (g *Gateway) Handler() http.Handler { return g.handler }
+
+// StartProbes 启动上游套餐的周期采集，ctx 取消时退出；未装配采集器时为空操作。
+//
+// 采集在后台跑：探针不可达或配置写坏只记结构化日志，不影响任何转发路径。
+func (g *Gateway) StartProbes(ctx context.Context) {
+	if g == nil || g.probes == nil {
+		return
+	}
+	go g.probes.Run(ctx)
+}
 
 // Close 释放装配持有的上游连接资源。
 func (g *Gateway) Close() {
@@ -229,10 +256,15 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		return nil, err
 	}
 
+	probeInterval := opts.ProbeInterval
+	if probeInterval <= 0 {
+		probeInterval = defaultProbeInterval
+	}
+
 	forwarder, err := pipeline.New(pipeline.Options{
 		Adapters:    lookupAdapter,
 		Upstream:    upstreamClient,
-		Routes:      storeRouteResolver{store: st},
+		Routes:      storeRouteResolver{store: st, now: opts.Now, probeInterval: probeInterval},
 		Observer:    opts.Observer,
 		Usage:       usage.NewRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
 		Credentials: rotation,
@@ -262,6 +294,16 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		return nil, err
 	}
 
+	// 采集器随装配创建，但不在 New 里启动：启动时机由命令包按进程生命周期决定，
+	// 装配测试也不会因为起了一个后台循环而变得不确定。
+	collector, err := plan.NewCollector(st, plan.CollectorOptions{
+		Interval: probeInterval,
+		Logger:   opts.ProbeLogger,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	auth := access.NewAuthenticator(st, opts.Now)
 	mux := http.NewServeMux()
 	// 健康检查独立于转发与鉴权：探活只关心进程是否在线，不应因密钥配置而失败。
@@ -276,7 +318,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	mux.Handle(me.AccountPath, auth.Middleware(me.NewHandler(me.New(st, opts.Now))))
 	mux.HandleFunc("/", notFoundJSON)
 
-	return &Gateway{handler: mux, upstream: upstreamHTTP}, nil
+	return &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector}, nil
 }
 
 // newUpstreamTransport 按配置构造上游连接池。
@@ -339,12 +381,19 @@ type storeRouteResolver struct {
 	// intN 是加权随机的随机源，返回 [0, n) 内的整数；nil 时用 route 包的默认实现。
 	// 注入后同优先级候选的首选可被测试固定。
 	intN func(int) int
+	// now 取当前时刻，用于快照新鲜度判定；nil 时取系统时钟。
+	now func() time.Time
+	// probeInterval 是采集周期；快照超过它的两倍视为未知并放行。
+	probeInterval time.Duration
 }
 
 // Candidates 返回本次请求按降级顺序排列的候选渠道。
 //
 // 分两级取候选：同协议查询先成段，不限协议的跨协议查询补段，两段都交给 route.RouteChain 拼成
 // 唯一回退链。两次查询都不做加权随机（那是选路策略，见 route.RouteChain），只回答有哪些候选。
+//
+// 在拼链之前按上游套餐跳过「配额耗尽且快照新鲜」的渠道：让它进候选只会被上游 429 挡回，
+// 白白消耗一次尝试预算与一段延迟。与熔断、限流、凭据冷却正交叠加，各自独立判定。
 func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request) ([]domain.Route, error) {
 	if req == nil {
 		return nil, nil
@@ -362,7 +411,48 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 	if err != nil {
 		return nil, err
 	}
+	exhausted := r.exhaustedCredGroups(ctx, id.MerchantID)
+	sameProtocol = dropExhaustedCandidates(sameProtocol, exhausted)
+	crossProtocol = dropExhaustedCandidates(crossProtocol, exhausted)
 	return route.RouteChain(req.Protocol, sameProtocol, crossProtocol, r.intN), nil
+}
+
+// exhaustedCredGroups 读出该商家下全部套餐并算出配额耗尽的凭据分组集合。
+//
+// 读取失败按「无法判定」处理：不阻断选路，也不拿一份读不到的状态去过滤候选。
+// 这与判定本身的宽容语义一致 —— 套餐数据不该成为转发链路上的新单点。
+func (r storeRouteResolver) exhaustedCredGroups(ctx context.Context, merchantID uint64) map[string]struct{} {
+	if r.store == nil {
+		return nil
+	}
+	plans, err := r.store.Plans(ctx, merchantID)
+	if err != nil {
+		slog.Warn("上游套餐读取失败，配额判定按未知放行", "merchant_id", merchantID, "error", err)
+		return nil
+	}
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	return plan.ExhaustedCredGroups(plans, now, snapshotStaleFactor*r.probeInterval)
+}
+
+// dropExhaustedCandidates 去掉凭据分组落在耗尽集合里的候选。
+//
+// 集合为空时原样返回，不分配新切片。返回的切片可能为空：全部候选都被跳过时由流水线
+// 统一回「没有可用渠道」，不在这里另造退路 —— 拿已知耗尽的渠道去试与配额判定自相矛盾。
+func dropExhaustedCandidates(candidates []store.RouteCandidate, exhausted map[string]struct{}) []store.RouteCandidate {
+	if len(exhausted) == 0 {
+		return candidates
+	}
+	kept := make([]store.RouteCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, blocked := exhausted[candidate.CredGroup]; blocked {
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept
 }
 
 // storeCredentialGroupLoader 是按数据库读凭据的 credential.GroupLoader。

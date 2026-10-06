@@ -41,6 +41,7 @@ const (
 	flagUpstreamModel = "upstream-model"
 	flagMultiplier    = "multiplier"
 	flagOverrides     = "overrides"
+	flagConfig        = "config"
 	flagAccount       = "account"
 	flagExpires       = "expires"
 	flagUnit          = "unit"
@@ -198,6 +199,7 @@ var adminGroups = []adminGroupSpec{
 	{usageName, []string{actionList}},
 	{"adjust", []string{actionAdd, actionList}},
 	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
+	{"plan", []string{actionAdd, actionList}},
 }
 
 // lookupGroup 按名字找组声明。
@@ -309,6 +311,8 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminAdjust(ctx, rest, env)
 	case "quota":
 		return adminQuota(ctx, rest, env)
+	case "plan":
+		return adminPlan(ctx, rest, env)
 	case helpName, helpShortFlag, helpLongFlag:
 		_, _ = io.WriteString(env.stdout, adminUsageText())
 		return exitOK

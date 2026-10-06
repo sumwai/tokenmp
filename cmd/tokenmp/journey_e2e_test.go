@@ -429,6 +429,7 @@ func TestE2EOperatorJourney(t *testing.T) {
 	runStep("步骤6_跨协议转换", journey.step6CrossProtocol)
 	runStep("步骤7_admin回读对账", journey.step7AdminReadback)
 	runStep("步骤8_自助查询端点", journey.step8MeAccount)
+	runStep("步骤9_上游套餐配额跳过", journey.step9UpstreamPlan)
 }
 
 // e2eDropAllTables 删除当前库的全部表。
