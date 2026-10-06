@@ -195,7 +195,7 @@ func TestRouteChainDropsCrossProtocolDuplicates(t *testing.T) {
 // 跳过该候选，而不是让它进链后由流水线报「没有适配器」。
 func TestRouteChainSkipsUnknownChannelType(t *testing.T) {
 	cross := []store.RouteCandidate{
-		{ChannelID: 31, ChannelType: store.ChannelType("gemini_generate")},
+		{ChannelID: 31, ChannelType: store.ChannelType("openai_embeddings")},
 		{ChannelID: 32},
 		{ChannelID: 33, ChannelType: store.ChannelTypeOpenAIResponses},
 	}

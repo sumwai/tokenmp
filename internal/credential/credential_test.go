@@ -118,7 +118,7 @@ func TestUpstreamHeadersProtocolDrivesHeaderStyle(t *testing.T) {
 		},
 		{
 			name:       "未识别协议不注入任何头",
-			protocol:   domain.Protocol("gemini_generate"),
+			protocol:   domain.Protocol("openai_embeddings"),
 			wantNoHead: true,
 		},
 		{

@@ -220,7 +220,7 @@ func TestRouteCandidatesRejectsBadInput(t *testing.T) {
 		model       string
 		merchantID  uint64
 	}{
-		{name: "未知协议方言", channelType: ChannelType("gemini_generate"), model: "m", merchantID: 1},
+		{name: "未知协议方言", channelType: ChannelType("openai_embeddings"), model: "m", merchantID: 1},
 		{name: "模型为空", channelType: ChannelTypeOpenAIChat, model: "  ", merchantID: 1},
 		{name: "商家为零", channelType: ChannelTypeOpenAIChat, model: "m", merchantID: 0},
 	}

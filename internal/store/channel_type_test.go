@@ -22,7 +22,7 @@ func TestValidateChannelTypeRejectsUnknown(t *testing.T) {
 	if err := ValidateChannelType(ChannelTypeOpenAIChat); err != nil {
 		t.Errorf("已知协议不应报错，实际：%v", err)
 	}
-	if err := ValidateChannelType(ChannelType("gemini_generate")); err == nil {
+	if err := ValidateChannelType(ChannelType("openai_embeddings")); err == nil {
 		t.Error("未知协议在写入口应当被拒绝")
 	}
 }
