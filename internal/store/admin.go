@@ -278,10 +278,17 @@ func listChannels(ctx context.Context, q querier) ([]Channel, error) {
 		var (
 			c       Channel
 			typeRaw string
+			// config 扫进 []byte 而不是直接扫进 c.Config：空配置在库里写的是 NULL，
+			// 而 json.RawMessage 的底层类型接不住 NULL，会让整条 list 直接失败。
+			// NULL 与空字节串在这里等价：两者都表示该渠道没有扩展配置。
+			config []byte
 		)
 		if err := rows.Scan(&c.ID, &c.MerchantID, &c.Name, &c.Vendor, &typeRaw,
-			&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled, &c.Config); err != nil {
+			&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled, &config); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
+		}
+		if len(config) > 0 {
+			c.Config = json.RawMessage(config)
 		}
 		c.Type = ChannelTypeFromDB(typeRaw)
 		channels = append(channels, c)

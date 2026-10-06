@@ -187,7 +187,7 @@ type adminGroupSpec struct {
 var adminGroups = []adminGroupSpec{
 	{flagMerchant, []string{actionCreate, actionList, actionDisable}},
 	{flagChannel, []string{actionCreate, actionList, actionEnable, actionDisable}},
-	{"credential", []string{actionAdd, actionList, actionDisable, actionOAuthLogin}},
+	{"credential", []string{actionAdd, actionList, actionEnable, actionDisable, actionOAuthLogin}},
 	{"model-map", []string{actionSet, actionList, actionDisable}},
 	{flagAccount, []string{actionCreate, actionList, actionDisable, actionSetMultiplier, actionSetMerchant}},
 	{"key", []string{actionIssue, actionList, actionRevoke}},

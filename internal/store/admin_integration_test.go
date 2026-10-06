@@ -68,6 +68,19 @@ func TestAdminFullChainIntegration(t *testing.T) {
 		t.Fatalf("建渠道失败：%v", err)
 	}
 
+	// 不带 config 建的渠道在库里 config 列是 NULL，列表读取必须能接住它。
+	// 这是 operations.md 里的默认写法，读不出来的话管理面列表在标准用法下就不可用。
+	channels, err := svc.ListChannels(ctx)
+	if err != nil {
+		t.Fatalf("渠道列表失败：%v", err)
+	}
+	if len(channels) != 1 || channels[0].ID != channelID {
+		t.Fatalf("渠道列表应有新建的那一条，得到 %+v", channels)
+	}
+	if len(channels[0].Config) != 0 {
+		t.Errorf("未配置扩展配置的渠道 config 应为空，实际 %s", channels[0].Config)
+	}
+
 	//nolint:gosec // G101：集成测试用的假上游凭据，不是真实凭据。
 	if _, err := svc.AddCredential(ctx, admin.CredentialInput{
 		MerchantID: merchantID, Group: "group-int", Name: "primary", APIKey: "sk-upstream-int",
