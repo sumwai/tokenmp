@@ -34,6 +34,10 @@ const (
 	// 上游凭据轮换。命中 G101 是因为常量名里有 CREDENTIAL，取值只是环境变量名。
 	envCredentialCooldown = "TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN" //nolint:gosec // G101：环境变量名，不是凭据。
 
+	// 订阅型上游的 OAuth 惰性续期。
+	envOAuthRefreshWindow  = "TOKENMP_UPSTREAM_OAUTH_REFRESH_WINDOW"
+	envOAuthRefreshTimeout = "TOKENMP_UPSTREAM_OAUTH_REFRESH_TIMEOUT"
+
 	// 流水落库。
 	envUsageWriteTimeout = "TOKENMP_USAGE_WRITE_TIMEOUT"
 
@@ -70,6 +74,9 @@ const (
 	// defaultCredentialCooldown 与 internal/credential 的兜底值一致：
 	// 配置层不导入那个包（它依赖 domain 与存储事实），故两处各写一份常量。
 	defaultCredentialCooldown = 60 * time.Second
+	// 订阅型凭据的提前续期窗口与单次续期上限，与 internal/credential 的兜底值一致。
+	defaultOAuthRefreshWindow  = 5 * time.Minute
+	defaultOAuthRefreshTimeout = 15 * time.Second
 	// 熔断的默认阈值与冷却期与 internal/circuit 的兜底值一致：
 	// 配置层不导入那个包，故两处各写一份常量，取值必须一致。
 	defaultBreakerThreshold = 5
@@ -106,6 +113,10 @@ type Serve struct {
 	UsageWriteTimeout time.Duration
 	// CredentialCooldown 是上游凭据遭遇凭据类失败后的冷却时长；冷却期内该凭据被跳过。
 	CredentialCooldown time.Duration
+	// OAuthRefreshWindow 是订阅型凭据的提前续期窗口：访问令牌剩余有效期不足该值时先续期。
+	OAuthRefreshWindow time.Duration
+	// OAuthRefreshTimeout 是单次 OAuth 续期与等待续期的上限。
+	OAuthRefreshTimeout time.Duration
 	// RateLimitWait 是渠道限流下等待令牌的最长时间；超时按可重试的上游失败换下一条候选。
 	RateLimitWait time.Duration
 	// BreakerThreshold 是渠道连续失败多少次后熔断打开。
@@ -170,6 +181,14 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	oauthRefreshWindow, err := lookupPositiveDuration(lookup, envOAuthRefreshWindow, defaultOAuthRefreshWindow)
+	if err != nil {
+		return Serve{}, err
+	}
+	oauthRefreshTimeout, err := lookupPositiveDuration(lookup, envOAuthRefreshTimeout, defaultOAuthRefreshTimeout)
+	if err != nil {
+		return Serve{}, err
+	}
 	rateLimitWait, err := lookupPositiveDuration(lookup, envRateLimitWait, defaultRateLimitWait)
 	if err != nil {
 		return Serve{}, err
@@ -201,6 +220,8 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		UpstreamIdleConnTimeout:     idleConnTimeout,
 		UsageWriteTimeout:           usageWrite,
 		CredentialCooldown:          credentialCooldown,
+		OAuthRefreshWindow:          oauthRefreshWindow,
+		OAuthRefreshTimeout:         oauthRefreshTimeout,
 		RateLimitWait:               rateLimitWait,
 		BreakerThreshold:            breakerThreshold,
 		BreakerCooldown:             breakerCooldown,

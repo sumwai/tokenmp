@@ -12,7 +12,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/access"
@@ -89,6 +87,8 @@ type gatewayStore interface {
 	// RouteCandidatesAnyType 返回不限协议方言的候选渠道，供同协议缺位时的跨协议补段使用。
 	RouteCandidatesAnyType(ctx context.Context, model string, merchantID uint64) ([]store.RouteCandidate, error)
 	CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]store.Credential, error)
+	// UpdateCredentialSecret 覆盖一行凭据的 secret，供 OAuth 惰性续期写回。
+	UpdateCredentialSecret(ctx context.Context, id uint64, secret []byte) error
 	// InsertUsage 写一条 billing_usage 流水（占位口径，结算失败时使用），返回新行 id。
 	InsertUsage(ctx context.Context, row store.UsageRow) (uint64, error)
 	// Account 与 RecentUsage 供自助查询端点回账户编码与最近流水。
@@ -153,6 +153,10 @@ type Options struct {
 	CredentialLogger *slog.Logger
 	// ProbeLogger 记录上游套餐采集结果；nil 时不记录。
 	ProbeLogger *slog.Logger
+	// OAuthRefreshWindow 是订阅型凭据的提前续期窗口；非正时取凭据包的默认值。
+	OAuthRefreshWindow time.Duration
+	// OAuthRefreshTimeout 是单次 OAuth 续期与等待续期的上限；非正时取凭据包的默认值。
+	OAuthRefreshTimeout time.Duration
 	// Now 取当前时刻，用于密钥过期判定；为 nil 时取系统时钟。
 	Now func() time.Time
 	// UsageWriteTimeout 是写用量流水的耗时上限；非正时取默认值。
@@ -239,6 +243,11 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		Loader:   storeCredentialGroupLoader{store: st},
 		Cooldown: opts.CredentialCooldown,
 		Logger:   opts.CredentialLogger,
+		Renewal: &credential.RenewalOptions{
+			Window:    opts.OAuthRefreshWindow,
+			Timeout:   opts.OAuthRefreshTimeout,
+			Refresher: newOAuthCredentialRefresher(st, opts.CredentialLogger),
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -478,35 +487,37 @@ func (l storeCredentialGroupLoader) LoadGroup(ctx context.Context, route domain.
 	}
 	entries := make([]credential.NamedCredential, 0, len(rows))
 	for _, row := range rows {
-		apiKey, err := credentialAPIKey(row.Secret)
+		entry, err := credentialEntry(row)
 		if err != nil {
 			continue
 		}
-		entries = append(entries, credential.NamedCredential{Name: row.Name, APIKey: apiKey})
+		entries = append(entries, entry)
 	}
 	return credential.Group{Scope: strconv.FormatUint(id.MerchantID, 10), Entries: entries}, nil
 }
 
-// upstreamCredentialSecret 是 upstream_credential.secret 里本网关认识的字段。
-//
-// 其余的厂商专属字段本轮不消费；多出来的键照常忽略。
-type upstreamCredentialSecret struct {
-	APIKey string `json:"api_key"`
-}
-
-// credentialAPIKey 从凭据 JSON 里取出 api_key；解析失败或缺少密钥时返回错误。
+// credentialEntry 把一行凭据 secret 解析成轮换条目。
 //
 // 不返回空密钥：空密钥会把「凭据行写坏了」推迟成上游的 401，
 // 排查从一个与配置无关的症状出发很难回到真正原因。
-func credentialAPIKey(raw []byte) (string, error) {
-	var secret upstreamCredentialSecret
-	if err := json.Unmarshal(raw, &secret); err != nil {
-		return "", domain.NewError(domain.CodeInternal, "上游凭据 JSON 无法解析").WithCause(err)
+func credentialEntry(row store.Credential) (credential.NamedCredential, error) {
+	parsed, err := credential.ParseSecret(row.Secret)
+	if err != nil {
+		return credential.NamedCredential{}, err
 	}
-	if strings.TrimSpace(secret.APIKey) == "" {
-		return "", domain.NewError(domain.CodeInternal, "上游凭据缺少 api_key")
+	entry := credential.NamedCredential{ID: row.ID, Name: row.Name}
+	if parsed.Kind == credential.KindOAuth {
+		entry.APIKey = parsed.Access
+		entry.OAuth = &credential.OAuthCredential{
+			Access:  parsed.Access,
+			Refresh: parsed.Refresh,
+			Expires: parsed.Expires,
+			Account: parsed.Account,
+		}
+		return entry, nil
 	}
-	return secret.APIKey, nil
+	entry.APIKey = parsed.APIKey
+	return entry, nil
 }
 
 // Run 在给定 listener 上提供服务，ctx 取消时优雅关闭并排空在途请求。

@@ -54,6 +54,8 @@ func cmdServe(stderr io.Writer) int {
 		UpstreamIdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
 		UsageWriteTimeout:           cfg.UsageWriteTimeout,
 		CredentialCooldown:          cfg.CredentialCooldown,
+		OAuthRefreshWindow:          cfg.OAuthRefreshWindow,
+		OAuthRefreshTimeout:         cfg.OAuthRefreshTimeout,
 		RateLimitWait:               cfg.RateLimitWait,
 		BreakerThreshold:            cfg.BreakerThreshold,
 		BreakerCooldown:             cfg.BreakerCooldown,

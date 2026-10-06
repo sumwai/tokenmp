@@ -97,6 +97,8 @@ type fakeGatewayStore struct {
 	usageRows []recordedUsage
 	// insertErr 非 nil 时写入返回它，用于验证落库失败不影响转发。
 	insertErr error
+	// updatedSecrets 记录续期写回的凭据 secret，按凭据行 id 保存。
+	updatedSecrets map[uint64][]byte
 }
 
 func (f *fakeGatewayStore) LookupAPIKey(_ context.Context, keyHash string, _ time.Time) (*store.APIKeyAuth, error) {
@@ -135,6 +137,17 @@ func (f *fakeGatewayStore) CredentialsByGroup(_ context.Context, _ string, merch
 		return nil, nil
 	}
 	return f.credentials, nil
+}
+
+// UpdateCredentialSecret 记录一次续期写回。
+func (f *fakeGatewayStore) UpdateCredentialSecret(_ context.Context, id uint64, secret []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updatedSecrets == nil {
+		f.updatedSecrets = make(map[uint64][]byte)
+	}
+	f.updatedSecrets[id] = append([]byte(nil), secret...)
+	return nil
 }
 
 // InsertUsage 落占位口径流水（结算失败时的回退路径）。
