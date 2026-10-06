@@ -252,7 +252,7 @@ func (r *Rotator) renewEntry(ctx context.Context, route domain.Route, entry Name
 	if err != nil {
 		if isInvalidGrant(err) {
 			r.logRenewRejected(route, entry)
-			return entry, &oauthInvalidGrantError{name: entry.Name}
+			return entry, &oauthInvalidGrantError{name: entry.Name, cause: err}
 		}
 		r.logRenewFailed(route, entry, err)
 		return entry, nil

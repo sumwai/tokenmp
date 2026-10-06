@@ -201,13 +201,17 @@ func (s *renewalState) run(ctx context.Context, in OAuthRefreshInput) (OAuthRefr
 // 它同时满足 domain.CredentialRejection，使流水线把它当作凭据类失败：
 // 本次渠道尝试随后换组内下一条凭据，被拒的那条进入冷却。
 type oauthInvalidGrantError struct {
-	name string
+	name  string
+	cause error
 }
 
 // Error 实现 error 接口；只给出凭据名，不含任何令牌。
 func (e *oauthInvalidGrantError) Error() string {
 	return fmt.Sprintf("OAuth 凭据 %q 的刷新令牌已失效", e.name)
 }
+
+// Unwrap 暴露被包装的 oauth.ErrInvalidGrant，使 errors.Is 仍能识别端点拒绝。
+func (e *oauthInvalidGrantError) Unwrap() error { return e.cause }
 
 // CredentialRejected 报告本次失败属凭据类。
 func (e *oauthInvalidGrantError) CredentialRejected() bool { return true }
