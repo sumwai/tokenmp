@@ -6,13 +6,31 @@
 规范文件给结构与状态码，本文件给取舍与原因。两者都只描述当前实现已经存在的行为；
 实现变则同步改本文件（见 [CONTRIBUTING.md](../CONTRIBUTING.md) 的「行为变更与规范同步」）。
 
-三个端点：
+三个转发端点：
 
 | 端点 | 方言 | 适配器 |
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions | `internal/adapters/openaichat` |
 | `POST /v1/responses` | OpenAI Responses | `internal/adapters/openairesponses` |
 | `POST /v1/messages` | Anthropic Messages | `internal/adapters/anthropic` |
+
+## 账户自助查询端点
+
+`GET /v1/me/account` 让接入方自助读取自身权益，不需要运维执行 admin CLI：
+
+- **鉴权**：与三个转发端点共用同一鉴权中间件，因此 401 口径完全一致（头格式非法、密钥无效或
+  已过期、账户停用三类失败一律回同一种 401）。鉴权通过后的额度预检与窗口限额判定同样生效，
+  账户无可用额度或已超限时本端点也会回 402 / 429 —— 这三个转发端点与本端点是同一条鉴权链。
+- **只读**：不改表、不写流水，每次请求直查数据库，不做缓存。后续若加缓存，失效时刻取
+  「最短的包到期时间」与「限额重置时间」中较早的一个。
+- **响应字段**：账户 `id` / `code`、可用包存量（未过期且 `remaining > 0`，按 `unit` 归拢）、
+  生效中的窗口限额（已用量与重置时间）、最近流水摘要（模型、时间、`charged_amount`）。
+- **不含敏感字段**：不返回密钥、上游凭据、商家与渠道内部标识。
+- **最近流水**：`recent` 查询参数控制条数，缺省 10、上限 100、`0` 表示不返回；
+  非 0 到 100 之间的整数回 400。`charged_amount` 是 `gross_amount × multiplier`，
+  即本次应扣量；跨单位折算的部分由流水明细记载，不在摘要里展开。
+- **窗口口径**：已用量与重置时间复用数据面判定所用的同一份窗口计算与聚合查询，
+  两处不会漂移。`resets_at` 为 `null` 表示总量限额（`total`）不会自然重置。
 
 ## 两条请求定稿路径
 

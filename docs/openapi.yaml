@@ -10,11 +10,12 @@ info:
   title: TokenMP 数据面
   version: "0"
   description: |
-    TokenMP 是面向大模型 API 的转发网关，对外暴露一个健康检查与三个转发端点：
+    TokenMP 是面向大模型 API 的转发网关，对外暴露一个健康检查、三个转发端点与一个账户自助查询端点：
 
     - `POST /v1/chat/completions` — OpenAI Chat Completions 方言
     - `POST /v1/responses` — OpenAI Responses 方言
     - `POST /v1/messages` — Anthropic Messages 方言
+    - `GET /v1/me/account` — 调用方账户的自助查询（余额、包存量、限额窗口与最近流水）
 
     三个转发端点共用一条转发流水线：Bearer 鉴权 → 额度预检与窗口限额 → 选路 →
     请求定稿 → 上游调用与候选回退 → 响应回写。同一份内部请求/响应/用法格式在三方言之间转换，
@@ -38,6 +39,8 @@ tags:
     description: OpenAI Responses 方言
   - name: anthropic-messages
     description: Anthropic Messages 方言
+  - name: account
+    description: 账户自助查询
 
 # 默认所有端点都需要 Bearer 鉴权；/healthz 单独置空。
 security:
@@ -245,6 +248,59 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '504':
           $ref: '#/components/responses/GatewayTimeout'
+
+  /v1/me/account:
+    get:
+      tags: [account]
+      summary: 账户自助查询
+      description: |
+        返回调用方账户的摘要：账户 id 与 code、可用包存量、生效中的窗口限额与最近流水。
+        与三个转发端点共用同一鉴权中间件，因此 401 口径完全一致；鉴权通过后的额度预检、
+        窗口限额判定同样生效，账户无可用额度或已超限时本端点也会回 402 / 429。
+        错误体使用共享 `ErrorEnvelope`，与请求方言无关。
+
+        本端点只读：不修改任何数据，每次请求直查数据库，不做缓存。
+        响应不含密钥、上游凭据或商家内部标识。
+      operationId: meAccount
+      parameters:
+        - name: recent
+          in: query
+          required: false
+          description: 最近流水条数；缺省 10，取更大的值会被截到上限 100；`0` 表示不返回流水。
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100
+            default: 10
+      responses:
+        '200':
+          description: 账户摘要。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '400':
+          description: |
+            `recent` 不是 0 到 100 之间的整数。错误码 `invalid_request`，共享 `ErrorEnvelope`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '405':
+          description: |
+            非 GET 方法。错误码 `invalid_request`，共享 `ErrorEnvelope`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
 components:
   securitySchemes:
@@ -1154,6 +1210,117 @@ components:
         usage:
           $ref: '#/components/schemas/AnthropicUsage'
       additionalProperties: true
+
+    # ------------------------------------------------------------------
+    # 账户自助查询
+    # ------------------------------------------------------------------
+    AccountSummary:
+      type: object
+      description: 自助查询的账户摘要。字段只增不改语义。
+      required: [account, buckets, quotas, recent]
+      properties:
+        account:
+          type: object
+          required: [id, code]
+          properties:
+            id:
+              type: integer
+              minimum: 1
+              description: 账户主键。
+            code:
+              type: string
+              description: 账户业务编码。
+          additionalProperties: false
+        buckets:
+          type: array
+          description: |
+            可用包存量：未过期且 `remaining > 0` 的账本行。同一 `unit` 的包相邻排列，
+            组内按扣减序（不过期在前、到期早的在前）。不合并成每 unit 一条合计，
+            因为各包的 fallback 与到期时间不同。
+          items:
+            $ref: '#/components/schemas/AccountBucket'
+        quotas:
+          type: array
+          description: |
+            生效中的窗口限额行：账户维度在前、本次密钥维度在后，各自按定义顺序。
+            已用量与重置时间复用数据面判定所用的窗口计算与聚合查询。
+          items:
+            $ref: '#/components/schemas/AccountQuota'
+        recent:
+          type: array
+          description: 最近流水摘要，按流水主键倒序（最近在前），条数由 `recent` 查询参数决定。
+          items:
+            $ref: '#/components/schemas/AccountRecentUsage'
+      additionalProperties: false
+
+    AccountBucket:
+      type: object
+      description: 一条可用包存量。
+      required: [unit, remaining, fallback, expires_at]
+      properties:
+        unit:
+          type: string
+          description: 结算单位 `currency` / `token` / `credit`。
+        remaining:
+          type: string
+          description: 剩余存量，十进制字符串。
+        fallback:
+          type: string
+          description: 包扣尽后的处置方式 `charge_balance` / `reject`。
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: 到期时刻；`null` 表示不过期。
+      additionalProperties: false
+
+    AccountQuota:
+      type: object
+      description: 一条窗口限额及其当前窗口的已用量。
+      required: [scope, metric, window_kind, period, used, limit, action, resets_at]
+      properties:
+        scope:
+          type: string
+          description: 限额维度 `account` 或 `api_key`。
+        metric:
+          type: string
+          description: 计量指标，取值见 [docs/compatibility.md](compatibility.md) 的用量分量表。
+        window_kind:
+          type: string
+          description: 窗口类型 `rolling` / `calendar`。
+        period:
+          type: string
+          description: 窗口周期 `5h` / `day` / `week` / `month` / `total`。
+        used:
+          type: string
+          description: 当前窗口已用量，十进制字符串。
+        limit:
+          type: string
+          description: 限额，十进制字符串。
+        action:
+          type: string
+          description: 超限处置 `reject` / `throttle`。
+        resets_at:
+          type: [string, "null"]
+          format: date-time
+          description: 当前窗口结束、已用量移出窗口的时刻；`null` 表示不会自然重置（total）。
+      additionalProperties: false
+
+    AccountRecentUsage:
+      type: object
+      description: 一条流水摘要。
+      required: [model, created_at, charged_amount]
+      properties:
+        model:
+          type: string
+          description: 履约模型名（渠道配置的上游模型名）。
+        created_at:
+          type: string
+          format: date-time
+          description: 流水写入时刻。
+        charged_amount:
+          type: string
+          description: 本次应扣量，即 `gross_amount × multiplier`，十进制字符串。
+      additionalProperties: false
 
   responses:
     BadRequest:
