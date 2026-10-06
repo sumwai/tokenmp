@@ -4,7 +4,17 @@
 
 ## 快速开始
 
-需要 Go 1.27 及以上。
+发布产物是单个二进制，迁移 SQL 已内嵌，运行只需一个可写的 MySQL 库。
+
+```sh
+TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
+  ./tokenmp serve
+```
+
+默认监听 `:8080`，启动时自动建表，`GET /healthz` 返回 200。环境变量与 systemd 示例见
+[docs/deploy.md](docs/deploy.md)，建渠道、发密钥的步骤见 [docs/operations.md](docs/operations.md)。
+
+从源码构建需要 Go 1.27 及以上。
 
 ```
 make check              # 编译、单测（-race）、静态检查、格式检查
