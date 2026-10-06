@@ -108,6 +108,19 @@ func RetryAfter(kind billing.WindowKind, period billing.Period, now time.Time) t
 	}
 }
 
+// ResetAt 返回当前窗口的结束时刻：到这一刻已用量移出窗口、限额重新计满。
+//
+// ok 为 false 表示该窗口不会自然重置（total），调用方应省略该字段而不是回一个假时刻。
+// 直接复用 RetryAfter 的退避时长而不重算一遍边界：两处若各写一份 switch，
+// 新增周期时会出现「判定按新周期、展示按旧周期」的静默分叉。
+func ResetAt(kind billing.WindowKind, period billing.Period, now time.Time) (time.Time, bool) {
+	delay := RetryAfter(kind, period, now)
+	if delay <= 0 {
+		return time.Time{}, false
+	}
+	return now.Add(delay), true
+}
+
 // startOfDay 返回当日零点。
 func startOfDay(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
