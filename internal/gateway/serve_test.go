@@ -26,6 +26,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/observability"
+	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -85,6 +86,10 @@ type fakeGatewayStore struct {
 	quotas    []quota.Limit
 	quotaUsed map[uint64]decimal.Decimal
 	quotaErr  error
+
+	// 上游套餐：plans 供候选阶段跳过配额耗尽渠道。
+	plans    []plan.UpstreamPlan
+	plansErr error
 
 	// mu 保护用量记录与账本：流式请求下结算在服务端 goroutine 里被调用。
 	mu sync.Mutex
@@ -156,6 +161,31 @@ func (f *fakeGatewayStore) AccountBuckets(_ context.Context, _ uint64) ([]settle
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]settlement.Bucket(nil), f.effectiveBucketsLocked()...), nil
+}
+
+// Plans 实现上游套餐与限额行的读取，供配额耗尽过滤。
+func (f *fakeGatewayStore) Plans(_ context.Context, _ uint64) ([]plan.UpstreamPlan, error) {
+	return f.plans, f.plansErr
+}
+
+// PlansByCredGroup 是采集侧数据面的占位实现：装配与转发用例不经过采集器。
+func (f *fakeGatewayStore) PlansByCredGroup(_ context.Context, merchantID uint64, credGroup string) (*plan.UpstreamPlan, error) {
+	for i := range f.plans {
+		if f.plans[i].MerchantID == merchantID && f.plans[i].CredGroup == credGroup {
+			return &f.plans[i], nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+// ProbeTargets 是采集侧数据面的占位实现：返回空集。
+func (f *fakeGatewayStore) ProbeTargets(context.Context) ([]plan.ProbeTarget, error) {
+	return nil, nil
+}
+
+// SaveProbeResult 是采集侧数据面的占位实现：直接成功。
+func (f *fakeGatewayStore) SaveProbeResult(context.Context, uint64, []byte, time.Time, []plan.QuotaUsed) error {
+	return nil
 }
 
 // Quotas 实现窗口限额定义的读取；只返回请求 scope 与实体下的行。
