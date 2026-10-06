@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -178,6 +179,7 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 		RateLimitQPS:          candidate.RateLimitQPS,
 		RateLimitConcurrency:  candidate.RateLimitConcurrency,
 		CredentialHeaderStyle: parseCredentialStyle(candidate.Config),
+		Headers:               parseHeaders(candidate.Config),
 	}
 }
 
@@ -192,6 +194,73 @@ type channelConfig struct {
 	CredentialStyle string `json:"credential_style"`
 	// OAuth 声明本渠道的 OAuth 端点画像，供订阅型凭据登录与续期使用。
 	OAuth oauthProfileConfig `json:"oauth"`
+	// Headers 声明随每次上游请求固定发出的静态请求头，供强制要求自定义头的上游使用。
+	Headers map[string]string `json:"headers"`
+}
+
+// parseHeaders 从渠道 config JSON 里读静态请求头。
+//
+// 读取口径与 parseCredentialStyle 一致：config 是人工写入的 JSON 列，写坏的文本、
+// 缺键或类型不符都只让本渠道没有额外请求头，不得让整次选路失败。两类头名丢弃：去空白
+// 后为空的（发出去只会被上游忽略），以及由网关自身占用的（见
+// domain.IsReservedUpstreamHeader，写入入口会拒绝，这里是兼底）。
+func parseHeaders(raw []byte) http.Header {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var cfg channelConfig
+	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+		return nil
+	}
+	var headers http.Header
+	for name, value := range cfg.Headers {
+		name = strings.TrimSpace(name)
+		if name == "" || domain.IsReservedUpstreamHeader(name) {
+			continue
+		}
+		if headers == nil {
+			headers = make(http.Header, len(cfg.Headers))
+		}
+		headers[http.CanonicalHeaderKey(name)] = []string{value}
+	}
+	return headers
+}
+
+// WithClientHeaderOverrides 返回一份新的选路结果：渠道静态头的取值换成客户端同名头的取值。
+//
+// 语义是「有则透传、无则兜底」：客户端带了声明过的头名就用客户端的值，没带就保留
+// 渠道 config 的取值。遍历范围只有渠道自己声明的头名 —— 声明名即操作者授权的透传
+// 范围，客户端带的其它头一律不进入上游请求。
+//
+// 凭据头的优先级不在这里处理：客户端值同样写进 Route.Headers，随后由凭据提供者按
+// 「凭据头优先于 route.Headers」的既有规则合并，所以客户端顶替不了上游凭据。
+func WithClientHeaderOverrides(routes []domain.Route, client http.Header) []domain.Route {
+	if len(client) == 0 {
+		return routes
+	}
+	overridden := make([]domain.Route, 0, len(routes))
+	for _, route := range routes {
+		overridden = append(overridden, withClientHeaderOverride(route, client))
+	}
+	return overridden
+}
+
+// withClientHeaderOverride 处理单条选路结果：没有声明静态头时原样返回。
+func withClientHeaderOverride(route domain.Route, client http.Header) domain.Route {
+	if len(route.Headers) == 0 {
+		return route
+	}
+	merged := make(http.Header, len(route.Headers))
+	for name, values := range route.Headers {
+		if fromClient := client.Values(name); len(fromClient) > 0 {
+			merged[name] = append([]string(nil), fromClient...)
+			continue
+		}
+		merged[name] = values
+	}
+	route.Headers = merged
+	return route
 }
 
 // oauthProfileConfig 是 config 里 oauth 的结构。

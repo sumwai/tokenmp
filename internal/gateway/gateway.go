@@ -453,7 +453,10 @@ func (r storeRouteResolver) Candidates(ctx context.Context, req *domain.Request)
 	exhausted := r.exhaustedCredGroups(ctx, id.MerchantID)
 	sameProtocol = dropExhaustedCandidates(sameProtocol, exhausted)
 	crossProtocol = dropExhaustedCandidates(crossProtocol, exhausted)
-	return route.RouteChain(req.Protocol, sameProtocol, crossProtocol, r.intN), nil
+	routes := route.RouteChain(req.Protocol, sameProtocol, crossProtocol, r.intN)
+	// 选路结果上的静态请求头还是渠道 config 的默认值，客户端带了的同名头在这里换成
+	// 客户端的取值。放在选路之后是因为只有这里的 route 才知道本渠道声明了哪些头名。
+	return route.WithClientHeaderOverrides(routes, req.Headers), nil
 }
 
 // exhaustedCredGroups 读出该商家下全部套餐并算出配额耗尽的凭据分组集合。

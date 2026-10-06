@@ -2016,3 +2016,79 @@ func TestGatewayCrossProtocolStreamingRebuild(t *testing.T) {
 		}
 	}
 }
+
+// TestGatewayPassthroughClientHeaderForDeclaredName 覆盖渠道静态头的「有则透传、无则兜底」。
+//
+// 上游强制要求的自定义头有两种来源：客户端本来就会带的（如同为 opencode 的调用方），
+// 与客户端不带的（其它调用方）。前者必须原值透传，后者取渠道 config 的默认值。
+// 同时守住范围：未声明在 config.headers 里的客户端头一律不进上游请求。
+func TestGatewayPassthroughClientHeaderForDeclaredName(t *testing.T) {
+	const (
+		declaredHeader   = "X-Static-Session"
+		undeclaredHeader = "X-Undeclared"
+		configDefault    = "from-config"
+		fromClient       = "from-client"
+		forwardBody      = `{"model":"up-model","messages":[{"role":"user","content":"hi"}]}`
+		upstreamBody     = `{"id":"chatcmpl-1","model":"up-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	)
+	cases := []struct {
+		name         string
+		clientHeader string
+		wantUpstream string
+	}{
+		{name: "客户端带了则透传", clientHeader: fromClient, wantUpstream: fromClient},
+		{name: "客户端没带则用渠道默认值", clientHeader: "", wantUpstream: configDefault},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			records := make(chan recordedUpstream, 1)
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				records <- recordedUpstream{path: r.URL.Path, headers: r.Header.Clone()}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, upstreamBody)
+			}))
+			defer upstreamServer.Close()
+
+			st := &fakeGatewayStore{
+				auth: activeAuth(),
+				routes: []store.RouteCandidate{{
+					ChannelID: 10, BaseURL: upstreamServer.URL, CredGroup: "group-a", UpstreamModel: "up-model",
+					Config: []byte(`{"headers":{"` + declaredHeader + `":"` + configDefault + `"}}`),
+				}},
+				credentials:    []store.Credential{{Name: "default", Secret: []byte(`{"api_key":"sk-upstream"}`)}},
+				wantMerchantID: 1,
+			}
+			gatewayServer := httptest.NewServer(newTestGateway(t, st).handler)
+			defer gatewayServer.Close()
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+				gatewayServer.URL+domain.ProtocolOpenAIChat.EndpointPath(), strings.NewReader(forwardBody))
+			if err != nil {
+				t.Fatalf("构造请求失败：%v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(authorizationHeader, authSchemePrefix+testAPIKey)
+			req.Header.Set(undeclaredHeader, "leak")
+			if tc.clientHeader != "" {
+				req.Header.Set(declaredHeader, tc.clientHeader)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("发送请求失败：%v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("状态码 = %d，期望 200", resp.StatusCode)
+			}
+
+			recorded := <-records
+			if got := recorded.headers.Get(declaredHeader); got != tc.wantUpstream {
+				t.Errorf("上游收到 %s = %q，期望 %q", declaredHeader, got, tc.wantUpstream)
+			}
+			if got := recorded.headers.Get(undeclaredHeader); got != "" {
+				t.Errorf("未声明在 config.headers 的客户端头不应进上游，实际 %s = %q", undeclaredHeader, got)
+			}
+		})
+	}
+}
