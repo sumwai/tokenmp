@@ -175,6 +175,27 @@ func CredentialRejected(err error) bool {
 	return rejection.CredentialRejected()
 }
 
+// CredentialRenewed 报告错误是否明确表示上游已续期本次凭据的登录态。
+//
+// 与 CredentialRejected 同一机制：生产者是拿到信标头的一方，domain 只提供结构匹配的读取入口。
+// 判据同样宁窄勿宽：只有生产者确认「该凭据已续期」才返回 true，未被确认的一律 false，
+// 调用方不得据此解除冷却。
+func CredentialRenewed(err error) bool {
+	var renewal CredentialRenewal
+	if !errors.As(err, &renewal) {
+		return false
+	}
+	return renewal.CredentialRenewed()
+}
+
+// CredentialRenewal 是上游错误可选实现的能力：明确表示本次凭据的登录态已续期。
+//
+// 接口就地声明为消费者契约（同 CredentialRejection）：生产者是上游客户端里
+// 读到信标头的一方，domain 不要求本包感知 HTTP 响应头形状。
+type CredentialRenewal interface {
+	CredentialRenewed() bool
+}
+
 // AsError 从任意 error 中提取统一错误；不是统一错误时返回 nil。
 func AsError(err error) *Error {
 	var target *Error

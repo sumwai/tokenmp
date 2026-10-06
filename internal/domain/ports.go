@@ -199,6 +199,9 @@ type Route struct {
 	// CredentialHeaderStyle 是调用本渠道上游时凭据请求头的注入形态，由渠道配置给出；
 	// 零值 CredentialHeaderAuto 表示未配置，按协议现状注入。
 	CredentialHeaderStyle CredentialHeaderStyle
+	// SigninHeader 是渠道在 config 里声明的登录态信标头映射；零值表示未声明，
+	// 凭据类判定回退到状态码启发式。
+	SigninHeader SigninHeader
 }
 
 // RouteResolver 返回按有效优先级升序排列的候选渠道列表。
@@ -220,6 +223,9 @@ type RouteResolver interface {
 type UpstreamResult struct {
 	Raw      []byte
 	Response *Response
+	// CredentialRenewed 报告本次 2xx 响应里上游声明本次凭据的登录态已续期：
+	// 调用方据此解除该凭据的既有冷却。未声明信标头或取值未命中时为 false。
+	CredentialRenewed bool
 }
 
 // UpstreamCaller 调用一个具体上游渠道，并返回归一化结果。
@@ -389,6 +395,16 @@ type FrameSink interface {
 type RoutedModelSink interface {
 	// SetRoutedModel 注入最终履约模型名；实现可忽略空串。
 	SetRoutedModel(model string)
+}
+
+// CredentialRenewalSink 接收「上游在一次 2xx 响应里声明本次凭据登录态已续期」这一事实。
+//
+// 与 RoutedModelSink 同一机制：该事实只有上游客户端知道，而解除冷却的动作在流水线侧；
+// 流式路径没有承载该事实的返回值，经下沉目标回流可避免为它引入请求级全局状态。
+// 下沉目标不实现本接口时，上游客户端跳过回流，不影响转发。
+type CredentialRenewalSink interface {
+	// SetCredentialRenewed 记录本次凭据的登录态已续期。
+	SetCredentialRenewed()
 }
 
 // UpstreamAttemptSink 接收一次上游尝试的归属事实，供入口层汇总访问日志。

@@ -435,6 +435,7 @@ type fakeRotation struct {
 	remaining int
 	begun     int
 	advanced  int
+	renewed   int
 }
 
 func (r *fakeRotation) Begin(ctx context.Context, _ domain.Route) context.Context {
@@ -450,6 +451,8 @@ func (r *fakeRotation) Advance(ctx context.Context, _ domain.Route, failure erro
 	r.advanced++
 	return ctx, true
 }
+
+func (r *fakeRotation) Renew(context.Context, domain.Route) { r.renewed++ }
 
 // credentialRejectedError 模拟上游客户端标注「本次凭据不被接受」的错误。
 type credentialRejectedError struct{}

@@ -22,6 +22,8 @@ type attemptSink interface {
 	writeFailed() bool
 	// rewriteParts 返回响应侧改写标注。
 	rewriteParts() domain.RewriteParts
+	// credentialRenewed 报告上游是否在本次 2xx 响应里声明凭据登录态已续期。
+	credentialRenewed() bool
 	// collectedUsage 返回本次尝试取到的用量：取「最后一个携带用量的分片」，
 	// 未取得时返回来源未知的零值。
 	collectedUsage() domain.Usage
@@ -42,11 +44,14 @@ type passthroughSink struct {
 	wrote bool
 	// failed 记录向客户端写出时是否拿到过错误（写出失败）。
 	failed bool
+	// renewed 记录上游是否声明本次凭据登录态已续期。
+	renewed bool
 }
 
 var (
-	_ domain.FrameSink = (*passthroughSink)(nil)
-	_ attemptSink      = (*passthroughSink)(nil)
+	_ domain.FrameSink             = (*passthroughSink)(nil)
+	_ domain.CredentialRenewalSink = (*passthroughSink)(nil)
+	_ attemptSink                  = (*passthroughSink)(nil)
 )
 
 // Send 只接受结束分片：EOF 收尾分片（domain.Adapter.FinishStream 的返回值）没有对应的
@@ -110,6 +115,11 @@ func (s *passthroughSink) collectedUsage() domain.Usage { return s.usage }
 // rewriteParts 报告响应侧改写标注。透传路径逐字节写出上游原始帧、不做任何改写，故恒为空。
 func (s *passthroughSink) rewriteParts() domain.RewriteParts { return nil }
 
+// SetCredentialRenewed 记录上游声明本次凭据登录态已续期。
+func (s *passthroughSink) SetCredentialRenewed() { s.renewed = true }
+
+func (s *passthroughSink) credentialRenewed() bool { return s.renewed }
+
 // rebuildSink 是「客户端协议与上游协议不一致」时的下沉目标。
 //
 // 它只实现 domain.ChunkSink：把上游分片按面向客户端的协议重新编码后写出。
@@ -125,9 +135,14 @@ type rebuildSink struct {
 	wrote      bool
 	// failed 记录向客户端写出时是否拿到过错误（写出失败）。
 	failed bool
+	// renewed 记录上游是否声明本次凭据登录态已续期。
+	renewed bool
 }
 
-var _ attemptSink = (*rebuildSink)(nil)
+var (
+	_ domain.CredentialRenewalSink = (*rebuildSink)(nil)
+	_ attemptSink                  = (*rebuildSink)(nil)
+)
 
 // newRebuildSink 为一条流构造重建下沉目标，并预先生成流开始帧。
 //
@@ -210,6 +225,11 @@ func (s *rebuildSink) rewriteParts() domain.RewriteParts {
 	}
 	return domain.RewriteParts{domain.RewritePartResponseReencoded}
 }
+
+// SetCredentialRenewed 记录上游声明本次凭据登录态已续期。
+func (s *rebuildSink) SetCredentialRenewed() { s.renewed = true }
+
+func (s *rebuildSink) credentialRenewed() bool { return s.renewed }
 
 // clientWriteError 把面向客户端的写出失败包装为不可重试的平台内部错误。
 func clientWriteError(err error) error {
