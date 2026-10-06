@@ -35,6 +35,9 @@ var _ domain.UpstreamCaller = (*Client)(nil)
 //     底层没有任何字节到达，即取消请求并返回可重试的上游超时，避免长流被整段超时误杀。
 //     注释行与纯空块心跳不产生帧，但字节到达即视为有进展并重置看门狗，
 //     使只发心跳的长思考流不会被误切断。
+//  8. 凭据类判定与解除冷却一律取自渠道声明的信标头（见 decideCredentialOutcome）：
+//     非 2xx 时结论附加在返回的错误上；2xx 时续期事实经下沉目标回流，目标不支持时跳过。
+//     信标头在判定后被剥除，不随响应外泄。
 func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Request, body []byte, sink domain.ChunkSink) error {
 	if sink == nil {
 		return domain.NewError(domain.CodeInternal, "流式下沉目标为空")
@@ -81,7 +84,19 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, _ *domain.Reque
 		if readErr != nil {
 			return mapTransportError(ctx, readErr)
 		}
-		return classifyHTTPStatus(resp.StatusCode, resp.Header, respBody)
+		outcome := decideCredentialOutcome(route.SigninHeader, resp.StatusCode, resp.Header, respBody)
+		// 信标头承载上游内部语义，消费掉取值后立即剥除；之后的任何读取都拿不到它。
+		route.SigninHeader.Strip(resp.Header)
+		return classifyHTTPStatus(outcome, resp.StatusCode, resp.Header, respBody)
+	}
+	// 2xx：信标头只用于「凭据登录态已续期」这一类与错误分级无关的事实，
+	// 经下沉目标回流给流水线；目标不支持时跳过，不影响转发。
+	outcome := decideCredentialOutcome(route.SigninHeader, resp.StatusCode, resp.Header, nil)
+	route.SigninHeader.Strip(resp.Header)
+	if outcome.renewed {
+		if renewal, ok := sink.(domain.CredentialRenewalSink); ok {
+			renewal.SetCredentialRenewed()
+		}
 	}
 
 	frameSink, passthrough := sink.(domain.FrameSink)

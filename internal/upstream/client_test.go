@@ -88,7 +88,11 @@ func TestIsCredentialRejection(t *testing.T) {
 // TestClassifyHTTPStatusMarksCredentialRejection 断言凭据类失败带有能力标注，
 // 且原有错误分级与状态码能力不受影响。
 func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
-	err := classifyHTTPStatus(http.StatusUnauthorized, http.Header{}, []byte(`{"error":"bad key"}`))
+	header := http.Header{}
+	body := []byte(`{"error":"bad key"}`)
+	err := classifyHTTPStatus(
+		decideCredentialOutcome(domain.SigninHeader{}, http.StatusUnauthorized, header, body),
+		http.StatusUnauthorized, header, body)
 	if !domain.CredentialRejected(err) {
 		t.Fatal("401 应被标注为凭据类失败")
 	}
@@ -102,7 +106,10 @@ func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
 	if got := carrier.UpstreamStatus(); got != http.StatusUnauthorized {
 		t.Errorf("上游状态码 = %d，期望 401", got)
 	}
-	if domain.CredentialRejected(classifyHTTPStatus(http.StatusTooManyRequests, http.Header{}, nil)) {
+	tooMany := classifyHTTPStatus(
+		decideCredentialOutcome(domain.SigninHeader{}, http.StatusTooManyRequests, http.Header{}, nil),
+		http.StatusTooManyRequests, http.Header{}, nil)
+	if domain.CredentialRejected(tooMany) {
 		t.Error("429 不应被标注为凭据类失败")
 	}
 }

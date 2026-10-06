@@ -133,6 +133,8 @@ func New(opts Options) (*Client, error) {
 //   - 其余 4xx 记为不可重试的上游拒绝
 //   - 5xx 与其它非 2xx 记为可重试的上游不可用
 //
+// 凭据类判定优先级为「命中渠道声明的信标头 > 状态码启发式」，见 decideCredentialOutcome。
+//
 // 响应头中携带合法 Retry-After 时，返回的错误额外实现 RetryAfter 能力（见 retryAfterError），
 // 把上游建议的退避时长交给调用方；是否据此等待由调用方决定。
 //
@@ -166,8 +168,11 @@ func (c *Client) Complete(ctx context.Context, route domain.Route, _ *domain.Req
 	if tooLarge {
 		return nil, responseTooLargeError()
 	}
+	outcome := decideCredentialOutcome(route.SigninHeader, resp.StatusCode, resp.Header, respBody)
+	// 信标头承载上游内部语义，消费掉取值后立即剥除；之后的任何读取都拿不到它。
+	route.SigninHeader.Strip(resp.Header)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, classifyHTTPStatus(resp.StatusCode, resp.Header, respBody)
+		return nil, classifyHTTPStatus(outcome, resp.StatusCode, resp.Header, respBody)
 	}
 	decoded, err := adapter.DecodeResponse(respBody)
 	if err != nil {
@@ -179,7 +184,7 @@ func (c *Client) Complete(ctx context.Context, route domain.Route, _ *domain.Req
 			WithDetail(fmt.Sprintf("%s；上游响应前 %d 字节：%s", err.Error(), errorDetailLimit, errorSnippet(respBody))).
 			WithCause(err)
 	}
-	return &domain.UpstreamResult{Raw: respBody, Response: decoded}, nil
+	return &domain.UpstreamResult{Raw: respBody, Response: decoded, CredentialRenewed: outcome.renewed}, nil
 }
 
 // errResponseTooLarge 表示上游非流式响应体超过 maxResponseBytes。
@@ -325,9 +330,11 @@ func isCredentialRejection(status int, body []byte) bool {
 
 // classifyHTTPStatus 把上游非 2xx 状态码分级为统一错误。
 //
+// outcome 是凭据处置结论（见 decideCredentialOutcome），由调用方在剥除信标头之前算出：
+// rejected 附加凭据类失败能力，renewed 附加凭据续期能力。
 // header 用于提取 Retry-After 提示：头缺失或取值非法时返回的错误不含该提示，
-// 调用方按自身退避策略处理。body 只用于判定是否为凭据类失败，不写进错误之外的地方。
-func classifyHTTPStatus(status int, header http.Header, body []byte) error {
+// 调用方按自身退避策略处理。body 只用于排障详情，不写进错误之外的地方。
+func classifyHTTPStatus(outcome credentialOutcome, status int, header http.Header, body []byte) error {
 	detail := fmt.Sprintf("上游 HTTP 状态码 %d", status)
 	if snippet := errorSnippet(body); snippet != "" {
 		detail += "：" + snippet
@@ -343,8 +350,39 @@ func classifyHTTPStatus(status int, header http.Header, body []byte) error {
 	default:
 		err = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用").WithDetail(detail)
 	}
-	return withCredentialRejection(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status),
-		isCredentialRejection(status, body))
+	return withCredentialRenewal(
+		withCredentialRejection(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status), outcome.rejected),
+		outcome.renewed)
+}
+
+// credentialOutcome 是「本次上游响应下凭据该如何处置」的判定结论。
+type credentialOutcome struct {
+	// rejected 报告本次凭据应被判定为未被上游接受（进入冷却）。
+	rejected bool
+	// renewed 报告上游声明本次凭据登录态已续期（解除既有冷却）。
+	renewed bool
+}
+
+// decideCredentialOutcome 是凭据处置判定的唯一出处。
+//
+// 优先级：命中信标头 > 状态码启发式。信标头由渠道 config 声明，只在取值命中已声明的
+// 三种之一时生效：
+//   - expired 直接判定为拒绝，优先于状态码结论，使厂商用 403/502 表达登录态失效时也能冷却；
+//   - kept 直接判定为不拒绝，即使状态码是 401，使状态码另有含义的厂商不被误冷却；
+//   - renewed 判定为不拒绝并请求解除冷却。
+//
+// 未声明信标头或取值未命中时回退到 isCredentialRejection，行为与未引入信标头时完全一致。
+func decideCredentialOutcome(signin domain.SigninHeader, status int, header http.Header, body []byte) credentialOutcome {
+	switch signin.Verdict(header) {
+	case domain.SigninExpired:
+		return credentialOutcome{rejected: true}
+	case domain.SigninKept:
+		return credentialOutcome{rejected: false}
+	case domain.SigninRenewed:
+		return credentialOutcome{renewed: true}
+	default:
+		return credentialOutcome{rejected: isCredentialRejection(status, body)}
+	}
 }
 
 // credentialRejectionError 在已分级的错误之上标注「上游明确拒绝本次凭据」。
@@ -370,6 +408,31 @@ func withCredentialRejection(err error, rejected bool) error {
 		return err
 	}
 	return &credentialRejectionError{err: err}
+}
+
+// credentialRenewalError 在已分级的错误之上标注「上游声明本次凭据登录态已续期」。
+//
+// 与 retryAfterError / upstreamStatusError 同一机制：用包装而不往 domain.Error 加字段，
+// domain.AsError 与 domain.Retryable 照常工作；该能力由 domain.CredentialRenewed 读取。
+type credentialRenewalError struct {
+	err error
+}
+
+// Error 实现 error 接口，转发被包装错误的面向排障文案。
+func (e *credentialRenewalError) Error() string { return e.err.Error() }
+
+// CredentialRenewed 报告本次失败响应声明凭据登录态已续期。
+func (e *credentialRenewalError) CredentialRenewed() bool { return true }
+
+// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
+func (e *credentialRenewalError) Unwrap() error { return e.err }
+
+// withCredentialRenewal 在 renewed 为真时给错误附上凭据续期能力；否则原样返回。
+func withCredentialRenewal(err error, renewed bool) error {
+	if !renewed {
+		return err
+	}
+	return &credentialRenewalError{err: err}
 }
 
 // retryAfterError 在统一错误之上附加上游通过 Retry-After 响应头给出的建议退避时长。
