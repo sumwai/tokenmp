@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // ErrorClass 决定错误由谁负责，以及能否重试。
@@ -175,11 +176,54 @@ func CredentialRejected(err error) bool {
 	return rejection.CredentialRejected()
 }
 
+// CredentialCooldown 是上游错误可选实现的能力：给出本次凭据类失败建议的停用时长。
+//
+// 额度用尽与密钥失效的恢复速度差很多：前者要等窗口滚动或加额，后者只需换一把 key。
+// 分类方知道是哪种，把时长交给它定；未声明时由调用方用自己配置的默认冷却。
+type CredentialCooldown interface {
+	CredentialCooldown() time.Duration
+}
+
+// CredentialCooldownOf 返回错误建议的凭据停用时长。
+//
+// 未声明该能力或给出的值非正时返回 0，调用方据此回落到自己的默认冷却：
+// 「没意见」与「零时长」对调用方是同一种含义，不必区分。
+func CredentialCooldownOf(err error) time.Duration {
+	var cooldown CredentialCooldown
+	if !errors.As(err, &cooldown) {
+		return 0
+	}
+	d := cooldown.CredentialCooldown()
+	if d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// FailureClass 是上游错误可选实现的能力：声明本次失败的分类名。
+//
+// 分类名只用于观测与排障（写进尝试日志的 failure_class），不参与任何控制流：
+// 要不要换凭据、冷却多久，分别由 CredentialRejected 与 CredentialCooldown 回答。
+type FailureClass interface {
+	FailureClass() string
+}
+
+// FailureClassOf 返回错误声明的失败分类名；未声明时返回空串。
+func FailureClassOf(err error) string {
+	var class FailureClass
+	if !errors.As(err, &class) {
+		return ""
+	}
+	return class.FailureClass()
+}
+
 // CredentialRenewed 报告错误是否明确表示上游已续期本次凭据的登录态。
 //
 // 与 CredentialRejected 同一机制：生产者是拿到信标头的一方，domain 只提供结构匹配的读取入口。
 // 判据同样宁窄勿宽：只有生产者确认「该凭据已续期」才返回 true，未被确认的一律 false，
 // 调用方不得据此解除冷却。
+
+// CredentialRenewed 报告错误是否明确表示上游已续期本次凭据的登录态。
 func CredentialRenewed(err error) bool {
 	var renewal CredentialRenewal
 	if !errors.As(err, &renewal) {

@@ -532,8 +532,11 @@ type AttemptRecord struct {
 	// 流式路径上是上游错误帧给出的原文。成功尝试或上游未返回可读报文时为空串。
 	// 内容来自上游响应，不含本网关注入的凭据与请求头；长度由各生产端自行约束。
 	ErrorDetail string
-	StartedAt   time.Time
-	EndedAt     time.Time
+	// FailureClass 是本次失败的分类名（如 quota、credit、rate_limit），由上游分类器给出，
+	// 未归类时为空串。它只描述事实、不参与控制流，供按类聚合与后续调参。
+	FailureClass string
+	StartedAt    time.Time
+	EndedAt      time.Time
 	// RateLimitWait 是本次尝试在渠道限流器上等待令牌与并发位的时长；0 表示未等待
 	// （令牌即时可用、渠道未配置限流或本次尝试未进入限流器）。
 	// 等待超时的失败尝试另在 ErrorCode 上体现为 upstream_rate_limited。

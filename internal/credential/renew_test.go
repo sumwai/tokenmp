@@ -24,7 +24,7 @@ func TestRotatorRenewClearsCooling(t *testing.T) {
 		t.Fatal("凭据类失败后 first 应处于冷却")
 	}
 	// 另一把凭据的冷却不应被续期动作连带解除。
-	r.markCooling("merchant-1", "second")
+	r.markCooling("merchant-1", "second", time.Minute)
 
 	r.Renew(ctx, route)
 

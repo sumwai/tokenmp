@@ -180,7 +180,7 @@ func (r *Rotator) Advance(ctx context.Context, route domain.Route, failure error
 		return ctx, false
 	}
 	if failed := state.current; failed != nil {
-		r.markCooling(state.group.Scope, failed.Name)
+		r.markCooling(state.group.Scope, failed.Name, r.cooldownFor(failure))
 		r.logSwitch(route, *failed, state.tried, len(state.order))
 	}
 	if state.tried >= len(state.order) {
@@ -348,8 +348,19 @@ func (r *Rotator) advanceCursor(key string) uint64 {
 	return cursor
 }
 
+// cooldownFor 取本次失败该把凭据停用多久：
+//
+// 失败分类方知道「这是额度用尽还是密钥失效」，两者的恢复速度差很多，所以由它给出建议；
+// 未给出建议（未声明能力或值非正）时回落到配置的默认冷却。
+func (r *Rotator) cooldownFor(failure error) time.Duration {
+	if d := domain.CredentialCooldownOf(failure); d > 0 {
+		return d
+	}
+	return r.cooldown
+}
+
 // markCooling 把一条凭据标记为冷却到 now+cooldown。
-func (r *Rotator) markCooling(scope, name string) {
+func (r *Rotator) markCooling(scope, name string, cooldown time.Duration) {
 	if name == "" {
 		// 名字缺失时无法定位冷却对象：宁可不冷却，也不要冷却到同组的其它凭据。
 		return
@@ -357,7 +368,7 @@ func (r *Rotator) markCooling(scope, name string) {
 	key := coolingKey(scope, name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cooling[key] = r.clock().Add(r.cooldown)
+	r.cooling[key] = r.clock().Add(cooldown)
 }
 
 // clearCooling 解除一条凭据的冷却，返回它此前是否处于冷却中。

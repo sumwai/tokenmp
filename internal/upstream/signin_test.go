@@ -16,8 +16,9 @@ func signinTestHeader() domain.SigninHeader {
 
 // TestDecideCredentialOutcomeMatrix 覆盖判定优先级矩阵：信标 × 状态码，含未声明配置的回退。
 //
-// 判据：命中信标头时以信标为准（expired 拒绝、kept 不拒绝、renewed 请求解除冷却）；
-// 未声明信标头或取值未命中时回退到 isCredentialRejection，与未引入信标头时完全一致。
+// 判据：命中信标头时以信标为准（expired 拒绝、kept 不拒绝、renewed 请求解除冷却），
+// 且此时不附失败分类 —— 厂商已经声明了语义，另由状态码推一个分类只会自相矛盾；
+// 未声明信标头或取值未命中时回退到 classifyUpstreamFailure，分类与拒绝结论一同给出。
 func TestDecideCredentialOutcomeMatrix(t *testing.T) {
 	const authBody = `{"error":{"type":"authentication_error"}}`
 	const requestBody = `{"error":{"type":"invalid_request_error"}}`
@@ -30,17 +31,18 @@ func TestDecideCredentialOutcomeMatrix(t *testing.T) {
 		body   string
 		want   credentialOutcome
 	}{
-		// 未声明配置：全部回退到状态码启发式。
-		{name: "无配置 401", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true}},
-		{name: "无配置 403", status: http.StatusForbidden, want: credentialOutcome{rejected: true}},
-		{name: "无配置 400 认证字面量", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{rejected: true}},
+		// 未声明配置：全部回退到报文与状态码分类。
+		{name: "无配置 401", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
+		{name: "无配置 403", status: http.StatusForbidden, want: credentialOutcome{rejected: true, failure: failureAuth}},
+		{name: "无配置 400 认证字面量", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{rejected: true, failure: failureAuth}},
 		{name: "无配置 400 参数错误", status: http.StatusBadRequest, body: requestBody, want: credentialOutcome{rejected: false}},
-		{name: "无配置 429", status: http.StatusTooManyRequests, want: credentialOutcome{rejected: false}},
+		{name: "无配置 429", status: http.StatusTooManyRequests, want: credentialOutcome{rejected: false, failure: failureRateLimit}},
+		// 500 与其它 5xx 不进体扫描：上游自身故障里碰到同名字面量不代表凭据有问题。
 		{name: "无配置 500 认证字面量", status: http.StatusInternalServerError, body: authBody, want: credentialOutcome{rejected: false}},
 		// 已声明配置但取值未命中：同样回退。
-		{name: "取值未命中 401 回退", signin: signinTestHeader(), value: "other", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true}},
+		{name: "取值未命中 401 回退", signin: signinTestHeader(), value: "other", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
 		{name: "取值未命中 200 回退", signin: signinTestHeader(), value: "other", status: http.StatusOK, want: credentialOutcome{rejected: false}},
-		{name: "响应未带信标头 401 回退", signin: signinTestHeader(), status: http.StatusUnauthorized, want: credentialOutcome{rejected: true}},
+		{name: "响应未带信标头 401 回退", signin: signinTestHeader(), status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
 		// expired：优先于状态码结论。
 		{name: "expired 200 也拒绝", signin: signinTestHeader(), value: "expired", status: http.StatusOK, want: credentialOutcome{rejected: true}},
 		{name: "expired 401", signin: signinTestHeader(), value: "expired", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true}},
