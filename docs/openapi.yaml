@@ -10,21 +10,22 @@ info:
   title: TokenMP 数据面
   version: "0"
   description: |
-    TokenMP 是面向大模型 API 的转发网关，对外暴露一个健康检查、三个转发端点与一个账户自助查询端点：
+    TokenMP 是面向大模型 API 的转发网关，对外暴露一个健康检查、四个转发端点与一个账户自助查询端点：
 
     - `POST /v1/chat/completions` — OpenAI Chat Completions 方言
     - `POST /v1/responses` — OpenAI Responses 方言
     - `POST /v1/messages` — Anthropic Messages 方言
+    - `POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` — Gemini 方言
     - `GET /v1/me/account` — 调用方账户的自助查询（余额、包存量、限额窗口与最近流水）
 
-    三个转发端点共用一条转发流水线：Bearer 鉴权 → 额度预检与窗口限额 → 选路 →
-    请求定稿 → 上游调用与候选回退 → 响应回写。同一份内部请求/响应/用法格式在三方言之间转换，
+    四个转发端点共用一条转发流水线：Bearer 鉴权 → 额度预检与窗口限额 → 选路 →
+    请求定稿 → 上游调用与候选回退 → 响应回写。同一份内部请求/响应/用法格式在四方言之间转换，
     因此同一渠道可以承接来自任一方言的请求，这就是跨协议降级。
 
-    行为细节（三方言的参数处理清单、模型名替换、跨协议降级的客户端可观察行为、
+    行为细节（四方言的参数处理清单、模型名替换、跨协议降级的客户端可观察行为、
     用量分量与计费关系、错误码表）见 [docs/compatibility.md](compatibility.md)。
 
-    三个端点的路径与请求体字段名是固定契约；未知字段一律忽略而不是拒绝，
+    转发端点的路径与请求体字段名是固定契约；未知字段一律忽略而不是拒绝，
     这是对上游协议持续扩展的兼容口径。
 servers:
   - url: http://localhost:8080
@@ -39,6 +40,8 @@ tags:
     description: OpenAI Responses 方言
   - name: anthropic-messages
     description: Anthropic Messages 方言
+  - name: gemini-generate
+    description: Gemini generateContent 方言
   - name: account
     description: 账户自助查询
 
@@ -255,7 +258,7 @@ paths:
       summary: 账户自助查询
       description: |
         返回调用方账户的摘要：账户 id 与 code、可用包存量、生效中的窗口限额与最近流水。
-        与三个转发端点共用同一鉴权中间件，因此 401 口径完全一致；鉴权通过后的额度预检、
+        与转发端点共用同一鉴权中间件，因此 401 口径完全一致；鉴权通过后的额度预检、
         窗口限额判定同样生效，账户无可用额度或已超限时本端点也会回 402 / 429。
         错误体使用共享 `ErrorEnvelope`，与请求方言无关。
 
@@ -301,6 +304,123 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /v1beta/models/{model}:generateContent:
+    post:
+      tags: [gemini-generate]
+      summary: Gemini generateContent 转发（非流式）
+      description: |
+        请求体按 [GeminiGenerateRequest](#/components/schemas/GeminiGenerateRequest) 解码；未知字段忽略。
+        模型名由路径的 `{model}` 给出，请求体没有 `model` 字段；渠道配置了上游模型名时，
+        替换发生在发往上游的路径上。客户端路径里的模型名即选路键，与既有方言一致。
+      operationId: geminiGenerateContent
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 客户端请求的模型别名（选路键）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeminiGenerateRequest'
+      responses:
+        '200':
+          description: 返回 [GeminiGenerateResponse](#/components/schemas/GeminiGenerateResponse)。
+          headers:
+            x-tokenmp-routed-model:
+              $ref: '#/components/headers/RoutedModel'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeminiGenerateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      tags: [gemini-generate]
+      summary: Gemini generateContent 转发（流式）
+      description: |
+        与 `:generateContent` 同形，流式由路径后缀与 `alt=sse` 表达（请求体没有 `stream` 字段）。
+        响应为 SSE：每帧形如 `data: <JSON>\n\n`，没有具名事件；末尾帧带 `finishReason` 与
+        `usageMetadata`，流以连接关闭为终点。用量是协议固有部分，无论客户端是否索取都会出现。
+      operationId: geminiStreamGenerateContent
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 客户端请求的模型别名（选路键）。
+        - name: alt
+          in: query
+          required: false
+          schema:
+            type: string
+            const: sse
+          description: Gemini 流式端点使用 SSE 时固定为 `sse`；网关向上游转发时同样带上该参数。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeminiGenerateRequest'
+      responses:
+        '200':
+          description: |
+            `text/event-stream`。每帧形如 `data: <JSON>\n\n`，JSON 为增量或末尾的
+            [GeminiGenerateResponse](#/components/schemas/GeminiGenerateResponse) 片段；
+            末尾帧带 `finishReason` 与 `usageMetadata`。本方言没有流内错误帧，
+            中止时网关直接关闭连接。
+          headers:
+            x-tokenmp-routed-model:
+              $ref: '#/components/headers/RoutedModel'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
 
 components:
   securitySchemes:
@@ -377,6 +497,30 @@ components:
                 `rate_limit_error`、`not_found_error` 或 `api_error`。
             message:
               type: string
+          additionalProperties: false
+      additionalProperties: false
+
+    GeminiErrorEnvelope:
+      type: object
+      description: |
+        Gemini generateContent 方言的错误体。`status` 是 gRPC 状态名，
+        `code` 是同一事实的 HTTP 状态码；统一错误码不直接对外出现。
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, status]
+          properties:
+            code:
+              type: integer
+              description: HTTP 状态码。
+            message:
+              type: string
+            status:
+              type: string
+              description: |
+                `INVALID_ARGUMENT`、`UNAUTHENTICATED`、`PERMISSION_DENIED`、`NOT_FOUND`、
+                `RESOURCE_EXHAUSTED`、`DEADLINE_EXCEEDED`、`UNAVAILABLE` 或 `INTERNAL`。
           additionalProperties: false
       additionalProperties: false
 
@@ -1322,17 +1466,181 @@ components:
           description: 本次应扣量，即 `gross_amount × multiplier`，十进制字符串。
       additionalProperties: false
 
+    # ------------------------------------------------------------------
+    # Gemini generateContent
+    # ------------------------------------------------------------------
+    GeminiContent:
+      type: object
+      description: |
+        一条 Gemini 会话内容。角色只有 `user` 与 `model`，省略按 `user` 处理；
+        内部 system 消息单独在 `systemInstruction` 里表达。
+      properties:
+        role:
+          type: string
+          description: '`user` 或 `model`；省略按 `user` 处理。'
+        parts:
+          type: array
+          items:
+            type: object
+            properties:
+              text:
+                type: string
+              inlineData:
+                type: object
+                required: [mimeType, data]
+                properties:
+                  mimeType:
+                    type: string
+                  data:
+                    type: string
+                additionalProperties: false
+              fileData:
+                type: object
+                required: [fileUri]
+                properties:
+                  mimeType:
+                    type: string
+                  fileUri:
+                    type: string
+                additionalProperties: false
+              functionCall:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+                  args:
+                    type: object
+                additionalProperties: false
+              functionResponse:
+                type: object
+                required: [name]
+                properties:
+                  name:
+                    type: string
+                  response:
+                    type: object
+                additionalProperties: false
+            additionalProperties: true
+      additionalProperties: true
+
+    GeminiGenerateRequest:
+      type: object
+      description: |
+        Gemini generateContent 请求体。模型名不在请求体里，由 URL 路径的 `{model}` 给出；
+        流式由路径后缀与 `alt=sse` 表达，没有 `stream` 字段。`contents` 必填。
+      properties:
+        systemInstruction:
+          $ref: '#/components/schemas/GeminiContent'
+        contents:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeminiContent'
+        tools:
+          type: array
+          items:
+            type: object
+            properties:
+              functionDeclarations:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    description:
+                      type: string
+                    parameters:
+                      type: object
+                  additionalProperties: true
+            additionalProperties: true
+        toolConfig:
+          type: object
+          properties:
+            functionCallingConfig:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  description: |
+                    `AUTO`、`ANY`、`NONE`；`ANY` 且只允许一个函数名时映射为内部「指定工具」，
+                    其余映射为「必须调用至少一个工具」。未识别模式回 `invalid_request`。
+                allowedFunctionNames:
+                  type: array
+                  items:
+                    type: string
+              additionalProperties: true
+          additionalProperties: true
+        generationConfig:
+          type: object
+          properties:
+            maxOutputTokens:
+              type: integer
+              minimum: 0
+            temperature:
+              type: number
+          additionalProperties: true
+      additionalProperties: true
+
+    GeminiUsage:
+      type: object
+      description: |
+        Gemini 用量。`cachedContentTokenCount` 与 `thoughtsTokenCount` 已包含在
+        `promptTokenCount` 与 `candidatesTokenCount` 内，不再叠加进 `totalTokenCount`。
+      properties:
+        promptTokenCount:
+          type: integer
+          minimum: 0
+        candidatesTokenCount:
+          type: integer
+          minimum: 0
+        totalTokenCount:
+          type: integer
+          minimum: 0
+        cachedContentTokenCount:
+          type: integer
+          minimum: 0
+        thoughtsTokenCount:
+          type: integer
+          minimum: 0
+      additionalProperties: true
+
+    GeminiGenerateResponse:
+      type: object
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              content:
+                $ref: '#/components/schemas/GeminiContent'
+              finishReason:
+                type: string
+                description: |
+                  `STOP`、`MAX_TOKENS`、`SAFETY` 等；无法识别的结束原因省略该字段。
+              index:
+                type: integer
+            additionalProperties: true
+        usageMetadata:
+          $ref: '#/components/schemas/GeminiUsage'
+        modelVersion:
+          type: string
+      additionalProperties: true
+
   responses:
     BadRequest:
       description: |
         请求体不是合法 JSON，或缺少必填字段、字段取值非法。错误码 `invalid_request`。
-        响应体形态随方言：OpenAI 系为 `ErrorEnvelope`，Anthropic 为 `AnthropicErrorEnvelope`。
+        响应体形态随方言：OpenAI 系为 `ErrorEnvelope`，Anthropic 为 `AnthropicErrorEnvelope`，
+        Gemini 为 `GeminiErrorEnvelope`。
       content:
         application/json:
           schema:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     Unauthorized:
       description: |
@@ -1361,6 +1669,7 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     MethodNotAllowed:
       description: |
@@ -1372,6 +1681,7 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     TooManyRequests:
       description: |
@@ -1394,6 +1704,7 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     BadGateway:
       description: |
@@ -1405,6 +1716,7 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     ServiceUnavailable:
       description: |
@@ -1415,6 +1727,7 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
 
     GatewayTimeout:
       description: |
@@ -1425,3 +1738,5 @@ components:
             oneOf:
               - $ref: '#/components/schemas/ErrorEnvelope'
               - $ref: '#/components/schemas/AnthropicErrorEnvelope'
+              - $ref: '#/components/schemas/GeminiErrorEnvelope'
+
