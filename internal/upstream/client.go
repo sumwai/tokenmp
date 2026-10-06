@@ -134,6 +134,8 @@ func New(opts Options) (*Client, error) {
 //   - 5xx 与其它非 2xx 记为可重试的上游不可用
 //
 // 凭据类判定优先级为「命中渠道声明的信标头 > 状态码启发式」，见 decideCredentialOutcome。
+// 2xx 响应只消费 renewed 结论（见 UpstreamResult.CredentialRenewed）：成功的上游调用没有失败可判定，
+// expired / kept 不适用于成功响应，不据此冷却本次凭据。
 //
 // 响应头中携带合法 Retry-After 时，返回的错误额外实现 RetryAfter 能力（见 retryAfterError），
 // 把上游建议的退避时长交给调用方；是否据此等待由调用方决定。
