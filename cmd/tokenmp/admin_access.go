@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -24,6 +26,8 @@ func adminCredential(ctx context.Context, args []string, env *adminEnv) int {
 		return adminCredentialList(ctx, rest, env)
 	case actionDisable:
 		return adminCredentialDisable(ctx, rest, env)
+	case actionOAuthLogin:
+		return adminCredentialOAuthLogin(ctx, rest, env)
 	default:
 		return env.usageErrorf("credential 未知动作 %q", action)
 	}
@@ -93,6 +97,61 @@ func adminCredentialDisable(ctx context.Context, args []string, env *adminEnv) i
 		return env.fail(err)
 	}
 	return env.printf("已停用凭据 id=%d\n", *id)
+}
+
+// adminCredentialOAuthLogin 执行一次 OAuth 登录并写入凭据。
+//
+// 用法兼容两种参数顺序：`oauth-login <group> --merchant <id>`（组名在前）与
+// `oauth-login --merchant <id> <group>`（flags 在前）。
+// 输出只含 group 与 account 标识，不回显任何令牌。
+func adminCredentialOAuthLogin(ctx context.Context, args []string, env *adminEnv) int {
+	fs := env.newFlagSet("admin credential oauth-login")
+	merchant := fs.Uint64(flagMerchant, 0, "归属商家 id")
+	name := fs.String(flagName, "", "凭据名（默认取 account）")
+	account := fs.String(flagAccount, "", "账户标识（端点未返回时使用）")
+	code := fs.String(flagCode, "", "授权码；留空时从标准输入读")
+
+	group := ""
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		group = args[0]
+		rest = args[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return exitUsage
+	}
+	if group == "" && fs.NArg() > 0 {
+		group = fs.Arg(0)
+	}
+	if strings.TrimSpace(group) == "" {
+		return env.usageError("credential oauth-login 需要凭据分组")
+	}
+
+	hooks := admin.OAuthLoginHooks{
+		OnDeviceCode: func(verificationURI, userCode string) {
+			_, _ = fmt.Fprintf(env.stdout, "请在浏览器打开 %s 并输入用户码 %s\n", verificationURI, userCode)
+		},
+		OnAuthorizeURL: func(authorizeURL string) {
+			_, _ = fmt.Fprintf(env.stdout, "请在浏览器打开授权地址：%s\n", authorizeURL)
+		},
+		ReadCode: func() (string, error) {
+			_, _ = io.WriteString(env.stdout, "粘贴回调地址里的 code 后回车：")
+			line, err := bufio.NewReader(env.stdin).ReadString('\n')
+			return line, err
+		},
+	}
+	result, err := env.service.OAuthLogin(ctx, admin.OAuthLoginInput{
+		MerchantID: *merchant,
+		Group:      group,
+		Name:       *name,
+		Account:    *account,
+		Code:       *code,
+	}, hooks)
+	if err != nil {
+		return env.fail(err)
+	}
+	return env.printf("OAuth 登录完成：id=%d group=%s account=%s flow=%s\n",
+		result.ID, result.Group, result.Account, result.Flow)
 }
 
 func adminModelMap(ctx context.Context, args []string, env *adminEnv) int {

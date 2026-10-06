@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -36,7 +37,7 @@ func (s *Service) AddCredential(ctx context.Context, in CredentialInput) (uint64
 		return 0, err
 	}
 	//nolint:gosec // G117：这是写入库表的凭据 JSON，字段名由协议约定，不是硬编码凭据。
-	secret, err := json.Marshal(credentialSecret{APIKey: in.APIKey})
+	secret, err := credential.BuildAPISecret(in.APIKey)
 	if err != nil {
 		return 0, fmt.Errorf("admin: 编码凭据 secret 失败: %w", err)
 	}
@@ -56,12 +57,16 @@ func (s *Service) ListCredentials(ctx context.Context) ([]CredentialView, error)
 	}
 	views := make([]CredentialView, 0, len(rows))
 	for _, row := range rows {
+		kind, expires, expired := credentialState(row.Secret)
 		views = append(views, CredentialView{
 			ID:         row.ID,
 			MerchantID: row.MerchantID,
 			CredGroup:  row.CredGroup,
 			Name:       row.Name,
+			Kind:       kind,
 			Prefix:     maskSecret(row.Secret),
+			Expires:    expires,
+			Expired:    expired,
 			Enabled:    row.Enabled,
 		})
 	}

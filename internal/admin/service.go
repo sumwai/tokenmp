@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/billing"
+	"github.com/sumwai/tokenmp/internal/oauth"
 	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -37,6 +38,8 @@ type Store interface {
 	InsertCredential(ctx context.Context, c store.CredentialRow) (uint64, error)
 	ListCredentials(ctx context.Context) ([]store.CredentialRow, error)
 	SetCredentialEnabled(ctx context.Context, id uint64, enabled bool) error
+	// ChannelConfigByCredGroup 读凭据分组对应渠道的 config JSON，供 OAuth 登录取端点画像。
+	ChannelConfigByCredGroup(ctx context.Context, merchantID uint64, credGroup string) ([]byte, error)
 
 	// 渠道模型映射。
 	UpsertModelMap(ctx context.Context, m store.ModelMap) (uint64, error)
@@ -103,6 +106,8 @@ type Store interface {
 type Service struct {
 	store Store
 	now   func() time.Time
+	// oauth 是 OAuth 协议客户端，供 credential oauth-login 使用。
+	oauth *oauth.Client
 }
 
 // Option 调整 Service 的可注入依赖。
@@ -117,9 +122,18 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithOAuthClient 注入 OAuth 协议客户端，供测试指向假端点。
+func WithOAuthClient(client *oauth.Client) Option {
+	return func(s *Service) {
+		if client != nil {
+			s.oauth = client
+		}
+	}
+}
+
 // New 构造管理面服务；未注入时钟时取系统时钟。
 func New(st Store, opts ...Option) *Service {
-	s := &Service{store: st, now: time.Now}
+	s := &Service{store: st, now: time.Now, oauth: oauth.New(oauth.Options{})}
 	for _, opt := range opts {
 		opt(s)
 	}
