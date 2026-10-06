@@ -565,6 +565,33 @@ func (s *Store) ListAccounts(ctx context.Context) ([]Account, error) {
 	return listAccounts(ctx, dbQuerier{db: s.db})
 }
 
+const accountByIDSQL = `SELECT id, code, name, default_merchant_id, price_multiplier, status
+FROM account WHERE id = ?`
+
+// Account 按 id 查账户；无匹配时错误可用 errors.Is(err, sql.ErrNoRows) 判断。
+//
+// 自助查询端点只用得到 id 与 code，但仍返回整行：账户行本身没有敏感字段，
+// 按端点裁剪列会让同一张表出现两份列清单，加列时容易只改一处。
+func (s *Store) Account(ctx context.Context, id uint64) (*Account, error) {
+	if id == 0 {
+		return nil, errors.New("store: account.id 不能为 0")
+	}
+	var (
+		a        Account
+		merchant sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, accountByIDSQL, id).Scan(
+		&a.ID, &a.Code, &a.Name, &merchant, &a.PriceMultiplier, &a.Status)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 account 失败: %w", err)
+	}
+	if merchant.Valid && merchant.Int64 > 0 {
+		v := uint64(merchant.Int64)
+		a.DefaultMerchantID = &v
+	}
+	return &a, nil
+}
+
 const setAccountStatusSQL = "UPDATE account SET status = ? WHERE id = ?"
 const setAccountMultiplierSQL = "UPDATE account SET price_multiplier = ? WHERE id = ?"
 const setAccountMerchantSQL = "UPDATE account SET default_merchant_id = ? WHERE id = ?"
@@ -1143,6 +1170,11 @@ func listUsage(ctx context.Context, q querier, accountID uint64, since time.Time
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 billing_usage 失败: %w", err)
 	}
+	return scanUsageRows(rows)
+}
+
+// scanUsageRows 解析流水结果集；列表查询与最近流水查询共用同一份行解析。
+func scanUsageRows(rows rowIter) ([]UsageListRow, error) {
 	defer func() { _ = rows.Close() }()
 
 	var records []UsageListRow
@@ -1171,6 +1203,26 @@ func listUsage(ctx context.Context, q querier, accountID uint64, since time.Time
 // ListUsage 列出用量流水；accountID 为 0 时列出全部，since 为零值时不做时间过滤。
 func (s *Store) ListUsage(ctx context.Context, accountID uint64, since time.Time) ([]UsageListRow, error) {
 	return listUsage(ctx, dbQuerier{db: s.db}, accountID, since)
+}
+
+const recentUsageSQL = listUsageSQL + " WHERE account_id = ? ORDER BY id DESC LIMIT ?"
+
+// RecentUsage 按 id 倒序读账户最近的若干条流水。
+//
+// limit <= 0 时返回空集：调用方传 0 表示不需要流水，不必到数据库空跑一次。
+// 金额与倍率保持库中文本，由调用方决定怎么折算成付费金额。
+func (s *Store) RecentUsage(ctx context.Context, accountID uint64, limit int) ([]UsageListRow, error) {
+	if accountID == 0 {
+		return nil, errors.New("store: billing_usage.account_id 不能为 0")
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, recentUsageSQL, accountID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 billing_usage 失败: %w", err)
+	}
+	return scanUsageRows(rows)
 }
 
 const listAdjustmentsSQL = `SELECT id, account_id, delta_amount, reason, operator, created_at FROM billing_adjustment`
