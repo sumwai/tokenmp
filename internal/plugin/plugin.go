@@ -279,17 +279,22 @@ func readEvents(runtime *moejs.Runtime) map[string]bool {
 	return events
 }
 
-// readOptions 读出模块导出的 options 配置；未导出或形状非预期时返回 nil。
+// readOptions 读出模块导出的 options 配置；未导出或形状非预期时返回空对象。
+//
+// 返回空对象而不是 nil：ctx.options 始终是个可读属性，插件不必先判空。
 func readOptions(runtime *moejs.Runtime) map[string]any {
+	options := map[string]any{}
 	value, ok := runtime.Export(exportOptions)
 	if !ok {
-		return nil
+		return options
 	}
 	raw, err := runtime.ToGo(value)
 	if err != nil {
-		return nil
+		return options
 	}
-	options, _ := raw.(map[string]any)
+	if parsed, ok := raw.(map[string]any); ok {
+		return parsed
+	}
 	return options
 }
 
