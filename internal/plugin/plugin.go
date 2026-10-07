@@ -58,8 +58,11 @@ const (
 	hookOnRequest  = "onRequest"
 	hookOnEvent    = "onEvent"
 	hookOnResponse = "onResponse"
-	exportEvents   = "events"
-	exportOptions  = "options"
+	// hookOnStreamEnd 是流末补发钩子：逐事件钩子拿不到流结束分片，
+	// 跨分片缓冲的改写靠它在终止帧前冲刷尾巴。
+	hookOnStreamEnd = "onStreamEnd"
+	exportEvents    = "events"
+	exportOptions   = "options"
 )
 
 // Options 是加载中间件的可调参数；零值字段取对应默认值。
@@ -132,18 +135,20 @@ func (s *Set) Empty() bool {
 
 // compiled 是一次编译产物：链接后的模块、依赖指纹与已解析的钩子。
 type compiled struct {
-	module       *moejs.Module
-	deps         []string
-	stamps       map[string]fileStamp
-	onRequest    moejs.Hook
-	hasOnRequest bool
-	onEvent      moejs.Hook
-	hasOnEvent   bool
-	onResponse   moejs.Hook
-	hasResponse  bool
-	events       map[string]bool
-	eventsList   []string
-	options      map[string]any
+	module         *moejs.Module
+	deps           []string
+	stamps         map[string]fileStamp
+	onRequest      moejs.Hook
+	hasOnRequest   bool
+	onEvent        moejs.Hook
+	hasOnEvent     bool
+	onResponse     moejs.Hook
+	hasResponse    bool
+	onStreamEnd    moejs.Hook
+	hasOnStreamEnd bool
+	events         map[string]bool
+	eventsList     []string
+	options        map[string]any
 }
 
 // handles 报告事件白名单是否覆盖该事件名。
@@ -210,6 +215,9 @@ func (m *Middleware) assemble() (*compiled, error) {
 		return nil, err
 	}
 	if result.onResponse, result.hasResponse, err = resolveHook(module, hookOnResponse); err != nil {
+		return nil, err
+	}
+	if result.onStreamEnd, result.hasOnStreamEnd, err = resolveHook(module, hookOnStreamEnd); err != nil {
 		return nil, err
 	}
 	events, options, err := m.probeExports(module)
@@ -389,6 +397,9 @@ func (m *Middleware) info() Info {
 		}
 		if comp.hasResponse {
 			info.Hooks = append(info.Hooks, hookOnResponse)
+		}
+		if comp.hasOnStreamEnd {
+			info.Hooks = append(info.Hooks, hookOnStreamEnd)
 		}
 		info.Events = append(info.Events, comp.eventsList...)
 	}
@@ -584,6 +595,32 @@ func (s *Set) OnEvent(ctx context.Context, req *domain.Request, chunk domain.Chu
 		return domain.EventResult{Chunk: chunk, Unchanged: true}
 	}
 	return domain.EventResult{Chunk: current}
+}
+
+// OnStreamEnd 在流式响应结束前依次交给各中间件补发分片。
+//
+// 实现 domain.StreamEndMiddleware 这一可选端口：消费方是流水线的流式下沉目标，
+// 写出时机在终止帧之前。某条中间件失败只跳过它自己，其余中间件的补发照常进行。
+func (s *Set) OnStreamEnd(ctx context.Context, req *domain.Request) []domain.Chunk {
+	state := requestStateFromContext(ctx)
+	if state == nil {
+		return nil
+	}
+	var flushed []domain.Chunk
+	for _, runtime := range state.runtimes {
+		if !runtime.comp.hasOnStreamEnd {
+			continue
+		}
+		started := time.Now()
+		chunks, err := runtime.middleware.callStreamEnd(state, runtime, req)
+		runtime.middleware.stats.record(time.Since(started), err)
+		if err != nil {
+			runtime.middleware.logHookFailure(hookOnStreamEnd, err)
+			continue
+		}
+		flushed = append(flushed, chunks...)
+	}
+	return flushed
 }
 
 // OnResponse 在非流式响应体写回客户端之前依次交给各中间件改写。

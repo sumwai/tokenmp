@@ -267,6 +267,51 @@ func (m *Middleware) callEvent(state *requestState, runtime *requestRuntime, req
 	return &rewritten, false, nil
 }
 
+// callStreamEnd 调用一次 onStreamEnd，返回待补发的分片；无补发时返回 nil。
+//
+// undefined 与 null 都表示无补发。返回值必须是分片对象数组：非数组、含非对象项或分片
+// kind 非法都按失败处理，由调用方跳过该中间件（不补发，也不向客户端报错）。
+// 超时预算与逐事件钩子相同：它同样处在流式热路径上，只是每请求只跑一次。
+func (m *Middleware) callStreamEnd(state *requestState, runtime *requestRuntime, req *domain.Request) ([]domain.Chunk, error) {
+	ctxValue, err := m.buildContext(state, runtime, req)
+	if err != nil {
+		return nil, err
+	}
+	var result moejs.Value
+	err = withTimeout(m.opts.EventTimeout, runtime.runtime, func() error {
+		var callErr error
+		result, callErr = runtime.runtime.Call(runtime.comp.onStreamEnd, ctxValue)
+		return callErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result.IsUndefined() || result.IsNull() {
+		return nil, nil
+	}
+	raw, err := runtime.runtime.ToGo(result)
+	if err != nil {
+		return nil, err
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s 返回值不是数组", hookOnStreamEnd)
+	}
+	chunks := make([]domain.Chunk, 0, len(items))
+	for index, item := range items {
+		fields, isObject := item.(map[string]any)
+		if !isObject {
+			return nil, fmt.Errorf("%s 的第 %d 项不是对象", hookOnStreamEnd, index)
+		}
+		chunk, isChunk := chunkFromMap(fields)
+		if !isChunk {
+			return nil, fmt.Errorf("%s 的第 %d 项缺少合法的 kind", hookOnStreamEnd, index)
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks, nil
+}
+
 // chunkToMap 把内部流式分片转成传给插件的 Go map。
 //
 // 只用内容分片携带的字段：用量与结束原因不属于逐事件钩子的输入。

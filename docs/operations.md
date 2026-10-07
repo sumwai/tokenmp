@@ -495,7 +495,7 @@ serve 启动后立即采一轮，随后按周期执行。探针报满额且快�
 ### 9.1 写一个中间件文件
 
 中间件是单文件 `*.mw.js`（或 `*.mw.mjs`、带 `package.json` 入口的目录）。导出可选的
-`onRequest` / `onEvent` / `onResponse` 三个函数，并用 `events` 声明逐事件钩子的白名单：
+`onRequest` / `onEvent` / `onStreamEnd` / `onResponse` 四个函数，并用 `events` 声明逐事件钩子的白名单：
 
 ```js
 // /path/to/example.mw.js
@@ -515,6 +515,11 @@ export function onEvent(event, ctx) {
     return null;
   }
   return event;
+}
+
+export function onStreamEnd(ctx) {
+  // 返回待补发的分片数组，写出时机在终止帧之前。跨分片缓冲的尾巴在这里冲掉。
+  return [];
 }
 
 export function onResponse(body, ctx) {
@@ -545,3 +550,120 @@ example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_del
 `plugin list` 只读配置、不连数据库，未配置时只输出表头。`calls` / `failures` /
 `average_ms` 是加载中间件那个进程的累计值，独立执行一次 `admin plugin list` 通常只看得到
 清单，计数为零；`last_error` 是该中间件最近一次钩子失败的文案。
+
+### 9.4 样例：把 think 标签搬进 reasoning_content
+
+部分上游把推理内联在正文里、用 `<think>…</think>` 包裹（MiniMax 官方 OpenAI 兼容端点即如此），
+且不提供 `reasoning_content`。下面这个中间件把推理搬进官方字段，两条路径都覆盖。
+
+关键在流式的缓冲策略：`onEvent` 一次只能回一个分片，而一帧可能同时含“推理尾”与“正文头”
+（MiniMax 就是 `"</think>\n\n2+2 = 4"` 一帧），所以正文先寄存在 `carry` 里，跟下一帧一起发。
+另外只能缓冲「可能是个不完整标签的后缀」——把整个思考块攼到 `</think>` 才发会让客户端在
+整个思考阶段收不到字节。
+
+```js
+// /path/to/think-tag.mw.js
+export const events = ["text_delta"];
+
+const OPEN = "<think>";
+const CLOSE = "</think>";
+
+// 单请求状态：mode 是 open / think / text，buf 是待处理尾巴，carry 是待转交的正文。
+function st(ctx) {
+  return (ctx.state.tt ??= { mode: "open", buf: "", carry: "" });
+}
+
+// 把寄存的正文接回本帧。
+function take(s, text) {
+  const out = s.carry + text;
+  s.carry = "";
+  return out;
+}
+
+export function onEvent(event, ctx) {
+  if (event.kind !== "text_delta") return event;
+  const s = st(ctx);
+  s.buf += event.text_delta;
+
+  if (s.mode === "open") {
+    // 还看不出是不是标签开头：先攼着，等下一帧。
+    if (s.buf.length < OPEN.length && OPEN.startsWith(s.buf)) return null;
+    s.mode = s.buf.startsWith(OPEN) ? "think" : "text";
+    if (s.mode === "think") s.buf = s.buf.slice(OPEN.length);
+  }
+
+  if (s.mode === "text") {
+    const out = take(s, s.buf);
+    s.buf = "";
+    return out === "" ? null : { kind: "text_delta", text_delta: out };
+  }
+
+  const at = s.buf.indexOf(CLOSE);
+  if (at < 0) {
+    // 只在确信不是标签前缀的范围内下发，末尾留 CLOSE.length-1 个字符放着。
+    const keep = CLOSE.length - 1;
+    if (s.buf.length <= keep) return null;
+    const emit = s.buf.slice(0, s.buf.length - keep);
+    s.buf = s.buf.slice(s.buf.length - keep);
+    return { kind: "reasoning_delta", text_delta: emit };
+  }
+
+  const reasoning = s.buf.slice(0, at);
+  s.carry = s.buf.slice(at + CLOSE.length);
+  s.buf = "";
+  s.mode = "text";
+  if (reasoning !== "") return { kind: "reasoning_delta", text_delta: reasoning };
+  const out = take(s, "");
+  return out === "" ? null : { kind: "text_delta", text_delta: out };
+}
+
+// 流末冲刷：这里发的分片会出现在终止帧之前。
+export function onStreamEnd(ctx) {
+  const s = st(ctx);
+  const out = take(s, s.buf);
+  const kind = s.mode === "think" ? "reasoning_delta" : "text_delta";
+  s.buf = "";
+  return out === "" ? [] : [{ kind, text_delta: out }];
+}
+
+// 非流式没有逐帧缓冲问题，直接在 JSON 上搬家。
+export function onResponse(body, ctx) {
+  const message = body && body.choices && body.choices[0] && body.choices[0].message;
+  if (!message || typeof message.content !== "string") return body;
+  let content = message.content;
+  let reasoning = "";
+  for (;;) {
+    const open = content.indexOf(OPEN);
+    if (open < 0) break;
+    const close = content.indexOf(CLOSE, open + OPEN.length);
+    if (close < 0) {
+      reasoning += content.slice(open + OPEN.length);
+      content = content.slice(0, open);
+      break;
+    }
+    reasoning += content.slice(open + OPEN.length, close);
+    content = content.slice(0, open) + content.slice(close + CLOSE.length);
+  }
+  if (reasoning === "") return body;
+  message.content = content.replace(/^\s+/, "");
+  message.reasoning_content = (message.reasoning_content || "") + reasoning;
+  return body;
+}
+```
+
+启用后，同一份上游数据在两条路径上都得到干净的 `content` 与独立的 `reasoning_content`：
+
+```
+$ TOKENMP_PLUGIN_FILES=/path/to/think-tag.mw.js tokenmp serve
+$ curl -s localhost:8080/v1/chat/completions -H 'Authorization: Bearer ***' \
+    -d '{"model":"MiniMax-M3","messages":[{"role":"user","content":"1+1=?"}]}' \
+  | jq '{content: .choices[0].message.content, reasoning: .choices[0].message.reasoning_content}'
+{
+  "content": "2",
+  "reasoning": "The user is asking \"1+1=?\"…"
+}
+```
+
+两点需要在启用前知道：中间件是**进程级**的，会对所有渠道的所有流式响应生效（靠 `events`
+声明的分片类型与标签特征判断，无标签时零改动）；不认 `reasoning_content` 的客户端在推理阶段
+收不到正文，看上去像串行了一下，那不是延迟而是内容换了字段。
