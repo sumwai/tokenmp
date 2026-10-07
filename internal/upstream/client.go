@@ -347,7 +347,7 @@ func (c *Client) idleTimeoutFor(route domain.Route) time.Duration {
 func mapTransportError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return failure.NewError(domain.CodeUpstreamTimeout, "上游调用超时", "", failure.ClassUpstream).WithCause(err)
+		return failure.NewError(domain.CodeUpstreamTimeout, "上游调用超时", "", failure.ClassTimeout).WithCause(err)
 	case errors.Is(err, context.Canceled) && ctx.Err() != nil:
 		// 调用方主动取消：既不是渠道的问题，也不该换渠道重试，因此不带任何类别。
 		return domain.NewError(domain.CodeInternal, "上游调用已取消").WithCause(err)

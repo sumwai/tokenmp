@@ -175,7 +175,7 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, req *domain.Req
 
 // streamTimeoutError 构造可重试的上游流式超时错误。
 func streamTimeoutError(cause error) error {
-	return failure.NewError(domain.CodeUpstreamTimeout, "上游流式调用超时", "", failure.ClassUpstream).WithCause(cause)
+	return failure.NewError(domain.CodeUpstreamTimeout, "上游流式调用超时", "", failure.ClassTimeout).WithCause(cause)
 }
 
 // classifyStreamReadError 把逐帧读取错误分类为可向上报告的统一错误。

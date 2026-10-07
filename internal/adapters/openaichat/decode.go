@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // DecodeRequest 把 OpenAI Chat Completions 请求体解码为内部统一请求。
@@ -636,17 +637,14 @@ func (a *Adapter) FinishStream() []domain.Chunk {
 
 // upstreamStreamError 把上游流式错误体转换为统一错误。
 //
-// 上游原文只进 Detail，不直接作为面向用户的 Message，与 OpenAI Responses 适配器保持同一口径。
-// 上游明确表示请求本身有问题时归为不可重试的 CodeUpstreamRejected：
-// 换渠道重试通常仍会失败，不应白白放大上游压力。
-func upstreamStreamError(body *errorBody) *domain.Error {
-	code := domain.CodeUpstreamUnavailable
-	if domain.NonRetryableUpstreamErrorType(body.Type) || domain.NonRetryableUpstreamErrorType(body.Code) {
-		code = domain.CodeUpstreamRejected
-	}
+// 上游原文只进 Detail，不直接作为面向用户的 Message，与 OpenAI Responses 适配器同一口径。
+// 归类交给 failure.ClassifyErrorEnvelope：它是出现在「本该成功的响应」里的错误信封，
+// 认不出的取值归上游故障（可换渠道），而不是按请求级错误终止。
+func upstreamStreamError(body *errorBody) error {
+	class := failure.ClassifyErrorEnvelope(body.Type, body.Code)
 	detail := fmt.Sprintf("上游错误 type=%q code=%q", body.Type, body.Code)
 	if message := strings.TrimSpace(body.Message); message != "" {
 		detail += " message=" + message
 	}
-	return domain.NewError(code, "上游流式响应返回错误").WithDetail(detail)
+	return failure.NewError(failure.CodeForClass(class), "上游流式响应返回错误", detail, class)
 }

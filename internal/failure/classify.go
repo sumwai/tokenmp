@@ -92,6 +92,9 @@ var codeRules = map[string]Class{
 	// 瞬时故障：换渠道可能成功，但不停用凭据。
 	"rate_limit_exceeded": ClassRateLimit,
 	"overloaded":          ClassRateLimit,
+	// 上游超时：单独成类，它对应 504 而非 502。
+	"deadline_exceeded": ClassTimeout,
+	"timeout":           ClassTimeout,
 	// 请求本身与上游能力不匹配。
 	"context_length_exceeded": ClassContextLength,
 	"model_not_found":         ClassModelUnavailable,
@@ -117,8 +120,10 @@ func ClassifyHTTP(status int, body []byte) Class {
 		return ClassAuth
 	}
 	switch {
-	case status == http.StatusRequestTimeout, status >= http.StatusInternalServerError:
-		// 超时与 5xx 都是上游侧故障：换渠道可能恢复，且该计入渠道健康度。
+	case status == http.StatusRequestTimeout:
+		return ClassTimeout
+	case status >= http.StatusInternalServerError:
+		// 5xx 是上游侧故障：换渠道可能恢复，且该计入渠道健康度。
 		return ClassUpstream
 	case status >= http.StatusBadRequest:
 		// 认不出的 4xx：多半是请求本身的问题，换渠道重试只会放大上游压力。

@@ -367,6 +367,56 @@ Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: tru
 - 上游未给出可用计数时（来源未知），token 分量全为 0，流水只带 `request: 1`。
 - 结算失败时退回占位口径只落用量，并记结构化错误日志。
 
+## 上游失败分类与处置
+
+上游失败的分类（这是什么失败）与处置（接下来做什么）统一由 `internal/failure` 给出，
+消费方只读一个入口：`failure.ActionsOf(err)`。
+
+分类名写进尝试日志的 `failure_class`，按类聚合与排障用。
+
+| 分类名 | 触发 | 处置 |
+|---|---|---|
+| `auth` | 401、403，或报文里的认证/权限字面量 | 停用凭据 + 换凭据 |
+| `quota` | 套餐额度、窗口额度、plan 限额用尽 | 停用凭据（15m）+ 换凭据 + 换渠道 |
+| `credit` | 余额、授信、欠费停服 | 停用凭据（30m）+ 换凭据 + 换渠道 |
+| `rate_limit` | 限流、上游过载 | 换渠道 |
+| `request` | 参数、端点、模型名写法等请求级错误 | 不重试 |
+| `context_length` | 上下文超出模型窗口 | 不重试 |
+| `model_unavailable` | 模型不存在或不可用 | 不重试 |
+| `upstream` | 5xx、连接失败、响应无法解析 | 换渠道 + 计入熔断 |
+| `timeout` | 408、等待上游响应的超时、流式空闲超时 | 换渠道 + 计入熔断 |
+| `other` | 未能归类 | 不重试 |
+
+处置集合分两组：重试动作（`retry_next_account`、`retry_next_route`）与副作用
+（`suspend_account`、`count_breaker`）。前者与 `surface`（不重试）互斥；
+额度与余额两类同时带两个重试动作，语义是升级顺序：先把同渠道的凭据试完，再换渠道。
+
+分类判据是状态码加报文正则，两者一起看：同一个状态码在不同上游下含义不同，
+余额耗尽可能报成 429 配 `insufficient_quota`，只看 429 会把它当成限流退避重试。
+
+报文规则的优先级（上下文超限 → 余额 → 限流 → 额度 → 模型不可用）都有真实报文依据：
+限流报文里的 `limit reached` 会命中额度规则，上下文超限里的 `maximum`/`limit` 同理。
+
+流式错误帧与 2xx 里出现的错误信封按同一套机器码归类（`invalid_request_error`、
+`insufficient_quota`、`deadline_exceeded` 等）。否定结论的兜底两边不同：
+非 2xx 里认不出的错误归 `request`（不能断言该怪谁，保守），
+成功响应里出现错误信封则归 `upstream`（报文与状态码自相矛盾，本身就是上游侧故障）。
+
+渠道 config 里的登录态信标头 `signin_header` 覆盖的是**处置**而非分类：
+
+| 信标取值 | 效果 |
+|---|---|
+| `expired` | 分类定为 `auth`，停用并换凭据，不管状态码是什么 |
+| `kept` | 分类如实保留，摘掉整组凭据动作（不停用、也不为它换 key） |
+| `renewed` | 同 `kept`，另解除该凭据的既有冷却 |
+
+分类与错误码是两根轴：分类驱动内部处置，错误码决定对外的状态码与错误体形态。
+`timeout` 与 `upstream` 的处置完全相同，单独成类只为一件事：前者对应 504、后者对应 502。
+
+动作集给出的是本次失败**值得**做什么，不是最终执行的结果。执行还取决于当时的可行性：
+尚未向客户端写出字节时可换渠道，流式下任何一帧（包括只带 role 的首帧）都会关闭这个窗口；
+上下文已取消或尝试预算耗尽时同样不重试。
+
 ## 错误码表
 
 同一个统一错误码在不同方言下的错误体形态：
@@ -399,6 +449,10 @@ Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: tru
 429 → `upstream_rate_limited`，408 → `upstream_timeout`，
 其余 4xx → `upstream_rejected`，5xx 与其它 → `upstream_unavailable`。
 连接失败、响应体超限、流式单帧超限、结束标记前断开 → `upstream_unavailable`。
+流式错误帧与 2xx 里的错误信封按分类推出错误码：`rate_limit` → `upstream_rate_limited`，
+`timeout` → `upstream_timeout`，`upstream` → `upstream_unavailable`，其余 → `upstream_rejected`。
+
+错误码不再参与「要不要重试」的判定——那是分类与动作集的职责（见上一节）。
 
 > 错误码枚举里还有 `gateway_overloaded`，当前没有代码路径写出它，故不在表中。
 > 新增可对外出现的错误码时，本表与 `docs/openapi.yaml` 的 responses 需同步更新。

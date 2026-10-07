@@ -184,10 +184,11 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 			body:   `{"error":{"message":"internal server error"}}`,
 			want:   ClassUpstream,
 		},
+		// 超时与 5xx 的处置相同，但单独成类：对外的 504 只能由类别推出。
 		{
 			name:   "上游超时",
 			status: http.StatusRequestTimeout,
-			want:   ClassUpstream,
+			want:   ClassTimeout,
 		},
 		{
 			// 5xx 不做凭据字面量扫描：上游自身故障的报文里偶然出现同名字面量不代表凭据有问题，
@@ -218,6 +219,9 @@ func TestClassifyCodeAndEnvelope(t *testing.T) {
 	if got := ClassifyCode("quota_exceeded"); got != ClassQuota {
 		t.Errorf("quota_exceeded = %s，期望 quota", ClassName(got))
 	}
+	if got := ClassifyCode("deadline_exceeded"); got != ClassTimeout {
+		t.Errorf("deadline_exceeded = %s，期望 timeout", ClassName(got))
+	}
 	if got := ClassifyCode("something_new"); got != ClassOther {
 		t.Errorf("认不出的机器码应归 Other，实际 %s", ClassName(got))
 	}
@@ -226,6 +230,32 @@ func TestClassifyCodeAndEnvelope(t *testing.T) {
 	}
 	if got := ClassifyErrorEnvelope("insufficient_credits"); got != ClassCredit {
 		t.Errorf("错误信封里的已知取值仍应精确归类，实际 %s", ClassName(got))
+	}
+}
+
+// TestCodeForClassKeepsTimeoutDistinct 守护「超时单独成类」的理由：
+// 类别要能把对外的 504 与 502 区分开，否则客户端会把超时看成普通上游故障。
+func TestCodeForClassKeepsTimeoutDistinct(t *testing.T) {
+	cases := []struct {
+		class Class
+		want  domain.Code
+	}{
+		{ClassTimeout, domain.CodeUpstreamTimeout},
+		{ClassUpstream, domain.CodeUpstreamUnavailable},
+		{ClassRateLimit, domain.CodeUpstreamRateLimited},
+		// 其余上游侧失败统一归「上游拒绝请求」：是否重试由动作集合决定，不再由错误码决定。
+		{ClassRequest, domain.CodeUpstreamRejected},
+		{ClassAuth, domain.CodeUpstreamRejected},
+		{ClassContextLength, domain.CodeUpstreamRejected},
+	}
+	for _, tc := range cases {
+		if got := CodeForClass(tc.class); got != tc.want {
+			t.Errorf("CodeForClass(%s) = %s，期望 %s", ClassName(tc.class), got, tc.want)
+		}
+	}
+	timedOut := NewError(CodeForClass(ClassTimeout), "上游超时", "", ClassTimeout)
+	if got := domain.HTTPStatus(timedOut); got != http.StatusGatewayTimeout {
+		t.Errorf("超时类别的错误应对外回 504，实际回 %d", got)
 	}
 }
 
@@ -243,8 +273,9 @@ func TestActionsForClassifiesDisposition(t *testing.T) {
 		// 上下文超限与模型不可用：换 key 换渠道都没用。
 		{ClassContextLength, ActionSurface},
 		{ClassModelUnavailable, ActionSurface},
-		// 上游故障：换渠道 + 计入熔断，不停用凭据。
+		// 上游故障：换渠道 + 计入熔断，不停用凭据。超时与之处置相同，但另有 504 的分类码。
 		{ClassUpstream, ActionRetryNextRoute | ActionCountBreaker},
+		{ClassTimeout, ActionRetryNextRoute | ActionCountBreaker},
 		{ClassOther, ActionSurface},
 	}
 	for _, tc := range cases {

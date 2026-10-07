@@ -44,11 +44,17 @@ const (
 	ClassContextLength
 	// ClassModelUnavailable 是模型不存在或不可用。
 	ClassModelUnavailable
-	// ClassUpstream 是上游自身故障：5xx、连接失败、上游超时。
+	// ClassUpstream 是上游自身故障：5xx 与连接失败。
 	//
 	// 它与 ClassOther 分开是必要的：两者都「认不出具体原因」，但一个必须换渠道重试，
 	// 另一个不该放大成重试。合成一类就只能靠状态码二次判断，那可是四套词汇的起点。
 	ClassUpstream
+	// ClassTimeout 是上游超时：网络超时、上游 408、流式空闲超时。
+	//
+	// 处置与 ClassUpstream 完全相同，单独成类只为一件事：超时对应 504、其余上游故障
+	// 对应 502，把两者合并会让客户端收到错误的分类码，而错误码只能从类别推导。
+	// 它也确实是不同的诊断事实，`failure_class=timeout` 在日志里有单独价值。
+	ClassTimeout
 )
 
 // 类别名是日志取值，稳定不变，供按类聚合。
@@ -62,6 +68,7 @@ const (
 	classNameContextLength    = "context_length"
 	classNameModelUnavailable = "model_unavailable"
 	classNameUpstream         = "upstream"
+	classNameTimeout          = "timeout"
 )
 
 // Action 是对本次失败的一项处置，同时也是多项处置的集合：单个取值是一项动作，
@@ -220,6 +227,10 @@ var policyTable = map[Class]Policy{
 	ClassModelUnavailable: {Name: classNameModelUnavailable, Actions: ActionSurface},
 	ClassUpstream: {
 		Name:    classNameUpstream,
+		Actions: ActionRetryNextRoute | ActionCountBreaker,
+	},
+	ClassTimeout: {
+		Name:    classNameTimeout,
 		Actions: ActionRetryNextRoute | ActionCountBreaker,
 	},
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -582,33 +581,7 @@ type UsageRecorder interface {
 	RecordUsage(ctx context.Context, rec UsageRecord) error
 }
 
-// NonRetryableUpstreamErrorType 判断上游错误的类型名或机器码是否属于
-// 「换渠道重试也不会成功」的一类：
-//
-//   - 参数不合规；
-//   - 凭据或权限不足；
-//   - 资源不存在。
-//
-// 三种线协议都用同一套字面量表达请求级错误，判据与协议无关，故放在统一协议包，
-// 避免各适配器各写一份而漂移。
-//
-// 当前登记的字面量包括：
-//
-//   - invalid_request_error；
-//   - authentication_error；
-//   - permission_error；
-//   - not_found_error。
-//
-// 其余字面量（含空串）一律返回 false，即按可重试处理，由共享转发层的重试上限兜底。
-//
-// 这与「未登记错误码按不可重试」的方向相反，属于有意的分工：
-//   - 错误码兜底偏保守，避免打爆上游；
-//   - 上游类型兜底偏可用，因为上游限流等瞬时故障换渠道可恢复。
-func NonRetryableUpstreamErrorType(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "invalid_request_error", "authentication_error", "permission_error", "not_found_error":
-		return true
-	default:
-		return false
-	}
-}
+// 上游错误的分类与处置统一由 internal/failure 给出：本包不再声明「哪些类型名不可重试」
+// 这类判据。同一套字面量原先在这里被三个适配器共用，但它回答不了「可换渠道重试的
+// 请求级错误」以外的情形（如把认证失败只当「不可重试」而不停用凭据），
+// 而 per-class 的处置表才是调用方真正需要的东西。

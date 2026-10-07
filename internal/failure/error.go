@@ -89,13 +89,14 @@ func SuspendFor(err error) time.Duration {
 // CodeForClass 返回一个类别在面向客户端错误体里的错误码。
 //
 // 分类与错误码是两根轴：分类驱动处置（换凭据、换渠道、停用），错误码驱动对外的状态码
-// 与错误体形态。此处只做流式错误帧这一处的换算，因为帧载荷里没有 HTTP 状态码可用。
-//
-// 不区分超时：帧载荷不表达超时，超时的 504 由 HTTP 层的状态码分级给出。
+// 与错误体形态（504 / 502 / 503）。需要把两边对上的地方可能会分两次做，
+// 但能对上是因为类别本身分得够细（见 ClassTimeout），不是靠在调用方另行判状态码。
 func CodeForClass(class Class) domain.Code {
 	switch class {
 	case ClassRateLimit:
 		return domain.CodeUpstreamRateLimited
+	case ClassTimeout:
+		return domain.CodeUpstreamTimeout
 	case ClassUpstream:
 		return domain.CodeUpstreamUnavailable
 	default:

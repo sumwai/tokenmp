@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // streamEvent 是 Anthropic SSE 事件 data 的并集结构，按事件类型取用字段。
@@ -51,8 +52,9 @@ type streamDelta struct {
 
 // upstreamError 把上游错误事件的错误对象转为统一错误。
 //
-// 分级与另外两个适配器一致：请求级错误（参数/凭据/权限/资源）不可重试，
-// 其余可换渠道重试。上游原文只进 Detail，不作为面向用户的 Message。
+// 错误出现在流式帧里，而帧是「本该成功的响应」的一部分，因此按错误信封归类：
+// 认得出的取值精确归类，认不出的归上游故障（可换渠道），而不是按请求级错误终止。
+// 上游原文只进 Detail，不作为面向用户的 Message。
 func upstreamError(errDetail *wireErrorDetail) error {
 	errorType := ""
 	detail := "上游返回错误事件"
@@ -60,11 +62,8 @@ func upstreamError(errDetail *wireErrorDetail) error {
 		errorType = errDetail.Type
 		detail = appendUpstreamMessage(detail, errDetail.Message)
 	}
-	code := domain.CodeUpstreamUnavailable
-	if domain.NonRetryableUpstreamErrorType(errorType) {
-		code = domain.CodeUpstreamRejected
-	}
-	return domain.NewError(code, "上游返回错误").WithDetail(detail)
+	class := failure.ClassifyErrorEnvelope(errorType)
+	return failure.NewError(failure.CodeForClass(class), "上游返回错误", detail, class)
 }
 
 // appendUpstreamMessage 把上游原文追加到排障文案。上游未给出原文时原样返回。
