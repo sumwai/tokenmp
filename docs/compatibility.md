@@ -59,7 +59,20 @@
 
 - **请求改写**：`onRequest` 的返回值替换整个请求体。协议、请求 id 与流式形态取自端点事实，
   不因改写而变；改写体未给出 `model` 时保留原值（路径携带模型名的方言即属这种情形）。
-  返回值不是 JSON 对象、或改写后的请求体无法解码时，本次改写被丢弃，请求按原样继续。- **流式事件**：`onEvent` 只接受内容分片 `text_delta` / `tool_call_delta` / `reasoning_delta`，
+  返回值不是 JSON 对象、或改写后的请求体无法解码时，本次改写被丢弃，请求按原样继续。
+- **流式事件对象**：`onEvent` 的入参与可改写对象是同一形状，字段如下；未出现的字段按空处理，
+  认不出的字段被忽略。只给 `kind` 的对象会得到一个内容为空的分片（等价于发一个空增量）。
+
+  | 字段 | 类型 | 说明 |
+  |---|---|---|
+  | `kind` | string | 分片类型，取值 `text_delta` / `tool_call_delta` / `reasoning_delta`。返回值里出现其它取值按失败处理 |
+  | `model` | string | 对外模型别名；上游帧带了这个字段才有 |
+  | `text_delta` | string | 文本增量。`text_delta` 与 `reasoning_delta` 两种分片都用它承载文本 |
+  | `tool_call` | object | 工具调用增量：`index`（number）、`id`、`name`、`arguments`（均为 string，`arguments` 是 JSON 片段） |
+
+  `onStreamEnd` 返回待补发的分片数组，元素是同一形状的对象；其余返回值形状（非对象、
+  非数组、数组含非对象）按失败处理，与逐事件路径同一口径。
+- **流式事件**：`onEvent` 只接受内容分片 `text_delta` / `tool_call_delta` / `reasoning_delta`，
   且事件名必须在模块导出的 `events` 白名单里。返回 `null` 丢弃该分片，返回对象表示改写，
   返回 `undefined` 表示不改写。用量、结束原因与流结束**不经**逐事件钩子改写，也不经过它；
   一次调用只能回一个分片。

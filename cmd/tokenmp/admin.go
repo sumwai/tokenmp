@@ -201,7 +201,7 @@ var adminGroups = []adminGroupSpec{
 	{"adjust", []string{actionAdd, actionList}},
 	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
 	{"plan", []string{actionAdd, actionList}},
-	{pluginGroupName, []string{actionList}},
+	{pluginGroupName, []string{actionList, "check"}},
 }
 
 // lookupGroup 按名字找组声明。

@@ -187,6 +187,7 @@ internal/settlement/ 用量结算：定价解析、倍率链与账本扣减
 internal/plugin/     网关中间件：moejs 沙箱加载、四个钩子与进程内统计
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
+examples/            可运行的中间件示例：由 internal/plugin 的用例加载，避免与文档漂移
 .github/workflows/   CI 与发布链路
 ```
 

@@ -541,6 +541,15 @@ $ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp serve
 任一项路径不存在、扩展名不符或编译失败都会让 serve 以退出码 1 终止；多项同时写坏会在一条
 错误里全部点名。文件指纹变化时惰性重编译，重编译失败保留上一份产物继续服务。
 
+写插件时不必先起服务：`admin plugin check` 接受路径参数，逐个装配并报告结论，任一失败
+以退出码 1 结束（可直接放进 CI 或提交前检查）。告警（作用域写坏、拼错事件名）走 stderr。
+
+```
+$ tokenmp admin plugin check /path/to/example.mw.js examples/think-tag.mw.js
+name              path                          result  hooks                           events
+think-tag.mw.js   examples/think-tag.mw.js      ok      onEvent,onResponse,onStreamEnd  text_delta
+```
+
 指纹是「修改时间 + 大小」，`cp -p`、等长覆盖一类改动看不出变化，此时给 serve 发 SIGHUP
 强制重编译：
 
@@ -578,7 +587,9 @@ example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_del
 另外只能缓冲「可能是个不完整标签的后缀」——把整个思考块攼到 `</think>` 才发会让客户端在
 整个思考阶段收不到字节。
 
-头部 `scope` 声明它只对 MiniMax 渠道生效：越界的请求不进 JS 运行时，而不是进去了再原样返回：
+头部 `scope` 声明它只对 MiniMax 渠道生效：越界的请求不进 JS 运行时，而不是进去了再原样返回。
+仓库内的可运行版本在 [`examples/think-tag.mw.js`](../examples/think-tag.mw.js)，由
+`internal/plugin/example_test.go` 加载：引擎或宿主契约变化时它会先报错。下面是同一份实现：
 
 ```js
 // /path/to/think-tag.mw.js
