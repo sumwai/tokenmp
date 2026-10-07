@@ -64,11 +64,11 @@ func adminAccountList(ctx context.Context, args []string, env *adminEnv) int {
 	for _, a := range accounts {
 		rows = append(rows, []string{
 			strconv.FormatUint(a.ID, 10), a.Code, a.Name,
-			formatUintPtr(a.DefaultMerchantID), a.PriceMultiplier, a.Status,
+			formatUintPtr(a.OwnerUserID), formatUintPtr(a.DefaultMerchantID), a.PriceMultiplier, a.Status,
 		})
 	}
 	return env.emit(*asJSON,
-		[]string{flagID, flagCode, flagName, "default_merchant", flagMultiplier, headerStatus}, rows, accounts)
+		[]string{flagID, flagCode, flagName, "owner", "default_merchant", flagMultiplier, headerStatus}, rows, accounts)
 }
 
 func adminAccountDisable(ctx context.Context, args []string, env *adminEnv) int {

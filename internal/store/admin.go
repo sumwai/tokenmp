@@ -82,11 +82,18 @@ const mysqlDuplicateEntry = 1062
 // 管理面的写操作要求「幂等或明确报错」：冲突必须让人一眼看出是同键已存在，
 // 而不是把 1062 原样抛出让人去查文档。
 func describeWriteError(table string, err error) error {
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlDuplicateEntry {
+	if isDuplicateKey(err) {
 		return fmt.Errorf("store: 写入 %s 失败：唯一键冲突，同键记录已存在: %w", table, err)
 	}
 	return fmt.Errorf("store: 写入 %s 失败: %w", table, err)
+}
+
+// isDuplicateKey 报告驱动错误是否为唯一键冲突。
+//
+// 被 %w 包装过的错误同样命中：调用方先包上表名再判定冲突的写法因此成立。
+func isDuplicateKey(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == mysqlDuplicateEntry
 }
 
 // Merchant 是 merchant 的一行。
@@ -594,17 +601,21 @@ func (s *Store) SetModelMapEnabled(ctx context.Context, id uint64, enabled bool)
 }
 
 // Account 是 account 的一行。
+//
+// OwnerUserID 为 nil 表示无主账户：由管理命令创建，尚未归属任何登录主体。
+// 归属一对一，由 uk_account_owner 唯一键保证。
 type Account struct {
 	ID                uint64  `json:"id"`
 	Code              string  `json:"code"`
 	Name              string  `json:"name"`
+	OwnerUserID       *uint64 `json:"owner_user_id"`
 	DefaultMerchantID *uint64 `json:"default_merchant_id"`
 	PriceMultiplier   string  `json:"price_multiplier"`
 	Status            string  `json:"status"`
 }
 
-const insertAccountSQL = `INSERT INTO account (code, name, default_merchant_id, price_multiplier, status)
-VALUES (?, ?, ?, ?, ?)`
+const insertAccountSQL = `INSERT INTO account (code, name, owner_user_id, default_merchant_id, price_multiplier, status)
+VALUES (?, ?, ?, ?, ?, ?)`
 
 // insertAccount 写一个账户。
 func insertAccount(ctx context.Context, ex executor, a Account) (uint64, error) {
@@ -625,7 +636,11 @@ func insertAccount(ctx context.Context, ex executor, a Account) (uint64, error) 
 	if a.DefaultMerchantID != nil {
 		merchant = *a.DefaultMerchantID
 	}
-	res, err := ex.ExecContext(ctx, insertAccountSQL, a.Code, a.Name, merchant, a.PriceMultiplier, status)
+	var owner any
+	if a.OwnerUserID != nil {
+		owner = *a.OwnerUserID
+	}
+	res, err := ex.ExecContext(ctx, insertAccountSQL, a.Code, a.Name, owner, merchant, a.PriceMultiplier, status)
 	if err != nil {
 		return 0, describeWriteError("account", err)
 	}
@@ -637,7 +652,7 @@ func (s *Store) InsertAccount(ctx context.Context, a Account) (uint64, error) {
 	return insertAccount(ctx, s.db, a)
 }
 
-const listAccountsSQL = `SELECT id, code, name, default_merchant_id, price_multiplier, status
+const listAccountsSQL = `SELECT id, code, name, owner_user_id, default_merchant_id, price_multiplier, status
 FROM account ORDER BY id`
 
 // listAccounts 列出全部账户。
@@ -652,10 +667,15 @@ func listAccounts(ctx context.Context, q querier) ([]Account, error) {
 	for rows.Next() {
 		var (
 			a        Account
+			owner    sql.NullInt64
 			merchant sql.NullInt64
 		)
-		if err := rows.Scan(&a.ID, &a.Code, &a.Name, &merchant, &a.PriceMultiplier, &a.Status); err != nil {
+		if err := rows.Scan(&a.ID, &a.Code, &a.Name, &owner, &merchant, &a.PriceMultiplier, &a.Status); err != nil {
 			return nil, fmt.Errorf("store: 解析 account 行失败: %w", err)
+		}
+		if owner.Valid && owner.Int64 > 0 {
+			v := uint64(owner.Int64)
+			a.OwnerUserID = &v
 		}
 		if merchant.Valid && merchant.Int64 > 0 {
 			v := uint64(merchant.Int64)
@@ -674,7 +694,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]Account, error) {
 	return listAccounts(ctx, dbQuerier{db: s.db})
 }
 
-const accountByIDSQL = `SELECT id, code, name, default_merchant_id, price_multiplier, status
+const accountByIDSQL = `SELECT id, code, name, owner_user_id, default_merchant_id, price_multiplier, status
 FROM account WHERE id = ?`
 
 // Account 按 id 查账户；无匹配时错误可用 errors.Is(err, sql.ErrNoRows) 判断。
@@ -687,12 +707,17 @@ func (s *Store) Account(ctx context.Context, id uint64) (*Account, error) {
 	}
 	var (
 		a        Account
+		owner    sql.NullInt64
 		merchant sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx, accountByIDSQL, id).Scan(
-		&a.ID, &a.Code, &a.Name, &merchant, &a.PriceMultiplier, &a.Status)
+		&a.ID, &a.Code, &a.Name, &owner, &merchant, &a.PriceMultiplier, &a.Status)
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 account 失败: %w", err)
+	}
+	if owner.Valid && owner.Int64 > 0 {
+		v := uint64(owner.Int64)
+		a.OwnerUserID = &v
 	}
 	if merchant.Valid && merchant.Int64 > 0 {
 		v := uint64(merchant.Int64)

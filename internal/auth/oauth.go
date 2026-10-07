@@ -396,7 +396,7 @@ func (s *Service) mergeIdentity(ctx context.Context, providerID string, profile 
 	return user, nil
 }
 
-// createOAuthUser 为第三方身份新建账号，用户名取邮箱前缀并做唯一化。
+// createOAuthUser 为第三方身份新建账号并在同一事务内开户，用户名取邮箱前缀并做唯一化。
 func (s *Service) createOAuthUser(ctx context.Context, email string) (uint64, error) {
 	base := usernameFromEmail(email)
 	// 冲突时追加序号重试：唯一键是邮箱与用户名两者的并集，
@@ -406,11 +406,15 @@ func (s *Service) createOAuthUser(ctx context.Context, email string) (uint64, er
 		if attempt > 0 {
 			candidate = fmt.Sprintf("%s_%d", base, attempt+1)
 		}
-		id, err := s.store.WebInsertUser(ctx, store.WebUser{
+		id, _, err := s.store.WebInsertUserWithAccount(ctx, store.WebUser{
 			Email:    email,
 			Username: candidate,
-			Role:     roleMember,
+			Role:     store.RoleMember,
 			Status:   statusActive,
+		}, store.Account{
+			Name:            candidate,
+			PriceMultiplier: defaultAccountMultiplier,
+			Status:          statusActive,
 		})
 		if err == nil {
 			return id, nil

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -45,6 +47,34 @@ type WebUser struct {
 	Role         string
 	Status       string
 	CreatedAt    time.Time
+}
+
+// 页面登录主体的角色取值。
+//
+// member 是注册与第三方建号的默认角色；partner 与 admin 经管理通道授予，
+// 注册路径不产生这两个值。三者都是用户，都拥有自己的账户。
+const (
+	// RoleMember 是注册默认角色。
+	RoleMember = "member"
+	// RolePartner 是商户。
+	RolePartner = "partner"
+	// RoleAdmin 是平台管理员。
+	RoleAdmin = "admin"
+)
+
+// knownWebRoles 是写入白名单。
+var knownWebRoles = map[string]struct{}{
+	RoleMember:  {},
+	RolePartner: {},
+	RoleAdmin:   {},
+}
+
+// ValidateWebRole 是写入口校验：未知角色直接拒绝。
+func ValidateWebRole(role string) error {
+	if _, ok := knownWebRoles[role]; !ok {
+		return fmt.Errorf("store: 未知的页面角色 %q", role)
+	}
+	return nil
 }
 
 // WebSession 是 web_session 的一行；明文令牌从不出现。
@@ -115,23 +145,90 @@ func scanWebUser(row *sql.Row) (*WebUser, error) {
 	return &u, nil
 }
 
-// WebInsertUser 写入新账号；邮箱或用户名已存在时返回满足 errors.Is(err, ErrConflict) 的错误。
-func (s *Store) WebInsertUser(ctx context.Context, u WebUser) (uint64, error) {
+// insertWebUser 写一行登录主体；邮箱或用户名已存在时返回满足 errors.Is(err, ErrConflict) 的错误。
+func insertWebUser(ctx context.Context, ex executor, u WebUser) (uint64, error) {
+	if err := ValidateWebRole(u.Role); err != nil {
+		return 0, err
+	}
 	var passwordHash any
 	if u.PasswordHash != "" {
 		passwordHash = u.PasswordHash
 	}
-	res, err := s.db.ExecContext(ctx,
+	res, err := ex.ExecContext(ctx,
 		`INSERT INTO web_user (email, username, password_hash, role, status) VALUES (?, ?, ?, ?, ?)`,
 		u.Email, u.Username, passwordHash, u.Role, u.Status)
 	if err != nil {
 		return 0, conflictFromWrite("web_user", err)
 	}
-	id, err := lastInsertID(res)
+	return lastInsertID(res)
+}
+
+// WebInsertUserWithAccount 在一个事务内写入登录主体与其账户，返回账号 id 与账户 id。
+//
+// 注册即开户：登录主体与计费账户必须同生共死，拆开写会在中途失败时留下能登录
+// 却没有账户可操作的账号。账号冲突（邮箱或用户名已存在）回滚整个事务并返回满足
+// errors.Is(err, ErrConflict) 的错误。
+//
+// 账户的业务编码与归属列由本方法填：调用方只给出账户的展示字段。
+func (s *Store) WebInsertUserWithAccount(ctx context.Context, u WebUser, a Account) (uint64, uint64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return 0, 0, fmt.Errorf("store: 开启注册开户事务失败: %w", err)
 	}
-	return id, nil
+	userID, err := insertWebUser(ctx, tx, u)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, 0, err
+	}
+	accountID, err := insertOwnedAccount(ctx, tx, a, userID)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("store: 提交注册开户事务失败: %w", err)
+	}
+	return userID, accountID, nil
+}
+
+// accountCodeAttempts 是随机账户编码撞上唯一键后的重试次数。
+//
+// 16 字节随机值的碰撞概率可忽略；重试用于把「理论上可能」变成「明确报错」，
+// 而不是把偶发冲突当作事务失败抛给调用方。
+const accountCodeAttempts = 3
+
+// insertOwnedAccount 写一个归属指定登录主体的账户，编码随机生成并在冲突时换值重试。
+func insertOwnedAccount(ctx context.Context, ex executor, a Account, ownerID uint64) (uint64, error) {
+	owner := ownerID
+	a.OwnerUserID = &owner
+	var lastErr error
+	for attempt := 0; attempt < accountCodeAttempts; attempt++ {
+		code, err := newAccountCode()
+		if err != nil {
+			return 0, err
+		}
+		a.Code = code
+		id, err := insertAccount(ctx, ex, a)
+		if err == nil {
+			return id, nil
+		}
+		if !isDuplicateKey(err) {
+			return 0, err
+		}
+		lastErr = err
+	}
+	return 0, fmt.Errorf("store: 随机 account.code 连续 %d 次冲突: %w", accountCodeAttempts, lastErr)
+}
+
+// newAccountCode 生成账户业务编码：固定前缀加随机十六进制。
+//
+// 随机而不是序号：编码对调用方可见，序号会暴露账户总量与注册顺序。
+func newAccountCode() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("store: 生成 account.code 失败: %w", err)
+	}
+	return "acc_" + hex.EncodeToString(buf[:]), nil
 }
 
 // WebInsertSession 写入新会话行。

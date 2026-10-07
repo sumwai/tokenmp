@@ -150,7 +150,7 @@ paths:
       tags: [auth]
       summary: 注册
       description: |
-        创建账号并直接签发会话。密码经 `challenge` 公钥加密；
+        创建账号并在同一事务内开户，随后签发会话。密码经 `challenge` 公钥加密；
         邮箱已存在返回 `code=409`。是否开放注册由服务端配置决定，
         关闭时返回 `code=403`。
       operationId: signup
@@ -445,8 +445,8 @@ paths:
       summary: 用第三方授权码换取会话
       description: |
         回调落在前端路由后，客户端把提供方返回的 `code` 与 `state` 提交到本端点；
-        服务端校验 `state`、向提供方换 token、按邮箱匹配或创建账号并签发会话。
-        提供方未启用返回 `code=404`，`state` 不匹配返回 `code=400`。
+        服务端校验 `state`、向提供方换 token、按邮箱匹配或创建账号并在同一事务内开户，
+        随后签发会话。提供方未启用返回 `code=404`，`state` 不匹配返回 `code=400`。
       operationId: exchangeAuthOauth
       security: []
       parameters:
@@ -641,7 +641,11 @@ components:
           type: string
         role:
           type: string
-          description: 角色标识，取值由服务端下发；前端按值渲染导航与权限，不硬编码。
+          enum: [member, partner, admin]
+          description: |
+            角色标识：`member` 调用方（注册默认）、`partner` 商户、`admin` 平台管理员。
+            三者都是用户，都拥有自己的账户，都能签发密钥并调用模型；角色只决定控制台与
+            管理能力范围。取值由服务端下发，前端按值渲染导航与权限，不硬编码。
         merchant_id:
           type: [integer, "null"]
           format: int64
