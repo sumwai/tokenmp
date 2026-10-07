@@ -340,6 +340,26 @@ func (e wrappedError) Error() string { return "包装：" + e.err.Error() }
 
 func (e wrappedError) Unwrap() error { return e.err }
 
+// TestClassNameOfDistinguishesUnclassified 守护「未带分类」与「分类为 other」的区别。
+//
+// 前者是网关自身的错误（请求校验、平台故障），上游失败分类这根轴根本不适用；
+// 后者是上游确实失败了但认不出成因。两者都记成 other 会让按类聚合的尝试日志多一个
+// 含义不明的桶，而该字段是按「非空才写」处理的。
+func TestClassNameOfDistinguishesUnclassified(t *testing.T) {
+	if got := ClassNameOf(errors.New("网关自身的错误")); got != "" {
+		t.Errorf("未带分类应返回空串，实际 %q", got)
+	}
+	if got := ClassNameOf(NewError(domain.CodeInternal, "平台故障", "", ClassOther)); got != "other" {
+		t.Errorf("显式归为 other 应返回 other，实际 %q", got)
+	}
+	if _, ok := ClassOfKnown(errors.New("网关自身的错误")); ok {
+		t.Error("未带分类时应报告 false")
+	}
+	if class, ok := ClassOfKnown(NewError(domain.CodeInternal, "平台故障", "", ClassOther)); !ok || class != ClassOther {
+		t.Error("显式归为 other 时应报告 true 与 ClassOther")
+	}
+}
+
 // TestFailureErrorKeepsDomainErrorReachable 守护内嵌统一错误不被 Unwrap 挡住。
 //
 // 没有 Unwrap 时 errors.As 按具体类型匹配会失败，AsError / HTTPStatus 一律拿不到东西 ——
