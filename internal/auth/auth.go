@@ -61,7 +61,7 @@ var (
 type Store interface {
 	WebUserByLogin(ctx context.Context, login string) (*store.WebUser, error)
 	WebUserByEmail(ctx context.Context, email string) (*store.WebUser, error)
-	WebInsertUser(ctx context.Context, u store.WebUser) (uint64, error)
+	WebInsertUserWithAccount(ctx context.Context, u store.WebUser, a store.Account) (uint64, uint64, error)
 	WebInsertSession(ctx context.Context, sess store.WebSession) (uint64, error)
 	WebSessionByAccess(ctx context.Context, hash string) (*store.WebSessionWithUser, error)
 	WebSessionByRefresh(ctx context.Context, hash string) (*store.WebSessionWithUser, error)
@@ -114,8 +114,8 @@ const (
 // statusActive 是账号可登录状态，与 0006 迁移的 status 列取值一致。
 const statusActive = "active"
 
-// roleMember 是注册与第三方建号的默认角色；管理角色经其它通道授予。
-const roleMember = "member"
+// defaultAccountMultiplier 是注册开户账户的价格倍率，与 account.price_multiplier 的默认语义一致。
+const defaultAccountMultiplier = "1"
 
 // normalize 把零值选项折算成默认值，返回生效配置。
 func (o Options) normalize() Options {

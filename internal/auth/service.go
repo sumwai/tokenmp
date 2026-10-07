@@ -118,10 +118,11 @@ func (s *Service) Signin(ctx context.Context, addr, login, passwordCipher, finge
 	return s.issueSession(ctx, user)
 }
 
-// Signup 创建账号并直接签发会话；注册入口关闭时返回 ErrSignupDisabled。
+// Signup 创建账号并在同一事务内开户；注册入口关闭时返回 ErrSignupDisabled。
 //
 // 邮箱与用户名的唯一键冲突统一折叠为 store.ErrConflict：两者对前端是同一种
-// 「这个标识已被占用」，区分来源只会泄漏注册探测信息。
+// 「这个标识已被占用」，区分来源只会泄漏注册探测信息。账号与账户在存储层
+// 同一事务内写入，失败时不留下能登录却没有账户可操作的账号。
 func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCipher, fingerprint string) (*sessionTokens, error) {
 	if !s.limiter.allow("signup:" + addr) {
 		return nil, ErrRateLimited
@@ -144,17 +145,18 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 	if err != nil {
 		return nil, err
 	}
-	id, err := s.store.WebInsertUser(ctx, store.WebUser{
+	id, _, err := s.store.WebInsertUserWithAccount(ctx, store.WebUser{
 		Email:        email,
 		Username:     username,
 		PasswordHash: string(hash),
-		Role:         roleMember,
+		Role:         store.RoleMember,
 		Status:       statusActive,
+	}, store.Account{
+		Name:            username,
+		PriceMultiplier: defaultAccountMultiplier,
+		Status:          statusActive,
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return nil, err
-		}
 		return nil, err
 	}
 	return s.issueSession(ctx, &store.WebUser{
@@ -162,7 +164,7 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 		Email:        email,
 		Username:     username,
 		PasswordHash: string(hash),
-		Role:         roleMember,
+		Role:         store.RoleMember,
 		Status:       statusActive,
 	})
 }

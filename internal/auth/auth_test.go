@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 type memStore struct {
 	mu          sync.Mutex
 	users       map[uint64]*store.WebUser
+	accounts    map[uint64]*store.Account
 	sessions    map[uint64]*store.WebSession
 	byAccess    map[string]uint64
 	byRefresh   map[string]uint64
@@ -38,7 +40,10 @@ type memStore struct {
 	otps        map[string]*memOTP
 	identities  []store.WebIdentity
 	nextUser    uint64
+	nextAccount uint64
 	nextSession uint64
+	// accountErr 非 nil 时开户写入失败，用于覆盖事务回滚分支。
+	accountErr error
 }
 
 // memOTP 是一行验证码：键含邮箱、用途与摘要，与库表的核销条件同构。
@@ -51,6 +56,7 @@ type memOTP struct {
 func newMemStore() *memStore {
 	return &memStore{
 		users:     make(map[uint64]*store.WebUser),
+		accounts:  make(map[uint64]*store.Account),
 		sessions:  make(map[uint64]*store.WebSession),
 		byAccess:  make(map[string]uint64),
 		byRefresh: make(map[string]uint64),
@@ -83,18 +89,30 @@ func (m *memStore) WebUserByEmail(_ context.Context, email string) (*store.WebUs
 	return nil, sql.ErrNoRows
 }
 
-func (m *memStore) WebInsertUser(_ context.Context, u store.WebUser) (uint64, error) {
+// WebInsertUserWithAccount 模拟注册开户：账号与账户同生共死。
+//
+// 唯一键冲突或 accountErr 注入时两者都不落库，与真实事务的回滚语义一致。
+func (m *memStore) WebInsertUserWithAccount(_ context.Context, u store.WebUser, a store.Account) (uint64, uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, existing := range m.users {
 		if existing.Email == u.Email || existing.Username == u.Username {
-			return 0, store.ErrConflict
+			return 0, 0, store.ErrConflict
 		}
+	}
+	if m.accountErr != nil {
+		return 0, 0, m.accountErr
 	}
 	m.nextUser++
 	u.ID = m.nextUser
 	m.users[u.ID] = &u
-	return u.ID, nil
+	m.nextAccount++
+	owner := u.ID
+	a.ID = m.nextAccount
+	a.Code = "acc_test"
+	a.OwnerUserID = &owner
+	m.accounts[a.ID] = &a
+	return u.ID, a.ID, nil
 }
 
 func (m *memStore) WebInsertSession(_ context.Context, sess store.WebSession) (uint64, error) {
@@ -543,6 +561,79 @@ func TestSignupConflict(t *testing.T) {
 	}, "")
 	if status != http.StatusConflict || codeOf(t, env) != codeConflict {
 		t.Fatalf("重复注册应 409: %d %s", status, env)
+	}
+}
+
+// TestSignupProvisionsAccount 断言注册在同一事务内开户，且账户归属新账号。
+func TestSignupProvisionsAccount(t *testing.T) {
+	e := newTestEnv(t, Options{})
+	access, _ := e.signup(t, "fp-provision-1")
+
+	user, err := e.svc.SessionByAccess(context.Background(), access)
+	if err != nil {
+		t.Fatalf("读取会话: %v", err)
+	}
+	if len(e.st.accounts) != 1 {
+		t.Fatalf("注册应产生一个账户，实际 %d 个", len(e.st.accounts))
+	}
+	for _, a := range e.st.accounts {
+		if a.OwnerUserID == nil || *a.OwnerUserID != user.ID {
+			t.Fatalf("账户归属不符: %+v", a)
+		}
+		if a.Name != user.Username {
+			t.Fatalf("账户名应取用户名: %+v", a)
+		}
+		if a.PriceMultiplier != defaultAccountMultiplier {
+			t.Fatalf("账户倍率不符: %+v", a)
+		}
+	}
+}
+
+// TestSignupConflictLeavesNoAccount 断言唯一键冲突时账号与账户都不落库。
+func TestSignupConflictLeavesNoAccount(t *testing.T) {
+	e := newTestEnv(t, Options{})
+	_, _ = e.signup(t, "fp-conflict-acct-1")
+
+	fp := "fp-conflict-acct-2"
+	pub := e.challengeKey(t, fp)
+	status, env := e.do(t, http.MethodPost, PathSignup, map[string]string{
+		"email":       "user@example.com",
+		"username":    "other-name",
+		"password":    encryptPassword(t, pub, "s3cret-pass"),
+		"fingerprint": fp,
+	}, "")
+	if status != http.StatusConflict || codeOf(t, env) != codeConflict {
+		t.Fatalf("重复注册应 409: %d %s", status, env)
+	}
+	if len(e.st.accounts) != 1 {
+		t.Fatalf("冲突注册不应新增账户，实际 %d 个", len(e.st.accounts))
+	}
+	if len(e.st.users) != 1 {
+		t.Fatalf("冲突注册不应新增账号，实际 %d 个", len(e.st.users))
+	}
+}
+
+// TestSignupAccountFailureRollsBack 断言开户写入失败时账号一并回滚。
+func TestSignupAccountFailureRollsBack(t *testing.T) {
+	e := newTestEnv(t, Options{})
+	e.st.accountErr = errors.New("账户写入失败")
+
+	fp := "fp-rollback-01"
+	pub := e.challengeKey(t, fp)
+	status, _ := e.do(t, http.MethodPost, PathSignup, map[string]string{
+		"email":       "user@example.com",
+		"username":    "tester",
+		"password":    encryptPassword(t, pub, "s3cret-pass"),
+		"fingerprint": fp,
+	}, "")
+	if status != http.StatusInternalServerError {
+		t.Fatalf("开户失败应 500，实际 %d", status)
+	}
+	if len(e.st.users) != 0 {
+		t.Fatalf("开户失败不应留下账号，实际 %d 个", len(e.st.users))
+	}
+	if len(e.st.accounts) != 0 {
+		t.Fatalf("开户失败不应留下账户，实际 %d 个", len(e.st.accounts))
 	}
 }
 

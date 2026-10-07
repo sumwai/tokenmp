@@ -21,8 +21,8 @@ func (f *fakeGatewayStore) WebUserByEmail(context.Context, string) (*store.WebUs
 	return nil, sql.ErrNoRows
 }
 
-func (f *fakeGatewayStore) WebInsertUser(context.Context, store.WebUser) (uint64, error) {
-	return 1, nil
+func (f *fakeGatewayStore) WebInsertUserWithAccount(context.Context, store.WebUser, store.Account) (uint64, uint64, error) {
+	return 1, 1, nil
 }
 
 func (f *fakeGatewayStore) WebInsertSession(context.Context, store.WebSession) (uint64, error) {
