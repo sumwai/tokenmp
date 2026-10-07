@@ -21,9 +21,13 @@ import (
 // envTestDSN 指向一个可丢弃的库：本测试会先删掉已知表再重建。
 const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 
-// knownTables 与 migrations/0001_init.sql、0002_billing.sql、0003_account_bucket_unit_rate.sql、
-// 0004_billing_usage_api_key.sql、0005_upstream_plan.sql 对应，删除顺序无关紧要（全库无外键）。
+// knownTables 与 migrations/ 下各迁移文件对应，删除顺序无关紧要（全库无外键）；
+// 新增迁移时必须同步补上它的表，否则测试间的清库会残留旧表。
 var knownTables = []string{
+	"web_otp",
+	"web_identity",
+	"web_session",
+	"web_user",
 	"upstream_plan_quota",
 	"upstream_plan",
 	"billing_adjustment",
@@ -44,6 +48,28 @@ var knownTables = []string{
 	"upstream_channel",
 	"merchant",
 	"schema_migrations",
+}
+
+// migrationCount 返回 migrations 目录下的迁移文件数。
+//
+// 断言「已登记版本数 = 迁移文件数」时用它而不是字面量：
+// 新增迁移后测试自动前进，不再出现三处调用点逐个改数字的漂移。
+func migrationCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("读取 migrations 目录失败：%v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			count++
+		}
+	}
+	if count == 0 {
+		t.Fatal("migrations 目录下没有迁移文件")
+	}
+	return count
 }
 
 func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
@@ -92,7 +118,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 5)
+	assertMigrationVersionCount(ctx, t, s.DB(), migrationCount(t))
 	assertPlatformMerchantCount(ctx, t, s.DB(), 1)
 	// 第二次迁移不应重复加列：列仍存在且可空。
 	assertUnitRateColumn(ctx, t, s.DB())
@@ -422,5 +448,5 @@ func TestBillingStoreRoundTrip(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 5)
+	assertMigrationVersionCount(ctx, t, s.DB(), migrationCount(t))
 }
