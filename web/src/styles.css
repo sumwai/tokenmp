@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+/*
+ * 设计 Token：--tmp-* 前缀、语义层优先、OKLCH 取值（web/AGENTS.md）。
+ * 页面与组件只消费语义类（bg-surface / text-ink / text-action …），
+ * 不出现原始色值。
+ */
+:root {
+  --tmp-color-canvas: oklch(0.97 0.002 250);
+  --tmp-color-surface: oklch(1 0 0);
+  --tmp-color-subtle: oklch(0.955 0.003 250);
+  --tmp-color-border: oklch(0.9 0.004 250);
+  --tmp-color-ink: oklch(0.25 0.01 250);
+  --tmp-color-muted: oklch(0.52 0.01 250);
+  --tmp-color-action: oklch(0.55 0.17 255);
+  --tmp-color-success: oklch(0.55 0.13 155);
+  --tmp-color-warn: oklch(0.66 0.13 75);
+  --tmp-color-danger: oklch(0.55 0.19 27);
+}
+
+@theme {
+  --color-canvas: var(--tmp-color-canvas);
+  --color-surface: var(--tmp-color-surface);
+  --color-subtle: var(--tmp-color-subtle);
+  --color-edge: var(--tmp-color-border);
+  --color-ink: var(--tmp-color-ink);
+  --color-muted: var(--tmp-color-muted);
+  --color-action: var(--tmp-color-action);
+  --color-success: var(--tmp-color-success);
+  --color-warn: var(--tmp-color-warn);
+  --color-danger: var(--tmp-color-danger);
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+body {
+  background: var(--tmp-color-canvas);
+  color: var(--tmp-color-ink);
+  font-family: var(--font-sans);
+}
