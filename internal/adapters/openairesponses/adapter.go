@@ -961,12 +961,13 @@ func streamFailureError(data []byte, event string) error {
 	// 上游错误对象的 type 承载分级、code 承载机器码，两者都要看：
 	// 只看 code 会漏掉 {"error":{"type":"invalid_request_error"}} 这类不带 code 的形态。
 	// 顶层 type 是事件名（error、response.failed），不承载分级，故不入列。
-	candidates := []string{payload.Code}
+	// 报文原文也入列：部分上游只在 message 里说原因（尤其是限流与余额类）。
+	candidates := []string{payload.Code, payload.Message}
 	if payload.Error != nil {
-		candidates = append(candidates, payload.Error.Type, payload.Error.Code)
+		candidates = append(candidates, payload.Error.Type, payload.Error.Code, payload.Error.Message)
 	}
 	if payload.Response != nil && payload.Response.Error != nil {
-		candidates = append(candidates, payload.Response.Error.Type, payload.Response.Error.Code)
+		candidates = append(candidates, payload.Response.Error.Type, payload.Response.Error.Code, payload.Response.Error.Message)
 	}
 	class := failure.ClassifyErrorEnvelope(candidates...)
 	detail := payload.Message

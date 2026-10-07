@@ -640,8 +640,11 @@ func (a *Adapter) FinishStream() []domain.Chunk {
 // 上游原文只进 Detail，不直接作为面向用户的 Message，与 OpenAI Responses 适配器同一口径。
 // 归类交给 failure.ClassifyErrorEnvelope：它是出现在「本该成功的响应」里的错误信封，
 // 认不出的取值归上游故障（可换渠道），而不是按请求级错误终止。
+//
+// message 也交进去作证据：部分兼容上游只发 `data: {"error":{"message":"..."}}`，
+// 不带 type/code。不看它会把「渠道忙」认成「渠道坏」并计入渠道健康度。
 func upstreamStreamError(body *errorBody) error {
-	class := failure.ClassifyErrorEnvelope(body.Type, body.Code)
+	class := failure.ClassifyErrorEnvelope(body.Type, body.Code, body.Message)
 	detail := fmt.Sprintf("上游错误 type=%q code=%q", body.Type, body.Code)
 	if message := strings.TrimSpace(body.Message); message != "" {
 		detail += " message=" + message
