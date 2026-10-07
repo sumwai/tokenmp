@@ -214,6 +214,9 @@ func (m *Middleware) bodyResult(runtime *requestRuntime, result moejs.Value, hoo
 	if result.IsUndefined() || result.IsNull() {
 		return nil, nil
 	}
+	if err := rejectThenable(result, hook); err != nil {
+		return nil, err
+	}
 	encoded, err := runtime.runtime.AppendJSON(nil, result)
 	if err != nil {
 		return nil, err
@@ -222,6 +225,24 @@ func (m *Middleware) bodyResult(runtime *requestRuntime, result moejs.Value, hoo
 		return nil, fmt.Errorf("%s 返回值不是 JSON 对象", hook)
 	}
 	return encoded, nil
+}
+
+// rejectThenable 拦下 Promise 返回值，并说清原因。
+//
+// 钩子必须是同步函数：Runtime.Call 的返回值就直接被当作钩子返回值，宿主不 settle Promise。
+// 而 async 写法在 JS 里是最自然的写法，返回的 Promise 经 JSON 序列化后是一个空对象
+// （Promise 的自身可枚举属性为空），isJSONObject 只看首尾字节，于是会放行：
+//
+//	在 onResponse 上，响应体会被换成 {} 并直接写给客户端，而流水线不校验改写后的报文；
+//	在 onRequest 上，请求体会被换成 {}，下游解码失败后报的却是「请求体无法解码」，
+//	把排查方向引到请求体上。
+//
+// 所以这一条必须在此处拦下并把原因写在文案里，而不是交给下游的形状校验去猜。
+func rejectThenable(result moejs.Value, hook string) error {
+	if _, _, isPromise := moejs.PromiseResult(result); isPromise {
+		return fmt.Errorf("%s 返回了 Promise：钩子必须是同步函数，async 写法不会被求值", hook)
+	}
+	return nil
 }
 
 // callEvent 调用一次 onEvent，返回改写后的分片与是否丢弃；未改写时返回 nil。
@@ -251,6 +272,9 @@ func (m *Middleware) callEvent(state *requestState, runtime *requestRuntime, req
 	}
 	if result.IsUndefined() {
 		return nil, false, nil
+	}
+	if err = rejectThenable(result, hookOnEvent); err != nil {
+		return nil, false, err
 	}
 	raw, err := runtime.runtime.ToGo(result)
 	if err != nil {
@@ -288,6 +312,9 @@ func (m *Middleware) callStreamEnd(state *requestState, runtime *requestRuntime,
 	}
 	if result.IsUndefined() || result.IsNull() {
 		return nil, nil
+	}
+	if err = rejectThenable(result, hookOnStreamEnd); err != nil {
+		return nil, err
 	}
 	raw, err := runtime.runtime.ToGo(result)
 	if err != nil {

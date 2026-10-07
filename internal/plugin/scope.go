@@ -97,6 +97,12 @@ func readScope(runtime *moejs.Runtime) (scopeSpec, error) {
 	if !ok {
 		return scopeSpec{}, fmt.Errorf("scope 必须是对象")
 	}
+	if unknown := unknownScopeAxes(fields); len(unknown) > 0 {
+		// 轴名拼错原先会被忽略，而「不限制」是该包对无法解析的作用域的处置，
+		// 于是拼错轴名的后果是**范围变大** —— 与作用域要收窄的初衷正好相反。
+		return scopeSpec{}, fmt.Errorf("scope 含无法识别的轴：%s；可用轴为 %s、%s、%s",
+			strings.Join(unknown, "、"), AxisModels, AxisProtocols, AxisVendors)
+	}
 	spec := scopeSpec{}
 	if spec.models, err = readAxis(fields, AxisModels); err != nil {
 		return scopeSpec{}, err
@@ -108,6 +114,19 @@ func readScope(runtime *moejs.Runtime) (scopeSpec, error) {
 		return scopeSpec{}, err
 	}
 	return spec, nil
+}
+
+// unknownScopeAxes 返回无法识别的轴名，按字典序排列。
+func unknownScopeAxes(fields map[string]any) []string {
+	known := map[string]bool{AxisModels: true, AxisProtocols: true, AxisVendors: true}
+	unknown := make([]string, 0, len(fields))
+	for name := range fields {
+		if !known[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown
 }
 
 // readAxis 读出一个轴；缺失或为 null 表示不限制，非字符串数组属形状非法。
