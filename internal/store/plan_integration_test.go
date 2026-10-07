@@ -69,7 +69,7 @@ func TestUpstreamPlanIntegration(t *testing.T) {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
-	assertMigrationVersionCount(ctx, t, s.DB(), 5)
+	assertMigrationVersionCount(ctx, t, s.DB(), migrationCount(t))
 
 	const merchantID = 7
 	validFrom := time.Now().Truncate(time.Second).Add(-time.Hour)

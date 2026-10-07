@@ -36,6 +36,8 @@ CI 另外在真实 MySQL 上执行 `make check-integration` 与 `make e2e`，两
 对外可观察的行为变更必须在同一个 PR 里同步更新规范：
 
 - 端点路径、请求/响应字段、状态码、错误码、SSE 事件形态变更 → 更新 [docs/openapi.yaml](docs/openapi.yaml)；
+- Web 页面端点、信封字段、业务码与会话流程变更 → 更新 [docs/openapi-web.yaml](docs/openapi-web.yaml)，
+  页面接口类型与客户端由该文件生成，不得手写；
 - 参数处理、模型名替换、跨协议降级、用量与计费口径变更 → 更新 [docs/compatibility.md](docs/compatibility.md)；
 - 命令、目录或版本行为的变更 → 更新 [README.md](README.md)；
 - 环境变量、启动与迁移、优雅关闭等部署行为的变更 → 更新 [docs/deploy.md](docs/deploy.md)；

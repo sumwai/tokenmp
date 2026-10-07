@@ -1,7 +1,13 @@
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 
-.PHONY: build build-binary test lint fmt fmt-check check check-integration e2e tools
+# 仓库 Go 包清单：从 ./... 里剔除 web/node_modules。
+# 前端依赖树里可能附带第三方 Go 文件（如 flatted 的 golang 目录），
+# 它们不属于仓库源码，依赖变动不应影响 Go 门禁；golangci 侧另在
+# .golangci.yml 的 exclusions.paths 同步排除。
+GO_PKGS = $(shell $(GO) list ./... 2>/dev/null | grep -v node_modules)
+
+.PHONY: build build-binary test lint fmt fmt-check check check-integration e2e tools web-install web-lint web-test web-build
 
 # 编译检查。刻意把产物导到临时目录并在退出时删除，而不是裸跑 `go build ./...`：
 # 当模块里只有一个 main 包时（本仓库当前就是），`go build ./...` 会把可执行文件
@@ -12,7 +18,7 @@ build:
 	@set -eu; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
-	$(GO) build -o "$$tmp/" ./...
+	$(GO) build -o "$$tmp/" $(GO_PKGS)
 
 # 版本号取值优先级，取第一个非空者：
 #   1. VERSION 变量，两个来源都算：
@@ -73,7 +79,7 @@ build-binary:
 	$(GO) build -ldflags "-X main.version=$$version" -o bin/tokenmp ./cmd/tokenmp
 
 test:
-	$(GO) test -race ./...
+	$(GO) test -race $(GO_PKGS)
 
 lint:
 	$(GOLANGCI_LINT) run
@@ -108,6 +114,25 @@ check-integration:
 # cmd/tokenmp 下还有一批不依赖数据库的单测，它们不在本目标的验证范围内。
 e2e:
 	$(GO) test -tags=e2e -race -count=1 -run '^TestE2E' ./cmd/tokenmp/...
+
+# 前端目标：node 门槛，刻意不进 check —— check 的契约是只依赖 Go 与 golangci-lint
+# （见 AGENTS.md）。工具链版本由 .mise.toml 统一声明。
+
+# 装前端依赖（web/package-lock.json 由首次安装生成并入库）。
+web-install:
+	cd web && npm install
+
+# 前端静态检查。
+web-lint:
+	cd web && npm run lint
+
+# 前端单元测试。
+web-test:
+	cd web && npm test
+
+# 前端类型检查与构建；产物在 web/dist，由部署侧取用，不入二进制。
+web-build:
+	cd web && npm run build
 
 # 按 .mise.toml 装齐本机工具链。
 tools:

@@ -12,6 +12,12 @@ run:
 
 linters:
   default: none
+  exclusions:
+    paths:
+      # 前端依赖与产物里可能附带 Go 文件（如 flatted 的附属实现）：
+      # 它们不是仓库源码，不参与 Go 门禁。
+      - web/node_modules
+      - web/dist
   enable:
     # --- 未处理的错误与返回值 ---
     - errcheck

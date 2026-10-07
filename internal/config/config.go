@@ -54,6 +54,23 @@ const (
 
 	// 网关中间件插件：逗号分隔的文件或包目录列表，空值表示禁用插件层。
 	envPluginFiles = "TOKENMP_PLUGIN_FILES"
+
+	// 页面注册入口开关与反代信任：见 Serve 对应字段注释。
+	envWebSignupEnabled = "TOKENMP_WEB_SIGNUP_ENABLED"
+	envWebTrustProxy    = "TOKENMP_WEB_TRUST_PROXY"
+
+	// 邮件通道：验证码（重置密码、注销）的投递；Addr 为空视为未配置。
+	envSMTPAddr     = "TOKENMP_SMTP_ADDR"
+	envSMTPFrom     = "TOKENMP_SMTP_FROM"
+	envSMTPUser     = "TOKENMP_SMTP_USER"
+	envSMTPPassword = "TOKENMP_SMTP_PASSWORD" //nolint:gosec // G101：这是环境变量名，不是凭据值
+
+	// 第三方登录：成对的客户端凭据与共用回调地址；ID 或 secret 任一为空视为未配置。
+	envOAuthGoogleClientID     = "TOKENMP_OAUTH_GOOGLE_CLIENT_ID"
+	envOAuthGoogleClientSecret = "TOKENMP_OAUTH_GOOGLE_CLIENT_SECRET" //nolint:gosec // G101：环境变量名
+	envOAuthGitHubClientID     = "TOKENMP_OAUTH_GITHUB_CLIENT_ID"
+	envOAuthGitHubClientSecret = "TOKENMP_OAUTH_GITHUB_CLIENT_SECRET" //nolint:gosec // G101：环境变量名
+	envOAuthRedirectURI        = "TOKENMP_OAUTH_REDIRECT_URI"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -134,6 +151,24 @@ type Serve struct {
 	// 列表内每一项的合法性（存在性、扩展名、能否编译）在插件层加载时校验，
 	// 非法项在启动期报错而不是拖到第一个请求。
 	PluginFiles []string
+	// WebSignupEnabled 是页面注册入口开关；关闭时 signup 回 403，默认开。
+	WebSignupEnabled bool
+	// WebTrustProxy 为真时页面认证按 X-Forwarded-For 首段做频率限制；
+	// 默认关：直连暴露时该头可被客户端伪造，仅在可信反代之后打开。
+	WebTrustProxy bool
+	// SMTPAddr 是邮件服务器地址（host:port）；空表示不配置邮件通道，
+	// 验证码发送入口回 500。其余 SMTP 字段仅在 Addr 非空时有意义。
+	SMTPAddr     string
+	SMTPFrom     string
+	SMTPUser     string
+	SMTPPassword string
+	// 第三方登录的客户端凭据；任一提供方的 ID 或 secret 为空即不启用该提供方。
+	OAuthGoogleClientID     string
+	OAuthGoogleClientSecret string
+	OAuthGitHubClientID     string
+	OAuthGitHubClientSecret string
+	// OAuthRedirectURI 是第三方授权回调地址，必须与提供方控制台登记的一致。
+	OAuthRedirectURI string
 }
 
 // Load 从进程环境读出存储层配置。
@@ -224,6 +259,24 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	// 注册默认开、反代信任默认关：两个默认值都取「不配就安全/可用」的一侧。
+	webSignupEnabled, err := lookupBool(lookup, envWebSignupEnabled, true)
+	if err != nil {
+		return Serve{}, err
+	}
+	webTrustProxy, err := lookupBool(lookup, envWebTrustProxy, false)
+	if err != nil {
+		return Serve{}, err
+	}
+	smtpAddr, _ := lookup(envSMTPAddr)
+	smtpFrom, _ := lookup(envSMTPFrom)
+	smtpUser, _ := lookup(envSMTPUser)
+	smtpPassword, _ := lookup(envSMTPPassword)
+	googleID, _ := lookup(envOAuthGoogleClientID)
+	googleSecret, _ := lookup(envOAuthGoogleClientSecret)
+	githubID, _ := lookup(envOAuthGitHubClientID)
+	githubSecret, _ := lookup(envOAuthGitHubClientSecret)
+	redirectURI, _ := lookup(envOAuthRedirectURI)
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -243,7 +296,37 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		BreakerProbes:               breakerProbes,
 		ProbeInterval:               probeInterval,
 		PluginFiles:                 lookupPluginFiles(lookup),
+		WebSignupEnabled:            webSignupEnabled,
+		WebTrustProxy:               webTrustProxy,
+		SMTPAddr:                    strings.TrimSpace(smtpAddr),
+		SMTPFrom:                    strings.TrimSpace(smtpFrom),
+		SMTPUser:                    strings.TrimSpace(smtpUser),
+		SMTPPassword:                smtpPassword,
+		OAuthGoogleClientID:         strings.TrimSpace(googleID),
+		OAuthGoogleClientSecret:     googleSecret,
+		OAuthGitHubClientID:         strings.TrimSpace(githubID),
+		OAuthGitHubClientSecret:     githubSecret,
+		OAuthRedirectURI:            strings.TrimSpace(redirectURI),
 	}, nil
+}
+
+// lookupBool 读取布尔环境变量；缺失或空值取 fallback，其余取值必须可辨识。
+//
+// 拼错的值静默回落默认值，会让「明明配了却不生效」变成难排查的问题，
+// 因此无法识别的取值直接报错，与其它环境变量「非法即退出」的口径一致。
+func lookupBool(lookup func(string) (string, bool), key string, fallback bool) (bool, error) {
+	raw, ok := lookup(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s 取值 %q 无法识别：只接受 true/false（及 1/0、yes/no、on/off）", key, raw)
+	}
 }
 
 // lookupPluginFiles 读取逗号分隔的插件文件列表；缺失、空值或全空白项返回 nil，

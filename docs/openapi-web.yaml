@@ -1,0 +1,744 @@
+openapi: 3.1.0
+
+# TokenMP Web 页面通信契约。
+#
+# 职责：浏览器前端页面与服务端之间的全部通信。页面调用的端点只允许出现在本文件；
+# 数据面（模型转发与账户自助查询）在 docs/openapi.yaml，两者不混写。
+#
+# 单一事实源：接口路径、请求/响应字段、状态码与业务码以本文件为准。前端的响应类型与
+# 客户端一律由本文件生成，禁止手写；实现变更必须在同一 PR 内同步本文件。
+#
+# 路径段用单词，不使用连字符复合词（signin / signup / signout / challenge / otp）。
+#
+# 信封：所有端点共用 {code, data, message, page, size, total} 六字段信封。
+# 字段名统一 snake_case，与仓库既有 JSON 序列化风格一致。
+info:
+  title: TokenMP Web 页面通信
+  version: "0"
+  description: |
+    页面通信与数据面的分界：
+
+    - 本文件（`/api/v1/*`）：浏览器页面调用的会话、账户、业务数据端点；
+    - `docs/openapi.yaml`（`/v1/*`、`/v1beta/*`、`/healthz`）：模型转发与账户自助查询，
+      由模型客户端与集成调用，页面不直接调用。
+
+    信封语义：
+
+    - `code` 业务结果码，程序按它分支：`200` 成功，其余为失败；
+      HTTP 状态码表达传输层结果，两者在成功时一致，失败时以 `code` 为准；
+      `message` 面向用户的文案，程序不得按它分支。
+    - `data` 业务数据，结构由各端点声明；无数据时省略或 `null`。
+    - `page` / `size` / `total` 分页信息，仅列表端点填充，其余端点为 `null`。
+      `page` 从 1 起，`size` 为每页条数，`total` 为总条数。
+
+    业务码取值：
+
+    | code | 含义 |
+    |---|---|
+    | 200 | 成功 |
+    | 400 | 参数缺失或非法 |
+    | 401 | 未登录、会话失效或凭据错误 |
+    | 403 | 已登录但无权访问 |
+    | 404 | 资源不存在或登录方式未启用 |
+    | 409 | 状态冲突（邮箱已注册等） |
+    | 410 | 一次性加密公钥失效，重新获取后重试 |
+    | 429 | 触发频率限制 |
+    | 500 | 服务端错误 |
+
+    密码不传明文，流程按客户端指纹串起：
+
+    1. 客户端持有本地生成的 `fingerprint`（在本地持久化，随每次请求带回）；
+    2. 调 `GET /api/v1/auth/challenge?fingerprint=…` 换取一次性公钥，
+       服务端以该指纹为索引保存私钥，同一指纹再次获取会覆盖旧值；
+    3. 用 RSA-OAEP（SHA-256）加密密码，提交密文与同一 `fingerprint`；
+    4. 私钥取出即失效，密钥过期或已用返回 `code=410`，客户端重新执行 2-3 后重试一次。
+
+    登录方式：账号密码（signin / signup）与第三方 OAuth（Google、GitHub 等，
+    经 `providers` 列出、`oauth` 跳转、`exchange` 换取会话）。注销账号（erase）
+    与重置密码（reset）各自需要对应用途的 OTP。
+servers:
+  - url: http://localhost:8080
+    description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
+
+tags:
+  - name: auth
+    description: 注册、登录、会话与密码管理
+  - name: oauth
+    description: 第三方登录
+
+# 默认端点需要会话令牌；公开端点逐个置空。
+security:
+  - webSession: []
+
+paths:
+  /api/v1/auth/challenge:
+    get:
+      tags: [auth]
+      summary: 获取一次性密码加密公钥
+      description: |
+        注册、登录与改密前调用。以 `fingerprint` 为索引生成一对一次性密钥，
+        同一指纹重复获取会覆盖旧密钥；私钥取出即失效。同一来源受频率限制，
+        超限返回 `code=429`。
+      operationId: getAuthChallenge
+      security: []
+      parameters:
+        - name: fingerprint
+          in: query
+          required: true
+          description: 客户端本地持久化的指纹，作为一次性密钥的索引。
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+      responses:
+        "200":
+          description: 公钥获取成功。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ChallengeData"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/auth/signin:
+    post:
+      tags: [auth]
+      summary: 登录
+      description: |
+        校验账号与密码并签发会话。密码必须是经 `challenge` 公钥加密后的 base64 密文，
+        且 `fingerprint` 与取公钥时一致。账号不存在、密码错误、账号停用一律返回
+        `code=401` 且文案一致，不区分失败原因；`code=410` 表示密钥已失效，
+        重新取公钥后重试一次。
+      operationId: signin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SigninRequest"
+      responses:
+        "200":
+          description: 登录成功，签发会话令牌。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionTokens"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "410":
+          $ref: "#/components/responses/ChallengeExpired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/auth/signup:
+    post:
+      tags: [auth]
+      summary: 注册
+      description: |
+        创建账号并直接签发会话。密码经 `challenge` 公钥加密；
+        邮箱已存在返回 `code=409`。是否开放注册由服务端配置决定，
+        关闭时返回 `code=403`。
+      operationId: signup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupRequest"
+      responses:
+        "200":
+          description: 注册成功，签发会话令牌。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionTokens"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: 注册入口已关闭，`code=403`。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "409":
+          description: 邮箱或用户名已被使用，`code=409`，两者不作区分。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "410":
+          $ref: "#/components/responses/ChallengeExpired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: 刷新会话令牌
+      description: 用刷新令牌换发新的访问令牌；刷新令牌一次性轮换，旧值同时作废。
+      operationId: refreshSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: 换发成功。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AccessTokenData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/session:
+    get:
+      tags: [auth]
+      summary: 查询当前会话身份
+      description: |
+        返回当前登录身份、角色与已绑定的第三方登录方式，前端据此渲染导航清单与首页段落；
+        角色与权限的真相在服务端，前端不硬编码角色取值。
+      operationId: getAuthSession
+      responses:
+        "200":
+          description: 会话有效。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/signout:
+    post:
+      tags: [auth]
+      summary: 登出
+      description: 吊销当前会话令牌；重复调用同样返回成功。
+      operationId: signout
+      responses:
+        "200":
+          description: 登出成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/otp:
+    post:
+      tags: [auth]
+      summary: 发送一次性验证码
+      description: |
+        向账号绑定邮箱发送一次性验证码（OTP），`purpose` 区分用途：
+        `reset` 用于重置密码，`erase` 用于注销账号。无论邮箱是否存在都返回成功，
+        避免通过响应差异枚举账号；同一来源受频率限制。
+      operationId: sendAuthOtp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendOtpRequest"
+      responses:
+        "200":
+          description: 已受理（邮箱不存在时不发信但同样返回成功）。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/auth/erase:
+    post:
+      tags: [auth]
+      summary: 注销账号
+      description: |
+        注销当前登录账号。提交经 `purpose=erase` 获取的 OTP 验证身份；
+        成功后该账号立即不可登录，全部会话与刷新令牌失效，重复调用返回 `code=401`。
+        账号标识与关联数据的保留策略由部署方配置决定。
+      operationId: eraseAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EraseRequest"
+      responses:
+        "200":
+          description: 注销成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/v1/auth/reset:
+    post:
+      tags: [auth]
+      summary: 重置密码
+      description: |
+        校验邮箱与 OTP 后设置新密码，新密码经 `challenge` 公钥加密。
+        成功后该账号的全部会话与刷新令牌失效，需重新登录。
+      operationId: resetPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetRequest"
+      responses:
+        "200":
+          description: 重置成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "410":
+          $ref: "#/components/responses/ChallengeExpired"
+
+  /api/v1/auth/password:
+    put:
+      tags: [auth]
+      summary: 修改密码
+      description: |
+        已登录下调用，校验当前密码后设置新密码。当前密码与新密码各经一次
+        `challenge` 取公钥加密，分别携带对应的 `fingerprint`。
+        成功后除当前会话外的全部会话失效。
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          description: 修改成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "410":
+          $ref: "#/components/responses/ChallengeExpired"
+
+  /api/v1/auth/providers:
+    get:
+      tags: [oauth]
+      summary: 列出可用登录方式
+      description: 返回启用中的第三方登录提供方，前端据此渲染登录页的第三方入口。
+      operationId: listAuthProviders
+      security: []
+      responses:
+        "200":
+          description: 登录方式列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/AuthProvider"
+
+  /api/v1/auth/oauth/{provider}:
+    get:
+      tags: [oauth]
+      summary: 获取第三方授权跳转地址
+      description: |
+        返回提供方的授权页地址（含服务端签发的 `state`），客户端整页跳转；
+        `state` 在换取会话时原样带回并由服务端校验。提供方未启用返回 `code=404`。
+      operationId: getAuthOauthUrl
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: 提供方标识，取值来自 `providers` 端点（如 `google`、`github`）。
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 授权地址。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [authorize_url, state]
+                        properties:
+                          authorize_url:
+                            type: string
+                            format: uri
+                          state:
+                            type: string
+                        additionalProperties: false
+        "404":
+          description: 提供方不存在或未启用，`code=404`。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+
+  /api/v1/auth/oauth/{provider}/exchange:
+    post:
+      tags: [oauth]
+      summary: 用第三方授权码换取会话
+      description: |
+        回调落在前端路由后，客户端把提供方返回的 `code` 与 `state` 提交到本端点；
+        服务端校验 `state`、向提供方换 token、按邮箱匹配或创建账号并签发会话。
+        提供方未启用返回 `code=404`，`state` 不匹配返回 `code=400`。
+      operationId: exchangeAuthOauth
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state]
+              properties:
+                code:
+                  type: string
+                  description: 提供方回调带到前端的授权码。
+                state:
+                  type: string
+              additionalProperties: false
+      responses:
+        "200":
+          description: 换取成功，签发会话令牌。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SessionTokens"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: 提供方不存在或未启用，`code=404`。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+components:
+  securitySchemes:
+    webSession:
+      type: http
+      scheme: bearer
+      description: |
+        会话访问令牌，登录响应的 `data.access_token` 取得，随 `Authorization: Bearer` 提交。
+        与数据面的模型 API 密钥是两套独立凭据，不得互换。
+
+  schemas:
+    Envelope:
+      type: object
+      description: 页面通信的统一信封，六个字段固定出现。
+      required: [code, data, message, page, size, total]
+      properties:
+        code:
+          type: integer
+          description: 业务结果码，取值见 info.description 的业务码表；程序按它分支。
+        data:
+          description: 业务数据，结构由各端点声明；无数据时省略或为 null。
+        message:
+          type: string
+          description: 面向用户的文案；程序不得按它分支。
+        page:
+          type: [integer, "null"]
+          description: 当前页码，从 1 起；非列表端点为 null。
+        size:
+          type: [integer, "null"]
+          description: 每页条数；非列表端点为 null。
+        total:
+          type: [integer, "null"]
+          description: 总条数；非列表端点为 null。
+
+    EncryptedSecret:
+      type: string
+      description: 经一次性公钥 RSA-OAEP（SHA-256）加密后的 base64 密文。
+      contentEncoding: base64
+
+    Fingerprint:
+      type: string
+      minLength: 8
+      maxLength: 128
+      description: |
+        客户端本地生成并持久化的指纹，同时充当一次性密钥的标识：
+        取公钥时提交它作为索引，提交密文时携带同一值供服务端定位私钥。
+
+    ChallengeData:
+      type: object
+      required: [algorithm, hash, public_key, expires_in]
+      properties:
+        algorithm:
+          type: string
+          const: RSA-OAEP
+        hash:
+          type: string
+          const: SHA-256
+        public_key:
+          type: string
+          description: SPKI DER 格式的 base64 公钥。
+        expires_in:
+          type: integer
+          description: 密钥有效期，单位秒。
+      additionalProperties: false
+
+    SigninRequest:
+      type: object
+      required: [username, password, fingerprint]
+      properties:
+        username:
+          type: string
+          description: 账号标识（邮箱或手机号）。
+        password:
+          $ref: "#/components/schemas/EncryptedSecret"
+        fingerprint:
+          $ref: "#/components/schemas/Fingerprint"
+      additionalProperties: false
+
+    SignupRequest:
+      type: object
+      required: [email, username, password, fingerprint]
+      properties:
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+          minLength: 2
+          maxLength: 64
+        password:
+          $ref: "#/components/schemas/EncryptedSecret"
+        fingerprint:
+          $ref: "#/components/schemas/Fingerprint"
+      additionalProperties: false
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+      additionalProperties: false
+
+    SessionTokens:
+      type: object
+      required: [access_token, refresh_token, expires_in, user]
+      properties:
+        access_token:
+          type: string
+          description: 访问令牌，随 Authorization 头提交。
+        refresh_token:
+          type: string
+          description: 刷新令牌，一次性轮换。
+        expires_in:
+          type: integer
+          description: 访问令牌有效期，单位秒。
+        user:
+          $ref: "#/components/schemas/SessionUser"
+      additionalProperties: false
+
+    AccessTokenData:
+      type: object
+      required: [access_token, expires_in]
+      properties:
+        access_token:
+          type: string
+        expires_in:
+          type: integer
+          description: 访问令牌有效期，单位秒。
+      additionalProperties: false
+
+    SessionData:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+      additionalProperties: false
+
+    SessionUser:
+      type: object
+      required: [id, username, role, identities]
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        role:
+          type: string
+          description: 角色标识，取值由服务端下发；前端按值渲染导航与权限，不硬编码。
+        merchant_id:
+          type: [integer, "null"]
+          format: int64
+          description: 归属商家标识；无归属时为 null。
+        identities:
+          type: array
+          description: 已绑定的登录身份，`password` 表示已设密码，其余为第三方提供方标识。
+          items:
+            type: string
+      additionalProperties: false
+
+    AuthProvider:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          description: 提供方标识，用于 `oauth` 与 `exchange` 端点的 `provider` 参数。
+        name:
+          type: string
+          description: 展示名。
+      additionalProperties: false
+
+    SendOtpRequest:
+      type: object
+      required: [email, purpose]
+      properties:
+        email:
+          type: string
+          format: email
+        purpose:
+          type: string
+          enum: [reset, erase]
+          description: 验证码用途：`reset` 重置密码，`erase` 注销账号；两者不可混用。
+      additionalProperties: false
+
+    EraseRequest:
+      type: object
+      required: [otp]
+      properties:
+        otp:
+          type: string
+          description: 经 `purpose=erase` 获取的一次性验证码。
+      additionalProperties: false
+
+    ResetRequest:
+      type: object
+      required: [email, otp, password, fingerprint]
+      properties:
+        email:
+          type: string
+          format: email
+        otp:
+          type: string
+          description: 经 `purpose=reset` 获取的一次性验证码。
+        password:
+          $ref: "#/components/schemas/EncryptedSecret"
+        fingerprint:
+          $ref: "#/components/schemas/Fingerprint"
+      additionalProperties: false
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, current_fingerprint, new_password, new_fingerprint]
+      properties:
+        current_password:
+          $ref: "#/components/schemas/EncryptedSecret"
+        current_fingerprint:
+          $ref: "#/components/schemas/Fingerprint"
+        new_password:
+          $ref: "#/components/schemas/EncryptedSecret"
+        new_fingerprint:
+          $ref: "#/components/schemas/Fingerprint"
+      additionalProperties: false
+
+  responses:
+    BadRequest:
+      description: 参数缺失或非法，`code=400`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    Unauthorized:
+      description: 未登录、会话失效或凭据错误，`code=401`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    ChallengeExpired:
+      description: 一次性加密公钥已失效，`code=410`；重新获取公钥后重试一次。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    TooManyRequests:
+      description: 触发频率限制，`code=429`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"

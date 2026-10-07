@@ -28,6 +28,9 @@ node_modules/
 web/dist/
 web/.vite/
 
+# 本地 UI 示例（仅本地查看，不入库）
+web/prototypes/
+
 # 编辑器与系统
 .idea/
 .vscode/

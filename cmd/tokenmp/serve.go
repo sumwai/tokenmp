@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	webauth "github.com/sumwai/tokenmp/internal/auth"
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/gateway"
 	"github.com/sumwai/tokenmp/internal/observability"
@@ -68,6 +69,18 @@ func cmdServe(stderr io.Writer) int {
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
 		PluginFiles:                 cfg.PluginFiles,
 		PluginLogger:                observability.NewJSONLogger(os.Stdout),
+		WebSignupEnabled:            cfg.WebSignupEnabled,
+		WebTrustProxy:               cfg.WebTrustProxy,
+		WebAuthLogger:               observability.NewJSONLogger(os.Stdout),
+		// 邮件通道只在配置了地址时装配：未配置保持 nil，验证码发送入口回 500。
+		WebMailer: webauth.NewSMTPMailer(webauth.SMTPConfig{
+			Addr:     cfg.SMTPAddr,
+			From:     cfg.SMTPFrom,
+			User:     cfg.SMTPUser,
+			Password: cfg.SMTPPassword,
+		}),
+		// 第三方登录只装配凭据齐全的提供方；回调地址共用一个配置。
+		WebOAuthProviders: buildOAuthProviders(cfg),
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
@@ -96,4 +109,44 @@ func cmdServe(stderr io.Writer) int {
 		return exitFailure
 	}
 	return exitOK
+}
+
+// 第三方登录的端点常量：写在装配处而不是能力包里，
+// 能力包只认字段，提供方的 URL 演进不牵动内部实现。
+const (
+	oauthGoogleAuthorizeURL = "https://accounts.google.com/o/oauth2/v2/auth"
+	oauthGoogleTokenURL     = "https://oauth2.googleapis.com/token" //nolint:gosec // G101：这是公开端点 URL
+	oauthGoogleUserInfoURL  = "https://openidconnect.googleapis.com/v1/userinfo"
+	oauthGoogleScope        = "openid email profile"
+
+	oauthGitHubAuthorizeURL = "https://github.com/login/oauth/authorize"
+	oauthGitHubTokenURL     = "https://github.com/login/oauth/access_token" //nolint:gosec // G101：这是公开端点 URL
+	oauthGitHubUserInfoURL  = "https://api.github.com/user"
+	oauthGitHubEmailsURL    = "https://api.github.com/user/emails"
+	oauthGitHubScope        = "read:user user:email"
+)
+
+// buildOAuthProviders 组装凭据齐全的提供方；ID 或 secret 任一为空即不启用。
+func buildOAuthProviders(cfg config.Serve) []webauth.OAuthProvider {
+	var providers []webauth.OAuthProvider
+	if cfg.OAuthGoogleClientID != "" && cfg.OAuthGoogleClientSecret != "" {
+		providers = append(providers, webauth.OAuthProvider{
+			ID: "google", Name: "Google",
+			ClientID: cfg.OAuthGoogleClientID, ClientSecret: cfg.OAuthGoogleClientSecret,
+			RedirectURI:  cfg.OAuthRedirectURI,
+			AuthorizeURL: oauthGoogleAuthorizeURL, TokenURL: oauthGoogleTokenURL,
+			UserInfoURL: oauthGoogleUserInfoURL, Scope: oauthGoogleScope,
+		})
+	}
+	if cfg.OAuthGitHubClientID != "" && cfg.OAuthGitHubClientSecret != "" {
+		providers = append(providers, webauth.OAuthProvider{
+			ID: "github", Name: "GitHub",
+			ClientID: cfg.OAuthGitHubClientID, ClientSecret: cfg.OAuthGitHubClientSecret,
+			RedirectURI:  cfg.OAuthRedirectURI,
+			AuthorizeURL: oauthGitHubAuthorizeURL, TokenURL: oauthGitHubTokenURL,
+			UserInfoURL: oauthGitHubUserInfoURL, EmailsURL: oauthGitHubEmailsURL,
+			Scope: oauthGitHubScope,
+		})
+	}
+	return providers
 }

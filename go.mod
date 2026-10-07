@@ -11,4 +11,7 @@ require (
 	github.com/shopspring/decimal v1.4.0
 )
 
-require filippo.io/edwards25519 v1.2.0 // indirect
+require (
+	filippo.io/edwards25519 v1.2.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+)

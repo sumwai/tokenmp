@@ -26,6 +26,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/gemini"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
+	webauth "github.com/sumwai/tokenmp/internal/auth"
 	"github.com/sumwai/tokenmp/internal/circuit"
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -103,6 +104,8 @@ type gatewayStore interface {
 	plan.Reader
 	// plan.Repo 提供采集器所需的数据面（探针目标读取与采集结果写回）。
 	plan.Repo
+	// webauth.Store 提供页面认证所需的账号、会话与身份读写。
+	webauth.Store
 }
 
 // 编译期断言：真实存储层满足装配层的依赖面。
@@ -170,6 +173,17 @@ type Options struct {
 	PluginFiles []string
 	// PluginLogger 记录插件装载、钩子失败与控制台输出；nil 时不记录。
 	PluginLogger *slog.Logger
+	// WebSignupEnabled 是页面注册入口开关；关闭时 signup 回 403。
+	WebSignupEnabled bool
+	// WebTrustProxy 为真时页面认证按 X-Forwarded-For 首段做频率限制；
+	// 仅在可信反代之后打开：直连暴露时该头可被客户端伪造。
+	WebTrustProxy bool
+	// WebAuthLogger 记录页面认证的安全事件（刷新令牌重放等）；nil 时不记录。
+	WebAuthLogger *slog.Logger
+	// WebMailer 是验证码投递端口；nil 表示邮件通道未配置，发送入口回 500。
+	WebMailer webauth.Mailer
+	// WebOAuthProviders 是已配置的第三方登录提供方；空表示不对外列出。
+	WebOAuthProviders []webauth.OAuthProvider
 }
 
 // Gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -360,6 +374,15 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	// 自助查询共用数据面同一鉴权中间件：头格式、密钥失效与账户停用三类失败
 	// 与转发端点回同一种 401，不另写一套鉴权口径。
 	mux.Handle(me.AccountPath, auth.Middleware(me.NewHandler(me.New(st, opts.Now))))
+	// 页面认证挂在自己的子树：与数据面共用一个 mux，但走独立信封、独立错误码
+	// 与独立凭据，子树内未声明的路径也回页面信封 404 而不是数据面错误体。
+	mux.Handle(webauth.PathPrefix, webauth.NewHandler(webauth.New(st, webauth.Options{
+		SignupDisabled: !opts.WebSignupEnabled,
+		TrustProxy:     opts.WebTrustProxy,
+		Logger:         opts.WebAuthLogger,
+		Mailer:         opts.WebMailer,
+		OAuthProviders: opts.WebOAuthProviders,
+	})))
 	mux.HandleFunc("/", notFoundJSON)
 
 	return &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector}, nil

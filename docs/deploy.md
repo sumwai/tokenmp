@@ -56,6 +56,17 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 | `TOKENMP_UPSTREAM_BREAKER_PROBE_CONCURRENCY` | 否 | `1` | 条 | 半开态同时放行的探测条数 |
 | `TOKENMP_UPSTREAM_PROBE_INTERVAL` | 否 | `5m` | 时长 | 上游套餐探针的采集周期；快照超过它的两倍视为未知 |
 | `TOKENMP_PLUGIN_FILES` | 否 | 空（禁用） | 文件或包目录列表 | 逗号分隔的中间件文件或包目录；每项去空白，空值表示禁用插件层 |
+| `TOKENMP_WEB_SIGNUP_ENABLED` | 否 | `true` | 布尔 | 页面注册入口；取值 `true/false`、`1/0`、`yes/no`、`on/off`，其余报错 |
+| `TOKENMP_WEB_TRUST_PROXY` | 否 | `false` | 布尔 | 为真时页面认证按 `X-Forwarded-For` 首段做频率限制；仅在可信反代之后打开 |
+| `TOKENMP_SMTP_ADDR` | 否 | 空（未配置） | `host:port` | 验证码投递的 SMTP 地址；空值表示未配置，发送入口回 500 |
+| `TOKENMP_SMTP_FROM` | 否 | 空 | 地址 | 发件人；仅在 `ADDR` 非空时有意义 |
+| `TOKENMP_SMTP_USER` | 否 | 空 | 字符串 | SMTP 认证账号；匿名中继留空 |
+| `TOKENMP_SMTP_PASSWORD` | 否 | 空 | 字符串 | SMTP 认证口令 |
+| `TOKENMP_OAUTH_GOOGLE_CLIENT_ID` | 否 | 空（未启用） | 字符串 | Google 登录的客户端 ID；与 secret 成对非空才列入登录方式 |
+| `TOKENMP_OAUTH_GOOGLE_CLIENT_SECRET` | 否 | 空 | 字符串 | Google 登录的客户端密钥 |
+| `TOKENMP_OAUTH_GITHUB_CLIENT_ID` | 否 | 空（未启用） | 字符串 | GitHub 登录的客户端 ID；与 secret 成对非空才列入登录方式 |
+| `TOKENMP_OAUTH_GITHUB_CLIENT_SECRET` | 否 | 空 | 字符串 | GitHub 登录的客户端密钥 |
+| `TOKENMP_OAUTH_REDIRECT_URI` | 否 | 空 | URL | 第三方授权回调地址，必须与提供方控制台登记的一致 |
 
 取值规则：
 
