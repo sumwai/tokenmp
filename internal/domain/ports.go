@@ -207,6 +207,10 @@ type Route struct {
 	Protocol      Protocol
 	UpstreamModel string
 	BaseURL       string
+	// Vendor 是渠道的厂商标签（`channel create --vendor`），由运营命名。
+	// 它与 ChannelID 分工不同：后者是环境事实（重建库就换号），本字段是可读、可跨环境复现、
+	// 可以写进配置的标识。中间件作用域就靠它认定 provider，不靠主键。
+	Vendor string
 	// CredentialRef 是不透明引用，装配层的请求头提供者按它取出明文凭据并注入请求头。
 	// 它本身不携带明文，以免随日志泄露。
 	CredentialRef string

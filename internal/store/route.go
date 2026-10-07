@@ -136,6 +136,10 @@ type RouteCandidate struct {
 	ChannelType ChannelType
 	BaseURL     string
 	CredGroup   string
+	// Vendor 是渠道的厂商标签（`channel create --vendor`），由运营命名。
+	// 它与 ChannelID 分工不同：后者是环境事实（重建库就换号），本字段是可以写进配置、
+	// 可以跨环境复现的可读标识，中间件作用域就靠它认定 provider。
+	Vendor string
 	// Priority 是渠道的路由排序值，值大者优先；同优先级内由选路策略决定顺序。
 	// 存储层按它降序返回，但同优先级内的加权随机不在存储层完成，故把取值交给调用方。
 	Priority             int
@@ -151,7 +155,7 @@ type RouteCandidate struct {
 //
 // 同协议查询与不限协议查询只差一个 type 谓词：共用同一段前缀使两条查询的列序、
 // 排序口径与扫描目标必然一致，跨协议补段时的行解析不必另写一份。
-const routeCandidateColumns = `SELECT c.id, c.type, c.base_url, c.cred_group, c.priority, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
+const routeCandidateColumns = `SELECT c.id, c.type, c.base_url, c.cred_group, c.vendor, c.priority, c.weight, c.rate_limit_qps, c.rate_limit_concurrency, c.config, m.upstream_model, m.request_overrides
 FROM upstream_channel c
 JOIN upstream_model_map m ON m.channel_id = c.id
 WHERE `
@@ -217,7 +221,7 @@ func scanRouteCandidates(rows rowIter) ([]RouteCandidate, error) {
 			c           RouteCandidate
 			channelType string
 		)
-		if err := rows.Scan(&c.ChannelID, &channelType, &c.BaseURL, &c.CredGroup, &c.Priority, &c.Weight,
+		if err := rows.Scan(&c.ChannelID, &channelType, &c.BaseURL, &c.CredGroup, &c.Vendor, &c.Priority, &c.Weight,
 			&c.RateLimitQPS, &c.RateLimitConcurrency, &c.Config, &c.UpstreamModel, &c.RequestOverrides); err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
 		}

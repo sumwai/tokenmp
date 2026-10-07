@@ -273,6 +273,8 @@ func (p *Pipeline) writeCompletion(
 	if completion == nil || completion.Response == nil {
 		return nil, domain.NewError(domain.CodeInternal, "上游返回了空响应")
 	}
+	// 与流式路径同一口径：非流式响应中间件的作用域也按 vendor 判定。
+	ctx = domain.WithRouteFacts(ctx, domain.RouteFacts{Vendor: route.Vendor})
 	sameProtocol := route.Protocol == req.Protocol
 	body := completion.Raw
 	if !sameProtocol {
@@ -305,6 +307,9 @@ func (p *Pipeline) streamAttempt(
 	body []byte,
 	out io.Writer,
 ) attemptResult {
+	// 选路事实在本次尝试的入口挂一次：中间件作用域要按 vendor 判定 provider，
+	// 而 vendor 只有选路之后才知道。逐分片挂会白付一次分配。
+	ctx = domain.WithRouteFacts(ctx, domain.RouteFacts{Vendor: route.Vendor})
 	streamClient := client.NewStream()
 	if streamClient == nil {
 		return attemptResult{Err: domain.NewError(domain.CodeInternal, "派生流式适配器失败")}
