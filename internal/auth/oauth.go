@@ -78,10 +78,10 @@ type oauthStateEntry struct {
 
 // stateSet 是一次性 CSRF state 的内存表。
 type stateSet struct {
-	mu    sync.Mutex
-	used  map[string]oauthStateEntry
-	ttl   time.Duration
-	now   func() time.Time
+	mu   sync.Mutex
+	used map[string]oauthStateEntry
+	ttl  time.Duration
+	now  func() time.Time
 }
 
 func newStateSet(ttl time.Duration, now func() time.Time) *stateSet {

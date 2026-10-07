@@ -43,9 +43,15 @@ export function saveOauthProvider(provider: string): void {
   sessionStorage.setItem(OAUTH_PROVIDER_KEY, provider);
 }
 
-/** takeOauthProvider 取出并清除记录中的提供方。 */
-export function takeOauthProvider(): string | null {
-  const value = sessionStorage.getItem(OAUTH_PROVIDER_KEY);
+/** oauthProvider 读取记录中的提供方（非破坏性）。
+ *
+ * 刻意不提供“读取即删”形态：开发模式的 StrictMode 会把 effect 跑两次，
+ * 破坏性读取会让第二次拿到空值；清除放在兑换成功之后。 */
+export function oauthProvider(): string | null {
+  return sessionStorage.getItem(OAUTH_PROVIDER_KEY);
+}
+
+/** clearOauthProvider 清除提供方记录（兑换成功或放弃时）。 */
+export function clearOauthProvider(): void {
   sessionStorage.removeItem(OAUTH_PROVIDER_KEY);
-  return value;
 }
