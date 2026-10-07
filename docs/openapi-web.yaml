@@ -1366,6 +1366,12 @@ components:
           description: |
             是否存在可取的脱敏报文。仅失败请求保留报文，且只保留 7 天，
             其余情况为 `false`。
+        stream:
+          type: boolean
+          description: 本次是否为流式请求。
+        written_bytes:
+          type: integer
+          description: 已写给客户端的响应体字节数。
       additionalProperties: false
 
     PageOfRequestItem:
@@ -1416,7 +1422,8 @@ components:
     RequestDetail:
       type: object
       description: 一条请求记录的完整视图。
-      required: [request, attempts, request_shape, error_response_shape]
+      required: [request, attempts, request_shape, upstream_request_shape,
+        error_response_shape, rewritten_parts, client_ip, user_agent]
       properties:
         request:
           $ref: "#/components/schemas/RequestItem"
@@ -1429,12 +1436,34 @@ components:
           oneOf:
             - $ref: "#/components/schemas/RedactedPayload"
             - type: "null"
-          description: 脱敏后的请求结构；无报文时为 `null`。
+          description: 脱敏后的客户端请求结构；无报文时为 `null`。
+        upstream_request_shape:
+          oneOf:
+            - $ref: "#/components/schemas/RedactedPayload"
+            - type: "null"
+          description: |
+            脱敏后实际发往上游的请求结构。与 `request_shape` 的差异即网关改写的部分：
+            模型名替换、协议重建、报文改写。无报文时为 `null`。
         error_response_shape:
           oneOf:
             - $ref: "#/components/schemas/RedactedPayload"
             - type: "null"
           description: 脱敏后的错误响应结构；成功请求或超期后为 `null`。
+        rewritten_parts:
+          type: array
+          description: 网关对报文做过的改写标注，按出现顺序排列；未改写时为空数组。
+          items:
+            type: string
+        client_ip:
+          type: string
+          description: |
+            客户端地址。取自连接层，存在反向代理时为代理地址；客户端可影响其取值，
+            只作排障线索，不作为安全判定依据。
+        user_agent:
+          type: string
+          description: |
+            客户端自报的 User-Agent，按上限截断；未自报时为空串。可伪造，
+            只作排障线索。
       additionalProperties: false
 
   parameters:
