@@ -14,6 +14,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/gateway"
 	"github.com/sumwai/tokenmp/internal/observability"
+	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -45,6 +46,14 @@ func cmdServe(stderr io.Writer) int {
 	// 在装配之前建立：探针采集器与 HTTP 服务共用同一个可取消的上下文。
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 中间件清单在本机文件里，由 `admin plugin` 维护：读出启用项交给网关装配。
+	// 清单读不出来按配置错误处理，不静默当作没有插件。
+	registry, err := plugin.LoadRegistry(cfg.PluginStateFile)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
+		return exitFailure
+	}
+
 	gw, err := gateway.New(st, gateway.Options{
 		CompleteTimeout:             cfg.CompleteTimeout,
 		StreamFirstByteTimeout:      cfg.StreamFirstByteTimeout,
@@ -66,7 +75,7 @@ func cmdServe(stderr io.Writer) int {
 		ProbeLogger:                 observability.NewJSONLogger(os.Stdout),
 		Logger:                      observability.NewAccessLogger(os.Stdout),
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
-		PluginFiles:                 cfg.PluginFiles,
+		PluginFiles:                 registry.EnabledPaths(),
 		PluginLogger:                observability.NewJSONLogger(os.Stdout),
 		WebSignupEnabled:            cfg.WebSignupEnabled,
 		WebTrustProxy:               cfg.WebTrustProxy,

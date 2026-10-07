@@ -52,8 +52,9 @@ const (
 	// 上游套餐探针的采集周期。
 	envProbeInterval = "TOKENMP_UPSTREAM_PROBE_INTERVAL"
 
-	// 网关中间件插件：逗号分隔的文件或包目录列表，空值表示禁用插件层。
-	envPluginFiles = "TOKENMP_PLUGIN_FILES"
+	// 网关中间件插件的本机清单文件：登记了哪些插件、哪些启用。
+	// 插件列表不走环境变量，用 `admin plugin` 增删；这里只指清单文件的位置。
+	envPluginStateFile = "TOKENMP_PLUGIN_STATE_FILE"
 
 	// 页面注册入口开关与反代信任：见 Serve 对应字段注释。
 	envWebSignupEnabled = "TOKENMP_WEB_SIGNUP_ENABLED"
@@ -78,6 +79,13 @@ const (
 // 故意给一个具体取值而不是空串：空串在 net.Listen 里等价于绑全部接口的随机端口，
 // 那既不能作为服务地址被访问，也掩盖了「没配监听」这个事实。
 const defaultListen = ":8080"
+
+// defaultPluginStateFile 是未配置插件清单路径时的默认值。
+//
+// 取 /var/lib 下的固定位置：清单由 `admin plugin` 与 `serve` 共同读写，两者可能以
+// 不同工作目录、不同用户身份运行，相对路径或用户目录都不可靠。开发机用
+// TOKENMP_PLUGIN_STATE_FILE 指到可写目录即可。
+const defaultPluginStateFile = "/var/lib/tokenmp/plugins.json"
 
 // serve 子命令未显式配置时的默认值。
 const (
@@ -147,10 +155,10 @@ type Serve struct {
 	BreakerProbes int
 	// ProbeInterval 是上游套餐探针的采集周期；快照超过它的两倍视为未知。
 	ProbeInterval time.Duration
-	// PluginFiles 是网关中间件插件的文件或包目录列表；空表示禁用插件层。
-	// 列表内每一项的合法性（存在性、扩展名、能否编译）在插件层加载时校验，
-	// 非法项在启动期报错而不是拖到第一个请求。
-	PluginFiles []string
+	// PluginStateFile 是网关中间件插件的本机清单文件路径；文件不存在视为没注册插件。
+	// 清单内容（注册了哪些插件、哪些启用）由 `admin plugin` 维护，随二进制重新读取。
+	// 它不是环境变量里的插件列表：插件路径是运行机的事实，多实例共享一个库时不能共用。
+	PluginStateFile string
 	// WebSignupEnabled 是页面注册入口开关；关闭时 signup 回 403，默认开。
 	WebSignupEnabled bool
 	// WebTrustProxy 为真时页面认证按 X-Forwarded-For 首段做频率限制；
@@ -181,12 +189,12 @@ func LoadServe() (Serve, error) {
 	return loadServe(os.LookupEnv)
 }
 
-// LoadPluginFiles 从进程环境读出网关中间件插件列表。
+// LoadPluginStateFile 从进程环境读出网关中间件清单文件的路径。
 //
-// 单独提供一个入口：管理面的 `plugin list` 只读这项配置，不应为了列插件而
+// 单独提供一个入口：管理面的 `plugin` 组只读写这份清单，不应为了它而
 // 要求 MySQL 连接配置已就绪。
-func LoadPluginFiles() []string {
-	return lookupPluginFiles(os.LookupEnv)
+func LoadPluginStateFile() string {
+	return lookupPluginStateFile(os.LookupEnv)
 }
 
 // loadServe 在存储配置之上补出监听、超时分级与连接池参数；缺失项用默认值。
@@ -295,7 +303,7 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		BreakerCooldown:             breakerCooldown,
 		BreakerProbes:               breakerProbes,
 		ProbeInterval:               probeInterval,
-		PluginFiles:                 lookupPluginFiles(lookup),
+		PluginStateFile:             lookupPluginStateFile(lookup),
 		WebSignupEnabled:            webSignupEnabled,
 		WebTrustProxy:               webTrustProxy,
 		SMTPAddr:                    strings.TrimSpace(smtpAddr),
@@ -329,25 +337,20 @@ func lookupBool(lookup func(string) (string, bool), key string, fallback bool) (
 	}
 }
 
-// lookupPluginFiles 读取逗号分隔的插件文件列表；缺失、空值或全空白项返回 nil，
-// 表示禁用插件层。列表项只做去空白，存在性与扩展名由插件层校验。
-func lookupPluginFiles(lookup func(string) (string, bool)) []string {
-	raw, ok := lookup(envPluginFiles)
-	if !ok || strings.TrimSpace(raw) == "" {
-		return nil
+// lookupPluginStateFile 读取清单文件路径；缺失或空值取默认路径。
+//
+// 路径本身不做存在性检查：文件不存在等同没注册任何插件，首次 `admin plugin add`
+// 会创建它。
+func lookupPluginStateFile(lookup func(string) (string, bool)) string {
+	raw, ok := lookup(envPluginStateFile)
+	if !ok {
+		return defaultPluginStateFile
 	}
-	fields := strings.Split(raw, ",")
-	files := make([]string, 0, len(fields))
-	for _, field := range fields {
-		trimmed := strings.TrimSpace(field)
-		if trimmed != "" {
-			files = append(files, trimmed)
-		}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultPluginStateFile
 	}
-	if len(files) == 0 {
-		return nil
-	}
-	return files
+	return trimmed
 }
 
 // load 接受一个查找函数而不是直接读 os，便于测试构造各种环境。

@@ -530,25 +530,27 @@ export function onResponse(body, ctx) {
 }
 ```
 
-### 9.2 配置启用
+### 9.2 注册与启用
 
-中间件文件列表经 `TOKENMP_PLUGIN_FILES` 传入，逗号分隔，空值表示禁用插件层：
-
-```
-$ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp serve
-```
-
-任一项路径不存在、扩展名不符或编译失败都会让 serve 以退出码 1 终止；多项同时写坏会在一条
-错误里全部点名。文件指纹变化时惰性重编译，重编译失败保留上一份产物继续服务。
-
-写插件时不必先起服务：`admin plugin check` 接受路径参数，逐个装配并报告结论，任一失败
-以退出码 1 结束（可直接放进 CI 或提交前检查）。告警（作用域写坏、拼错事件名）走 stderr。
+插件登记在本机清单里，清单路径由 `TOKENMP_PLUGIN_STATE_FILE` 指定（默认
+`/var/lib/tokenmp/plugins.json`）。`admin plugin` 读写这份清单，不连数据库：
 
 ```
-$ tokenmp admin plugin check /path/to/example.mw.js examples/think-tag.mw.js
-name              path                          result  hooks                           events
-think-tag.mw.js   examples/think-tag.mw.js      ok      onEvent,onResponse,onStreamEnd  text_delta
+$ tokenmp admin plugin add /path/to/example.mw.js
+已注册 example.mw.js（/path/to/example.mw.js，已启用）
+$ tokenmp admin plugin disable example.mw.js   # 保留注册与顺序，serve 不再加载它
+$ tokenmp admin plugin enable example.mw.js
+$ tokenmp admin plugin del example.mw.js       # 只改清单，插件文件不动
 ```
+
+`add` 先装配校验、通过后才写入：写入一个装不上的条目只会让 serve 起不来，而那时最需要
+能改清单的工具。`--name` 指定名字（缺省取入口文件名或包目录名），`--disabled` 注册但不
+启用。顺序即装配顺序：多个插件的同名钩子按注册顺序依次改写，调整顺序就 `del` 后重新 `add`。
+
+清单在 `serve` 启动时读取一次：`add` / `disable` 之后要重启 serve 才生效。启用项路径不存在、
+扩展名不符或编译失败都会让 serve 以退出码 1 终止，多项同时写坏会在一条错误里全部点名 ——
+此时用 `disable` 把坏项停掉即可，它不依赖 serve 是否起得来。文件指纹变化时惰性重编译，
+重编译失败保留上一份产物继续服务。
 
 指纹是「修改时间 + 大小」，`cp -p`、等长覆盖一类改动看不出变化，此时给 serve 发 SIGHUP
 强制重编译：
@@ -557,26 +559,35 @@ think-tag.mw.js   examples/think-tag.mw.js      ok      onEvent,onResponse,onStr
 $ kill -HUP <serve 进程号>
 ```
 
-SIGHUP 只重编译中间件，不重启进程、不重连数据库；重编译成功后会重跑一次作用域漂移检查。
-Windows 下该信号不会到达。
+SIGHUP 重编译当前这批启用项（不重读清单），不重启进程、不重连数据库；重编译成功后会重跑
+一次作用域漂移检查。Windows 下该信号不会到达。
 
-### 9.3 列出已加载的中间件
+### 9.3 列出清单与校验
 
 ```
-$ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp admin plugin list
-name            path                      hooks                         events      calls  failures  average_ms  last_error
-example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_delta  0      0         0.00
+$ tokenmp admin plugin list
+name             path                      enabled  result  hooks                           events
+think-tag.mw.js  examples/think-tag.mw.js  true     ok      onEvent,onResponse,onStreamEnd  text_delta
 ```
 
-`plugin list` 只读配置、不连数据库，未配置时只输出表头。`calls` / `failures` /
-`average_ms` 是加载中间件那个进程的累计值，独立执行一次 `admin plugin list` 通常只看得到
-清单，计数为零；`last_error` 是该中间件最近一次钩子失败的文案。
+`list` 对每一项做一次装配探测：`result` 为 `fail` 表示此刻装不上（路径不在、编译失败、
+钩子形状非法），停用项也探测，以便判断能不能重新启用。该命令不连数据库，退出码 0 表示
+「列出来了」；需要按结论定退出码的场合用 `check`。
 
-`--json` 另带 `reloaded_at` / `reload_failures` / `reload_error` / `stale` / `skipped` /
-`skip_error`。这些字段描述的是 `serve` 进程的运行状态：计数与重载记录来自进程内存，
-在 `admin` 进程里恒为零；`stale` 的基准是本次加载时抓的指纹快照，同一进程里 `Load` 完
-立即读也几乎总为 `false`。因此独立执行 `admin plugin list` 得到的是静态清单 + 空状态，
-运行期状态需要 `serve` 进程自己上报（见 [docs/compatibility.md](compatibility.md) 的热重载节）。
+`check` 接受任意路径、不读清单，写插件时不必先注册：
+
+```
+$ tokenmp admin plugin check /path/to/example.mw.js examples/think-tag.mw.js
+name              path                          result  hooks                           events
+think-tag.mw.js   examples/think-tag.mw.js      ok      onEvent,onResponse,onStreamEnd  text_delta
+```
+
+任一失败即以退出码 1 结束（可直接放进 CI 或提交前检查）；告警（作用域写坏、拼错事件名）
+走 stderr。
+
+运行期计数（`calls` / `failures` / `average_ms` / `stale` / `skipped` 与重载状态）不在这两条
+命令的输出里：它们存在 `serve` 进程的内存中，跨进程读不到，跨进程能读到的只有插件文件的
+装配结论。
 
 ### 9.4 样例：把 think 标签搬进 reasoning_content
 
@@ -686,7 +697,8 @@ export function onResponse(body, ctx) {
 启用后，同一份上游数据在两条路径上都得到干净的 `content` 与独立的 `reasoning_content`：
 
 ```
-$ TOKENMP_PLUGIN_FILES=/path/to/think-tag.mw.js tokenmp serve
+$ tokenmp admin plugin add examples/think-tag.mw.js
+$ tokenmp serve
 $ curl -s localhost:8080/v1/chat/completions -H 'Authorization: Bearer ***' \
     -d '{"model":"MiniMax-M3","messages":[{"role":"user","content":"1+1=?"}]}' \
   | jq '{content: .choices[0].message.content, reasoning: .choices[0].message.reasoning_content}'

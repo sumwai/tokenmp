@@ -91,7 +91,8 @@ $ ./bin/tokenmp help
 `TOKENMP_UPSTREAM_PROBE_INTERVAL` 控制；探针不可达或配置写坏时保留旧快照，
 转发路径不受影响。上游套餐与配额的运营序列见 [docs/operations.md](docs/operations.md)。
 
-本机可配置网关中间件（`TOKENMP_PLUGIN_FILES`），在四个时机介入转发：`onRequest` 在选路
+本机可配置网关中间件：插件登记在本机清单里（清单路径由 `TOKENMP_PLUGIN_STATE_FILE` 指定），
+用 `tokenmp admin plugin add/list/enable/disable/del` 维护，在四个时机介入转发：`onRequest` 在选路
 之前改写请求体，改写后的模型名参与选路；`onEvent` 在流式分片写回客户端之前改写或丢弃
 内容事件；`onStreamEnd` 在终止帧之前补发分片；`onResponse` 在非流式响应体写回之前改写。
 钩子抛错、超时或返回非法值一律按原样放行并记结构化日志。可改写范围、失败语义与沙箱边界见
@@ -108,7 +109,7 @@ $ ./bin/tokenmp help
 ## 管理面
 
 `tokenmp admin <组> <动作>` 直连数据库执行运营动作（本地运维工具，不经网络鉴权），
-数据库连接取自 `TOKENMP_MYSQL_DSN`。组与动作：
+数据库连接取自 `TOKENMP_MYSQL_DSN`；`plugin` 组只读写本机插件清单，不连库。组与动作：
 
 | 组 | 动作 |
 |---|---|
@@ -128,7 +129,7 @@ $ ./bin/tokenmp help
 | `adjust` | `add` / `list` |
 | `quota` | `add` / `list` / `del` / `reset` |
 | `plan` | `add` / `list` |
-| `plugin` | `list` |
+| `plugin` | `add` / `list` / `enable` / `disable` / `del` / `check` |
 
 ```
 $ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
@@ -155,8 +156,9 @@ $ ./bin/tokenmp admin usage list --account 1 --json
 `plan add` 写入一条上游套餐及其限额行：`--quota` 形如 `metric:window:limit` 且可重复，
 `window` 可写 `rolling/5h` 或简写 `5h`（`5h` 推 `rolling`，其余周期推 `calendar`）；
 `plan list` 按「一行一条限额」摊平，附当前窗口的已用百分比与重置时刻。
-`plugin list` 只读 `TOKENMP_PLUGIN_FILES`，列出已加载中间件的钩子、事件白名单与进程内统计，
-不连数据库。
+`plugin add` 先装配校验、通过后才写入本机清单，`plugin list` 列出清单并对每一项做一次装配探测，
+`plugin enable/disable/del` 改清单（不动插件文件），`plugin check` 校验任意路径、不读清单。
+该组只读写本机文件，不连数据库。
 `credential oauth-login <group>` 按渠道 `config` 声明的 OAuth 画像走设备码或授权码流程换取令牌
 并写入凭据，输出只含分组与账户标识，不回显任何令牌。
 
