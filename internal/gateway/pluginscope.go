@@ -34,7 +34,7 @@ const scopeDriftTimeout = 5 * time.Second
 //
 // 产物换代后作用域声明可能刚被改过，启动期那一遍已经过时。检查放到后台：重载发生在
 // 某个请求的 goroutine 上，把配置查询挂到那次转发上不划算；单飞闸避免连续重载堆起查询。
-func (g *Gateway) scheduleScopeDriftCheck(logger *slog.Logger, middleware *plugin.Set, reader scopeConfigReader) {
+func (g *Gateway) scheduleScopeDriftCheck(logger *slog.Logger, middleware scopeDeclarer, reader scopeConfigReader) {
 	if g == nil || !g.scopeCheck.CompareAndSwap(false, true) {
 		return
 	}
@@ -46,8 +46,17 @@ func (g *Gateway) scheduleScopeDriftCheck(logger *slog.Logger, middleware *plugi
 	}()
 }
 
+// scopeDeclarer 是漂移检查需要的读取面。
+//
+// 就地声明成一个接口而不是取具体的集合类型：检查跑在启动期与每次换装之后，
+// 而换装后的集合是另一代对象，拿具体的 *plugin.Set 会在换装后失效。
+type scopeDeclarer interface {
+	Empty() bool
+	ScopeDeclarations() []plugin.ScopeDeclaration
+}
+
 // warnScopeDrift 把中间件作用域里匹配不到任何配置的取值记一条告警。
-func warnScopeDrift(ctx context.Context, logger *slog.Logger, middleware *plugin.Set, reader scopeConfigReader) {
+func warnScopeDrift(ctx context.Context, logger *slog.Logger, middleware scopeDeclarer, reader scopeConfigReader) {
 	if logger == nil || middleware.Empty() {
 		return
 	}

@@ -170,8 +170,9 @@ type Options struct {
 	Logger transport.AccessLogger
 	// Observer 记录每次上游尝试；nil 时不记录尝试级日志。
 	Observer domain.Observer
-	// PluginFiles 是网关中间件插件的文件或包目录列表；空表示不装配插件层。
-	PluginFiles []string
+	// PluginStateFile 是本机插件清单的位置（见 internal/plugin 的注册表）；
+	// 空或清单不存在都表示不装配插件层。
+	PluginStateFile string
 	// PluginLogger 记录插件装载、钩子失败与控制台输出；nil 时不记录。
 	PluginLogger *slog.Logger
 	// WebSignupEnabled 是页面注册入口开关；关闭时 signup 回 403。
@@ -192,8 +193,8 @@ type Gateway struct {
 	handler  http.Handler
 	upstream *http.Client
 	probes   *plan.Collector
-	// plugins 是装配期加载的中间件集合，供外部触发强制重载（见 ReloadPlugins）。
-	plugins *plugin.Set
+	// plugins 是按本机清单装配的中间件集合，支持运行期换装（见 ReloadPlugins）。
+	plugins *plugin.Live
 	// scopeCheck 是「重载后重跑作用域漂移检查」的单飞闸。
 	scopeCheck atomic.Bool
 }
@@ -211,10 +212,10 @@ func (g *Gateway) StartProbes(ctx context.Context) {
 	go g.probes.Run(ctx)
 }
 
-// ReloadPlugins 立刻重编译全部中间件，忽略文件指纹。
+// ReloadPlugins 重读本机清单并换装：新增、停用、删除与文件修好后的重新装配都在这里生效。
 //
-// 指纹是「修改时间 + 大小」，cp -p、等长覆盖一类操作看不出变化；本方法是不依赖指纹的
-// 兜底，供装配层在收到外部触发（例如 SIGHUP）时调用。未装配插件时为空操作。
+// 供装配层在收到外部触发（例如 SIGHUP）时调用。清单读不出来时保留当前集合，
+// 单个插件装不上时只记 ERROR 并跳过它。
 func (g *Gateway) ReloadPlugins() {
 	if g == nil {
 		return
@@ -238,21 +239,17 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	if completeTimeout <= 0 {
 		completeTimeout = defaultCompleteTimeout
 	}
-	// 中间件插件在装配期加载：非法路径与编译失败在启动时报出，不推迟到第一个请求。
-	middleware, err := plugin.Load(opts.PluginFiles, plugin.Options{Logger: opts.PluginLogger})
+	// 中间件插件按本机清单装配：清单读不出来是配置错误（报错退出）；清单里装不上的
+	// 单个插件只记 ERROR 并跳过，不拦住进程启动（见 plugin.NewLive）。
+	middleware, err := plugin.NewLive(opts.PluginStateFile, plugin.Options{Logger: opts.PluginLogger})
 	if err != nil {
 		return nil, err
 	}
-	var streamMiddleware domain.StreamMiddleware
-	var responseMiddleware domain.ResponseMiddleware
-	if !middleware.Empty() {
-		streamMiddleware = middleware
-		responseMiddleware = middleware
-		// 作用域里的名字必须在当前配置里存在，否则插件会静默失效（见 warnScopeDrift）。
-		// 存储层不满足读取面时跳过检查，不拦启动。
-		if reader, ok := st.(scopeConfigReader); ok {
-			warnScopeDrift(context.Background(), opts.PluginLogger, middleware, reader)
-		}
+	// 作用域里的名字必须在当前配置里存在，否则插件会静默失效（见 warnScopeDrift）。
+	// 存储层不满足读取面时跳过检查，不拦启动；换装后再查一遍。
+	scopeReader, hasScopeReader := st.(scopeConfigReader)
+	if hasScopeReader {
+		warnScopeDrift(context.Background(), opts.PluginLogger, middleware, scopeReader)
 	}
 
 	// 协议适配器做成单例：不持有跨请求业务状态（流式状态由 NewStream 派生），可按协议共享。
@@ -339,19 +336,18 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		}),
 		MaxAttempts:           opts.MaxAttempts,
 		CrossProtocolAttempts: opts.CrossProtocolAttempts,
-		Stream:                streamMiddleware,
-		Response:              responseMiddleware,
+		// 端口注入的是 Live 而不是某一代集合：换装后新请求立即用到新集合，
+		// 空的判断在 Live 里是一次原子读。
+		Stream:   middleware,
+		Response: middleware,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	// 请求改写必须发生在路由解析之前，因此由转发装饰器在流水线之外完成；
-	// 逐事件与非流式响应改写经流水线端口注入，两者共用一个插件集与同一请求状态。
-	var forward transport.Forwarder = forwarder
-	if !middleware.Empty() {
-		forward = &pluginForwarder{inner: forward, plugins: middleware}
-	}
+	// 逐事件与非流式响应改写经流水线端口注入，两者共用同一代集与同一请求状态。
+	var forward transport.Forwarder = &pluginForwarder{inner: forwarder, plugins: middleware}
 
 	handler, err := transport.New(transport.Options{
 		Forwarder:       forward,
@@ -379,11 +375,9 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	mux.HandleFunc(HealthzPath, healthz)
 	// 四条端点各自注册前缀并套上鉴权；其余路径一律走下面的 JSON 404。
 	// 固定端点用完整路径精确匹配，含模型名的端点用前缀匹配子树。
-	// 插件层启用时再套一层：把请求路径与鉴权归属写进上下文，供插件钩子消费。
-	protocolHandler := http.Handler(handler)
-	if !middleware.Empty() {
-		protocolHandler = pluginContextMiddleware(handler)
-	}
+	// 插件层始终套一层：把请求路径与鉴权归属写进上下文，供插件钩子消费。
+	// 集合为空时不写上下文（见 pluginContextMiddleware），所以没装插件时没有额外分配。
+	protocolHandler := pluginContextMiddleware(middleware, handler)
 	for _, protocol := range supportedProtocols {
 		mux.Handle(clientEndpointPrefix(adapters[protocol]), auth.Middleware(protocolHandler))
 	}
@@ -402,11 +396,11 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	mux.HandleFunc("/", notFoundJSON)
 
 	gw := &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector, plugins: middleware}
-	// 产物换代后重跑作用域漂移检查：运行中把 scope 里的名字改错不会有别的信号。
-	// 注册在返回之前，重载只会在开始服务之后发生。
-	if reader, ok := st.(scopeConfigReader); ok {
-		middleware.OnReload(func() {
-			gw.scheduleScopeDriftCheck(opts.PluginLogger, middleware, reader)
+	// 换装后重跑作用域漂移检查：运行中把 scope 里的名字改错不会有别的信号。
+	// 注册在返回之前，换装只会在开始服务之后发生。
+	if hasScopeReader {
+		middleware.SetOnSwap(func() {
+			gw.scheduleScopeDriftCheck(opts.PluginLogger, middleware, scopeReader)
 		})
 	}
 	return gw, nil

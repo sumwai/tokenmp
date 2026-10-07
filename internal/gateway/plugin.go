@@ -21,7 +21,7 @@ import (
 // 逐事件与非流式响应改写不需要这一层，它们经流水线端口注入，与请求改写共用同一请求状态。
 type pluginForwarder struct {
 	inner   transport.Forwarder
-	plugins *plugin.Set
+	plugins *plugin.Live
 }
 
 // 编译期断言：装饰器与流水线同形，可直接交给入口层。
@@ -40,9 +40,14 @@ func (f *pluginForwarder) Forward(ctx context.Context, client domain.Adapter, re
 // pluginContextMiddleware 把请求路径与鉴权归属写进上下文。
 //
 // 鉴权在更外层完成，因此本中间件必须注册在鉴权之后：归属取自鉴权结果，
-// 未通过鉴权的请求到不了这里。
-func pluginContextMiddleware(next http.Handler) http.Handler {
+// 未通过鉴权的请求到不了这里。它始终装着（换装可以让集合从空变非空），但集合为空时
+// 直接放行：没装插件时不写上下文，也不产生额外分配。
+func pluginContextMiddleware(live *plugin.Live, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if live.Empty() {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ctx := plugin.WithPath(r.Context(), r.URL.Path)
 		if id, ok := access.IdentityFromContext(ctx); ok {
 			ctx = plugin.WithAgent(ctx, plugin.Agent{

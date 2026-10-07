@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -159,40 +158,6 @@ export function onRequest(body) { body.v = value; return body; }
 	}
 }
 
-// TestForcedReloadIgnoresFingerprint 守护强制重载是不依赖指纹的兜底。
-//
-// 指纹是「修改时间 + 大小」：等长内容加复原的时间戳就落在它看不见的区间里。
-// 强制重载必须连编译缓存一起丢，否则缓存会把旧模块还回来。
-func TestForcedReloadIgnoresFingerprint(t *testing.T) {
-	dir := t.TempDir()
-	path := writeSource(t, dir, "forced.mw.js", `export function onRequest(body) { body.v = "v1"; return body; }`)
-	set, err := Load([]string{path}, Options{ReloadBackoff: time.Minute})
-	if err != nil {
-		t.Fatalf("加载插件失败：%v", err)
-	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("读取文件状态失败：%v", err)
-	}
-	if got := runOnce(t, set); got != "v1" {
-		t.Fatalf("首版插件未生效，得到 %q", got)
-	}
-
-	// 等长内容 + 复原修改时间：指纹看不出变化。
-	writeSource(t, dir, "forced.mw.js", `export function onRequest(body) { body.v = "v2"; return body; }`)
-	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
-		t.Fatalf("复原文件时间失败：%v", err)
-	}
-	if got := runOnce(t, set); got != "v1" {
-		t.Fatalf("指纹相同的改动不应被惰性重载发现，得到 %q", got)
-	}
-
-	set.Reload()
-	if got := runOnce(t, set); got != "v2" {
-		t.Fatalf("强制重载应换成新产物，得到 %q", got)
-	}
-}
-
 // TestSkipIsCountedAndThrottled 守护「转发放行但插件未介入」这件事可被看见。
 //
 // 取用失败（运行时建不出来）在正常插件上难以复现，这里直接驱动记录路径：
@@ -233,7 +198,8 @@ func TestSkipIsCountedAndThrottled(t *testing.T) {
 // 装配方靠它把「换代之后才成立」的检查再跑一遍；编译失败时产物没变，不该触发。
 func TestOnReloadFiresOnSuccessfulReload(t *testing.T) {
 	dir := t.TempDir()
-	set, _ := newLoggingSet(t, dir, lifecycleV1, Options{ReloadBackoff: time.Minute})
+	// 退避窗口取短值：修好后要等窗口过去才会再试一次。
+	set, _ := newLoggingSet(t, dir, lifecycleV1, Options{ReloadBackoff: 20 * time.Millisecond})
 	fired := 0
 	set.OnReload(func() { fired++ })
 
@@ -246,7 +212,10 @@ func TestOnReloadFiresOnSuccessfulReload(t *testing.T) {
 	}
 
 	writeSource(t, dir, "lifecycle.mw.js", lifecycleV2)
-	set.Reload()
+	time.Sleep(60 * time.Millisecond)
+	if got := runOnce(t, set); got != "version-two" {
+		t.Fatalf("修好后应换成新产物，得到 %q", got)
+	}
 	if fired != 1 {
 		t.Fatalf("成功换代应触发一次通知，实际 %d 次", fired)
 	}
