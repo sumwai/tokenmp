@@ -113,6 +113,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	assertPlatformMerchant(ctx, t, s.DB())
 	assertUnitRateColumn(ctx, t, s.DB())
 	assertAPIKeyColumn(ctx, t, s.DB())
+	assertAccountOwnerColumn(ctx, t, s.DB())
 
 	// 重复启动的幂等性：第二次迁移不应因表已存在而失败，也不应重复插入种子行。
 	if err := s.Migrate(ctx); err != nil {
@@ -124,6 +125,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	assertUnitRateColumn(ctx, t, s.DB())
 	// 0004 的重复加列 / 加索引同样应当被跳过，重跑后列仍存在。
 	assertAPIKeyColumn(ctx, t, s.DB())
+	// 0007 的重复加列 / 加索引同样应当被跳过。
+	assertAccountOwnerColumn(ctx, t, s.DB())
 }
 
 func dropKnownTables(ctx context.Context, t *testing.T, db *sql.DB) {
@@ -247,6 +250,56 @@ func assertAPIKeyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
 	if columns != 2 {
 		t.Errorf("idx_usage_api_key_time 列数 = %d，期望 2", columns)
 	}
+}
+
+// assertAccountOwnerColumn 断言 0007 加上的归属列存在、可空，且带唯一索引。
+func assertAccountOwnerColumn(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var nullable string
+	err := db.QueryRowContext(ctx,
+		"SELECT is_nullable FROM information_schema.columns "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account' AND column_name = 'owner_user_id'").
+		Scan(&nullable)
+	if err != nil {
+		t.Fatalf("查询 account.owner_user_id 列失败：%v", err)
+	}
+	if nullable != "YES" {
+		t.Errorf("account.owner_user_id 应为可空列，得到 is_nullable=%q", nullable)
+	}
+
+	var columns int
+	err = db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.statistics "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account' AND index_name = 'uk_account_owner'").
+		Scan(&columns)
+	if err != nil {
+		t.Fatalf("查询 account.uk_account_owner 索引失败：%v", err)
+	}
+	if columns != 1 {
+		t.Errorf("uk_account_owner 列数 = %d，期望 1", columns)
+	}
+
+	var nonUnique int
+	err = db.QueryRowContext(ctx,
+		"SELECT non_unique FROM information_schema.statistics "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account' AND index_name = 'uk_account_owner'").
+		Scan(&nonUnique)
+	if err != nil {
+		t.Fatalf("查询 account.uk_account_owner 唯一性失败：%v", err)
+	}
+	if nonUnique != 0 {
+		t.Errorf("uk_account_owner 应为唯一索引，得到 non_unique=%d", nonUnique)
+	}
+}
+
+// countRows 统计表行数；表名只来自本文件的字面量，不接外部输入。
+func countRows(ctx context.Context, t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+		t.Fatalf("统计 %s 行数失败：%v", table, err)
+	}
+	return count
 }
 
 // TestBillingStoreRoundTrip 在真实 MySQL 上把 0002 的新表走一遍写读回环。
@@ -449,4 +502,101 @@ func TestBillingStoreRoundTrip(t *testing.T) {
 		t.Fatalf("重复迁移失败：%v", err)
 	}
 	assertMigrationVersionCount(ctx, t, s.DB(), migrationCount(t))
+}
+
+// TestWebInsertUserWithAccountIntegration 在真实 MySQL 上走一遍注册开户：
+// 账号与账户同生共死，归属一对一，无主账户可并存。
+//
+// 内存替身验证不了唯一键与事务回滚：它们由数据库约束与 MySQL 语义提供。
+func TestWebInsertUserWithAccountIntegration(t *testing.T) {
+	dsn := os.Getenv(envTestDSN)
+	if dsn == "" {
+		t.Skipf("未设置 %s，跳过注册开户验证", envTestDSN)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	s, err := store.Open(ctx, store.Config{DSN: dsn})
+	if err != nil {
+		t.Fatalf("打开数据库失败：%v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("关闭连接失败：%v", err)
+		}
+	})
+
+	dropKnownTables(ctx, t, s.DB())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cleanupCancel()
+		dropKnownTables(cleanupCtx, t, s.DB())
+	})
+
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	userID, accountID, err := s.WebInsertUserWithAccount(ctx, store.WebUser{
+		Email: "alice@example.com", Username: "alice", PasswordHash: "hash",
+		Role: store.RoleMember, Status: store.StatusActive,
+	}, store.Account{Name: "alice", PriceMultiplier: "1", Status: store.StatusActive})
+	if err != nil {
+		t.Fatalf("注册开户失败：%v", err)
+	}
+
+	account, err := s.Account(ctx, accountID)
+	if err != nil {
+		t.Fatalf("读取账户失败：%v", err)
+	}
+	if account.OwnerUserID == nil || *account.OwnerUserID != userID {
+		t.Errorf("账户归属 = %v，期望 %d", account.OwnerUserID, userID)
+	}
+	if !strings.HasPrefix(account.Code, "acc_") {
+		t.Errorf("账户编码 = %q，期望 acc_ 前缀", account.Code)
+	}
+
+	// 重复邮箱：唯一键冲突，账号与账户都不新增。
+	if _, _, err := s.WebInsertUserWithAccount(ctx, store.WebUser{
+		Email: "alice@example.com", Username: "alice2", PasswordHash: "hash",
+		Role: store.RoleMember, Status: store.StatusActive,
+	}, store.Account{Name: "alice2", PriceMultiplier: "1", Status: store.StatusActive}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("重复邮箱应回 store.ErrConflict，得到 %v", err)
+	}
+	if got := countRows(ctx, t, s.DB(), "web_user"); got != 1 {
+		t.Errorf("web_user 行数 = %d，期望 1", got)
+	}
+	if got := countRows(ctx, t, s.DB(), "account"); got != 1 {
+		t.Errorf("account 行数 = %d，期望 1", got)
+	}
+
+	// 未知角色在写入路径被拒绝，且不留下任何行。
+	if _, _, err := s.WebInsertUserWithAccount(ctx, store.WebUser{
+		Email: "bob@example.com", Username: "bob", PasswordHash: "hash",
+		Role: "nobody", Status: store.StatusActive,
+	}, store.Account{Name: "bob", PriceMultiplier: "1", Status: store.StatusActive}); err == nil {
+		t.Error("未知角色应当被拒绝")
+	}
+	if got := countRows(ctx, t, s.DB(), "web_user"); got != 1 {
+		t.Errorf("未知角色不应留下账号，web_user 行数 = %d", got)
+	}
+
+	// 归属一对一：同一 owner 的第二个账户被唯一键拒绝。
+	owner := userID
+	if _, err := s.InsertAccount(ctx, store.Account{
+		Code: "acc_manual_dup", Name: "第二账户", OwnerUserID: &owner,
+		PriceMultiplier: "1", Status: store.StatusActive,
+	}); err == nil {
+		t.Error("同一 owner 的第二个账户应当被唯一键拒绝")
+	}
+
+	// 无主账户可以有任意多个：唯一键对 NULL 不生效。
+	for _, code := range []string{"acc_free_1", "acc_free_2"} {
+		if _, err := s.InsertAccount(ctx, store.Account{
+			Code: code, Name: code, PriceMultiplier: "1", Status: store.StatusActive,
+		}); err != nil {
+			t.Fatalf("写入无主账户 %s 失败：%v", code, err)
+		}
+	}
 }
