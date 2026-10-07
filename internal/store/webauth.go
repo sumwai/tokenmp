@@ -269,6 +269,72 @@ func (s *Store) WebIdentityProviders(ctx context.Context, userID uint64) ([]stri
 	return providers, nil
 }
 
+// WebInsertOTP 写入一枚待用验证码。
+func (s *Store) WebInsertOTP(ctx context.Context, email, purpose, codeHash string, expiresAt time.Time) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO web_otp (email, purpose, code_hash, expires_at) VALUES (?, ?, ?, ?)`,
+		email, purpose, codeHash, expiresAt); err != nil {
+		return fmt.Errorf("store: 写入 web_otp 失败: %w", err)
+	}
+	return nil
+}
+
+// WebConsumeOTP 校验并核销一枚验证码；命中且未过期未用时置 used_at 并返回 true。
+//
+// 校验与核销在同一条 UPDATE 里完成：条件含 used_at IS NULL，
+// 并发下两笔相同请求只有一笔能影响行，天然防重放。
+func (s *Store) WebConsumeOTP(ctx context.Context, email, purpose, codeHash string, now time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE web_otp
+		    SET used_at = ?
+		  WHERE email = ? AND purpose = ? AND code_hash = ?
+		    AND used_at IS NULL AND expires_at > ?`,
+		now, email, purpose, codeHash, now)
+	if err != nil {
+		return false, fmt.Errorf("store: 核销 web_otp 失败: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: 读取核销影响行数失败: %w", err)
+	}
+	return affected > 0, nil
+}
+
+// WebUpdatePassword 设置新密码哈希；OAuth-only 账号首次设密码也走这里。
+func (s *Store) WebUpdatePassword(ctx context.Context, userID uint64, passwordHash string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE web_user SET password_hash = ? WHERE id = ?`, passwordHash, userID); err != nil {
+		return fmt.Errorf("store: 更新 web_user 密码失败: %w", err)
+	}
+	return nil
+}
+
+// WebRevokeOtherSessions 撤销账号除指定会话外的全部会话（改密后保留当前登录）。
+func (s *Store) WebRevokeOtherSessions(ctx context.Context, userID, keepSessionID uint64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE web_session SET revoked_at = NOW()
+		 WHERE user_id = ? AND id <> ? AND revoked_at IS NULL`, userID, keepSessionID); err != nil {
+		return fmt.Errorf("store: 撤销其余 web_session 失败: %w", err)
+	}
+	return nil
+}
+
+// WebEraseUser 注销账号：置 erased 并删除第三方绑定，密码哈希抹除。
+//
+// 邮箱与用户名保留不释放：两者继续被唯一键占用，避免注销后的标识被他人
+// 重新注册后继承历史流水归属；真要释放属于数据治理动作，不在本路径做。
+func (s *Store) WebEraseUser(ctx context.Context, userID uint64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE web_user SET status = 'erased', password_hash = NULL WHERE id = ?`, userID); err != nil {
+		return fmt.Errorf("store: 注销 web_user 失败: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM web_identity WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("store: 清除 web_identity 失败: %w", err)
+	}
+	return nil
+}
+
 // lastInsertID 取自增主键；负值守卫后才转换，与 billing.insertID 同一口径。
 func lastInsertID(res sql.Result) (uint64, error) {
 	id, err := res.LastInsertId()

@@ -35,8 +35,16 @@ type memStore struct {
 	byAccess    map[string]uint64
 	byRefresh   map[string]uint64
 	byPrev      map[string]uint64
+	otps        map[string]*memOTP
 	nextUser    uint64
 	nextSession uint64
+}
+
+// memOTP 是一行验证码：键含邮箱、用途与摘要，与库表的核销条件同构。
+type memOTP struct {
+	codeHash  string
+	expiresAt time.Time
+	used      bool
 }
 
 func newMemStore() *memStore {
@@ -46,6 +54,7 @@ func newMemStore() *memStore {
 		byAccess:  make(map[string]uint64),
 		byRefresh: make(map[string]uint64),
 		byPrev:    make(map[string]uint64),
+		otps:      make(map[string]*memOTP),
 	}
 }
 
@@ -171,6 +180,61 @@ func (m *memStore) WebRevokeUserSessions(_ context.Context, userID uint64) error
 
 func (m *memStore) WebIdentityProviders(context.Context, uint64) ([]string, error) {
 	return []string{}, nil
+}
+
+// otpKey 是验证码的复合键：邮箱、用途与摘要拼接，与库表核销条件同构。
+func otpKey(email, purpose, codeHash string) string {
+	return email + "\x00" + purpose + "\x00" + codeHash
+}
+
+func (m *memStore) WebInsertOTP(_ context.Context, email, purpose, codeHash string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.otps[otpKey(email, purpose, codeHash)] = &memOTP{codeHash: codeHash, expiresAt: expiresAt}
+	return nil
+}
+
+func (m *memStore) WebConsumeOTP(_ context.Context, email, purpose, codeHash string, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.otps[otpKey(email, purpose, codeHash)]
+	if !ok || entry.used || !now.Before(entry.expiresAt) {
+		return false, nil
+	}
+	entry.used = true
+	return true, nil
+}
+
+func (m *memStore) WebUpdatePassword(_ context.Context, userID uint64, passwordHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u, ok := m.users[userID]; ok {
+		u.PasswordHash = passwordHash
+	}
+	return nil
+}
+
+func (m *memStore) WebRevokeOtherSessions(_ context.Context, userID, keepSessionID uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for id, sess := range m.sessions {
+		if sess.UserID == userID && id != keepSessionID && sess.RevokedAt == nil {
+			cp := now
+			sess.RevokedAt = &cp
+		}
+	}
+	return nil
+}
+
+func (m *memStore) WebEraseUser(_ context.Context, userID uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u, ok := m.users[userID]; ok {
+		u.Status = "erased"
+		u.PasswordHash = ""
+	}
+	return nil
 }
 
 // ---- 测试辅助 ----

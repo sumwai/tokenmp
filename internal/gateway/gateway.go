@@ -180,6 +180,8 @@ type Options struct {
 	WebTrustProxy bool
 	// WebAuthLogger 记录页面认证的安全事件（刷新令牌重放等）；nil 时不记录。
 	WebAuthLogger *slog.Logger
+	// WebMailer 是验证码投递端口；nil 表示邮件通道未配置，发送入口回 500。
+	WebMailer webauth.Mailer
 }
 
 // Gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -376,6 +378,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		SignupDisabled: !opts.WebSignupEnabled,
 		TrustProxy:     opts.WebTrustProxy,
 		Logger:         opts.WebAuthLogger,
+		Mailer:         opts.WebMailer,
 	})))
 	mux.HandleFunc("/", notFoundJSON)
 

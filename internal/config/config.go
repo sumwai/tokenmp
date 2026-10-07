@@ -58,6 +58,12 @@ const (
 	// 页面注册入口开关与反代信任：见 Serve 对应字段注释。
 	envWebSignupEnabled = "TOKENMP_WEB_SIGNUP_ENABLED"
 	envWebTrustProxy    = "TOKENMP_WEB_TRUST_PROXY"
+
+	// 邮件通道：验证码（重置密码、注销）的投递；Addr 为空视为未配置。
+	envSMTPAddr     = "TOKENMP_SMTP_ADDR"
+	envSMTPFrom     = "TOKENMP_SMTP_FROM"
+	envSMTPUser     = "TOKENMP_SMTP_USER"
+	envSMTPPassword = "TOKENMP_SMTP_PASSWORD" //nolint:gosec // G101：这是环境变量名，不是凭据值
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -143,6 +149,12 @@ type Serve struct {
 	// WebTrustProxy 为真时页面认证按 X-Forwarded-For 首段做频率限制；
 	// 默认关：直连暴露时该头可被客户端伪造，仅在可信反代之后打开。
 	WebTrustProxy bool
+	// SMTPAddr 是邮件服务器地址（host:port）；空表示不配置邮件通道，
+	// 验证码发送入口回 500。其余 SMTP 字段仅在 Addr 非空时有意义。
+	SMTPAddr     string
+	SMTPFrom     string
+	SMTPUser     string
+	SMTPPassword string
 }
 
 // Load 从进程环境读出存储层配置。
@@ -242,6 +254,10 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	smtpAddr, _ := lookup(envSMTPAddr)
+	smtpFrom, _ := lookup(envSMTPFrom)
+	smtpUser, _ := lookup(envSMTPUser)
+	smtpPassword, _ := lookup(envSMTPPassword)
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -263,6 +279,10 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		PluginFiles:                 lookupPluginFiles(lookup),
 		WebSignupEnabled:            webSignupEnabled,
 		WebTrustProxy:               webTrustProxy,
+		SMTPAddr:                    strings.TrimSpace(smtpAddr),
+		SMTPFrom:                    strings.TrimSpace(smtpFrom),
+		SMTPUser:                    strings.TrimSpace(smtpUser),
+		SMTPPassword:                smtpPassword,
 	}, nil
 }
 

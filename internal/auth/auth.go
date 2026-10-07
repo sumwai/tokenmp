@@ -27,6 +27,10 @@ const (
 	PathRefresh   = "/api/v1/auth/refresh"
 	PathSession   = "/api/v1/auth/session"
 	PathSignout   = "/api/v1/auth/signout"
+	PathOTP       = "/api/v1/auth/otp"
+	PathReset     = "/api/v1/auth/reset"
+	PathPassword  = "/api/v1/auth/password" //nolint:gosec // G101：这是 URL 路径，不是凭据
+	PathErase     = "/api/v1/auth/erase"
 	// PathPrefix 是整个页面认证面的子树前缀，装配层按它挂载。
 	PathPrefix = "/api/v1/auth/"
 )
@@ -63,7 +67,12 @@ type Store interface {
 		accessExpiresAt, refreshExpiresAt time.Time) (bool, error)
 	WebRevokeSession(ctx context.Context, id uint64) error
 	WebRevokeUserSessions(ctx context.Context, userID uint64) error
+	WebRevokeOtherSessions(ctx context.Context, userID, keepSessionID uint64) error
 	WebIdentityProviders(ctx context.Context, userID uint64) ([]string, error)
+	WebInsertOTP(ctx context.Context, email, purpose, codeHash string, expiresAt time.Time) error
+	WebConsumeOTP(ctx context.Context, email, purpose, codeHash string, now time.Time) (bool, error)
+	WebUpdatePassword(ctx context.Context, userID uint64, passwordHash string) error
+	WebEraseUser(ctx context.Context, userID uint64) error
 }
 
 // Options 是装配期配置；零值字段回落到默认值。
@@ -83,6 +92,9 @@ type Options struct {
 	Now func() time.Time
 	// Logger 记录安全事件（刷新令牌重放等）；nil 时不记录。
 	Logger *slog.Logger
+	// Mailer 是验证码投递端口；nil 表示邮件通道未配置，
+	// 发送入口一律回 500（不因账号是否存在而分化）。
+	Mailer Mailer
 }
 
 const (

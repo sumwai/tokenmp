@@ -182,7 +182,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Envelope"
         "409":
-          description: 邮箱已注册，`code=409`。
+          description: 邮箱或用户名已被使用，`code=409`，两者不作区分。
           content:
             application/json:
               schema:

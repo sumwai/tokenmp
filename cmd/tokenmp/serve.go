@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	webauth "github.com/sumwai/tokenmp/internal/auth"
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/gateway"
 	"github.com/sumwai/tokenmp/internal/observability"
@@ -71,6 +72,13 @@ func cmdServe(stderr io.Writer) int {
 		WebSignupEnabled:            cfg.WebSignupEnabled,
 		WebTrustProxy:               cfg.WebTrustProxy,
 		WebAuthLogger:               observability.NewJSONLogger(os.Stdout),
+		// 邮件通道只在配置了地址时装配：未配置保持 nil，验证码发送入口回 500。
+		WebMailer: webauth.NewSMTPMailer(webauth.SMTPConfig{
+			Addr:     cfg.SMTPAddr,
+			From:     cfg.SMTPFrom,
+			User:     cfg.SMTPUser,
+			Password: cfg.SMTPPassword,
+		}),
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)

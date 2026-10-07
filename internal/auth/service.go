@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
-	"net/mail"
 	"strings"
 	"time"
 
@@ -32,6 +31,7 @@ type Service struct {
 	challenges *challengeSet
 	limiter    *rateLimiter
 	logger     *slog.Logger
+	mailer     Mailer
 }
 
 // New 构造页面认证服务。logger 为 nil 时丢弃日志。
@@ -46,6 +46,7 @@ func New(st Store, opts Options) *Service {
 		challenges: newChallengeSet(opts.ChallengeTTL, opts.Now),
 		limiter:    newRateLimiter(time.Minute, rateLimitPerMinute, opts.Now),
 		logger:     opts.Logger,
+		mailer:     opts.Mailer,
 	}
 }
 
@@ -337,12 +338,8 @@ func validateFingerprint(fingerprint string) error {
 // 邮箱用标准库解析器做基础形态校验，再要求包含域名点号：只挡明显笔误，
 // 不替下游服务商验证可达性 —— 那是发信环节的职责。
 func validateIdentity(email, username string) error {
-	if len(email) == 0 || len(email) > 255 {
-		return ErrInvalidParams
-	}
-	addr, err := mail.ParseAddress(email)
-	if err != nil || !strings.EqualFold(addr.Address, email) || !strings.Contains(email, ".") {
-		return ErrInvalidParams
+	if err := validateEmail(email); err != nil {
+		return err
 	}
 	if len(username) < 2 || len(username) > 64 || strings.TrimSpace(username) != username {
 		return ErrInvalidParams

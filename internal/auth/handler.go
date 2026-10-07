@@ -47,6 +47,33 @@ type refreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// otpRequest 与契约 SendOtpRequest 对齐；purpose 限定 reset / erase。
+type otpRequest struct {
+	Email   string `json:"email"`
+	Purpose string `json:"purpose"`
+}
+
+// resetRequest 与契约 ResetRequest 对齐。
+type resetRequest struct {
+	Email       string `json:"email"`
+	OTP         string `json:"otp"`
+	Password    string `json:"password"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// changePasswordRequest 与契约 ChangePasswordRequest 对齐：新旧密码各自带指纹。
+type changePasswordRequest struct {
+	CurrentPassword    string `json:"current_password"`
+	CurrentFingerprint string `json:"current_fingerprint"`
+	NewPassword        string `json:"new_password"`
+	NewFingerprint     string `json:"new_fingerprint"`
+}
+
+// eraseRequest 与契约 EraseRequest 对齐。
+type eraseRequest struct {
+	OTP string `json:"otp"`
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case PathChallenge:
@@ -61,6 +88,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.session(w, r)
 	case PathSignout:
 		h.signout(w, r)
+	case PathOTP:
+		h.sendOTP(w, r)
+	case PathReset:
+		h.reset(w, r)
+	case PathPassword:
+		h.changePassword(w, r)
+	case PathErase:
+		h.erase(w, r)
 	default:
 		// 子树内未声明的路径回信封 404，不落到网关的 / 兜底：
 		// 页面契约的错误形状在整条 /api/v1/auth/ 前缀上保持一致。
@@ -177,6 +212,86 @@ func (h *handler) signout(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, nil)
 }
 
+// sendOTP POST → 发送一次性验证码。
+func (h *handler) sendOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 POST 方法")
+		return
+	}
+	var req otpRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if err := h.svc.SendOtp(r.Context(), h.addr(r), req.Email, req.Purpose); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeOK(w, nil)
+}
+
+// reset POST → 用 OTP 重置密码。
+func (h *handler) reset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 POST 方法")
+		return
+	}
+	var req resetRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if err := h.svc.Reset(r.Context(), h.addr(r), req.Email, req.OTP, req.Password, req.Fingerprint); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeOK(w, nil)
+}
+
+// changePassword PUT → 修改密码。
+func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 PUT 方法")
+		return
+	}
+	token, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, codeUnauthorized, "登录状态已失效")
+		return
+	}
+	var req changePasswordRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	err := h.svc.ChangePassword(r.Context(), token,
+		req.CurrentPassword, req.CurrentFingerprint, req.NewPassword, req.NewFingerprint)
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeOK(w, nil)
+}
+
+// erase POST → 注销当前账号。
+func (h *handler) erase(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 POST 方法")
+		return
+	}
+	token, ok := bearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, codeUnauthorized, "登录状态已失效")
+		return
+	}
+	var req eraseRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if err := h.svc.Erase(r.Context(), h.addr(r), token, req.OTP); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeOK(w, nil)
+}
+
 // addr 取本次请求用于限频的来源地址。
 func (h *handler) addr(r *http.Request) string {
 	return clientAddr(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.svc.opts.TrustProxy)
@@ -229,8 +344,12 @@ func writeServiceErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, codeConflict, "邮箱或用户名已被使用")
 	case errors.Is(err, ErrChallengeExpired):
 		writeErr(w, http.StatusGone, codeChallengeExpired, "加密公钥已失效，请重新获取")
+	case errors.Is(err, ErrInvalidOTP):
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "验证码无效或已过期")
 	case errors.Is(err, ErrRateLimited):
 		writeErr(w, http.StatusTooManyRequests, codeTooManyRequests, "请求过于频繁，请稍后再试")
+	case errors.Is(err, ErrMailerNotConfigured):
+		writeErr(w, http.StatusInternalServerError, codeInternal, "邮件服务未配置")
 	default:
 		writeErr(w, http.StatusInternalServerError, codeInternal, "服务端错误")
 	}

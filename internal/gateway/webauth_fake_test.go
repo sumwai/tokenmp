@@ -53,3 +53,17 @@ func (f *fakeGatewayStore) WebRevokeUserSessions(context.Context, uint64) error 
 func (f *fakeGatewayStore) WebIdentityProviders(context.Context, uint64) ([]string, error) {
 	return []string{}, nil
 }
+
+func (f *fakeGatewayStore) WebRevokeOtherSessions(context.Context, uint64, uint64) error { return nil }
+
+func (f *fakeGatewayStore) WebInsertOTP(context.Context, string, string, string, time.Time) error {
+	return nil
+}
+
+func (f *fakeGatewayStore) WebConsumeOTP(context.Context, string, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeGatewayStore) WebUpdatePassword(context.Context, uint64, string) error { return nil }
+
+func (f *fakeGatewayStore) WebEraseUser(context.Context, uint64) error { return nil }
