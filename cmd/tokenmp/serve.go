@@ -45,7 +45,6 @@ func cmdServe(stderr io.Writer) int {
 	// 在装配之前建立：探针采集器与 HTTP 服务共用同一个可取消的上下文。
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
 	gw, err := gateway.New(st, gateway.Options{
 		CompleteTimeout:             cfg.CompleteTimeout,
 		StreamFirstByteTimeout:      cfg.StreamFirstByteTimeout,
@@ -87,6 +86,17 @@ func cmdServe(stderr io.Writer) int {
 		return exitFailure
 	}
 	defer gw.Close()
+
+	// SIGHUP 表示「重编译中间件」，不进入退出上下文：指纹是「修改时间 + 大小」，
+	// cp -p 一类操作看不出变化，这是不依赖指纹的兜底。Windows 下该信号不会到达。
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			gw.ReloadPlugins()
+		}
+	}()
 
 	// 探针采集是转发的旁路：启动即开，随信号停止；失败只记日志，不影响 HTTP 服务。
 	gw.StartProbes(sigCtx)

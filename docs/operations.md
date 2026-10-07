@@ -538,8 +538,18 @@ export function onResponse(body, ctx) {
 $ TOKENMP_PLUGIN_FILES=/path/to/example.mw.js tokenmp serve
 ```
 
-任一项路径不存在、扩展名不符或编译失败都会让 serve 以退出码 1 终止；文件指纹变化时
-惰性重编译，重编译失败保留上一份产物继续服务。
+任一项路径不存在、扩展名不符或编译失败都会让 serve 以退出码 1 终止；多项同时写坏会在一条
+错误里全部点名。文件指纹变化时惰性重编译，重编译失败保留上一份产物继续服务。
+
+指纹是「修改时间 + 大小」，`cp -p`、等长覆盖一类改动看不出变化，此时给 serve 发 SIGHUP
+强制重编译：
+
+```
+$ kill -HUP <serve 进程号>
+```
+
+SIGHUP 只重编译中间件，不重启进程、不重连数据库；重编译成功后会重跑一次作用域漂移检查。
+Windows 下该信号不会到达。
 
 ### 9.3 列出已加载的中间件
 
@@ -552,6 +562,11 @@ example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_del
 `plugin list` 只读配置、不连数据库，未配置时只输出表头。`calls` / `failures` /
 `average_ms` 是加载中间件那个进程的累计值，独立执行一次 `admin plugin list` 通常只看得到
 清单，计数为零；`last_error` 是该中间件最近一次钩子失败的文案。
+
+`--json` 另带 `reloaded_at` / `reload_failures` / `reload_error` / `stale` / `skipped` /
+`skip_error`：用来区分「在跑新版本还是旧版本」「重编译是不是一直失败」「插件是不是因为
+取不到运行时根本没被调用」。其中 `stale` 现场比对文件指纹，独立进程里同样有效；
+其余计数来自 `serve` 进程，在 `admin` 进程里为零。
 
 ### 9.4 样例：把 think 标签搬进 reasoning_content
 

@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/access"
@@ -191,6 +192,10 @@ type Gateway struct {
 	handler  http.Handler
 	upstream *http.Client
 	probes   *plan.Collector
+	// plugins 是装配期加载的中间件集合，供外部触发强制重载（见 ReloadPlugins）。
+	plugins *plugin.Set
+	// scopeCheck 是「重载后重跑作用域漂移检查」的单飞闸。
+	scopeCheck atomic.Bool
 }
 
 // Handler 返回网关的 HTTP 入口，供命令包构造 http.Server。
@@ -204,6 +209,17 @@ func (g *Gateway) StartProbes(ctx context.Context) {
 		return
 	}
 	go g.probes.Run(ctx)
+}
+
+// ReloadPlugins 立刻重编译全部中间件，忽略文件指纹。
+//
+// 指纹是「修改时间 + 大小」，cp -p、等长覆盖一类操作看不出变化；本方法是不依赖指纹的
+// 兜底，供装配层在收到外部触发（例如 SIGHUP）时调用。未装配插件时为空操作。
+func (g *Gateway) ReloadPlugins() {
+	if g == nil {
+		return
+	}
+	g.plugins.Reload()
 }
 
 // Close 释放装配持有的上游连接资源。
@@ -385,7 +401,15 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	})))
 	mux.HandleFunc("/", notFoundJSON)
 
-	return &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector}, nil
+	gw := &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector, plugins: middleware}
+	// 产物换代后重跑作用域漂移检查：运行中把 scope 里的名字改错不会有别的信号。
+	// 注册在返回之前，重载只会在开始服务之后发生。
+	if reader, ok := st.(scopeConfigReader); ok {
+		middleware.OnReload(func() {
+			gw.scheduleScopeDriftCheck(opts.PluginLogger, middleware, reader)
+		})
+	}
+	return gw, nil
 }
 
 // newUpstreamTransport 按配置构造上游连接池。

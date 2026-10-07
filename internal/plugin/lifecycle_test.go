@@ -228,6 +228,30 @@ func TestSkipIsCountedAndThrottled(t *testing.T) {
 	}
 }
 
+// TestOnReloadFiresOnSuccessfulReload 守护产物换代通知只在成功换代时触发。
+//
+// 装配方靠它把「换代之后才成立」的检查再跑一遍；编译失败时产物没变，不该触发。
+func TestOnReloadFiresOnSuccessfulReload(t *testing.T) {
+	dir := t.TempDir()
+	set, _ := newLoggingSet(t, dir, lifecycleV1, Options{ReloadBackoff: time.Minute})
+	fired := 0
+	set.OnReload(func() { fired++ })
+
+	writeSource(t, dir, "lifecycle.mw.js", lifecycleBroken)
+	if got := runOnce(t, set); got != "v1" {
+		t.Fatalf("编译失败时应继续用旧产物，得到 %q", got)
+	}
+	if fired != 0 {
+		t.Fatalf("编译失败不应触发换代通知，实际 %d 次", fired)
+	}
+
+	writeSource(t, dir, "lifecycle.mw.js", lifecycleV2)
+	set.Reload()
+	if fired != 1 {
+		t.Fatalf("成功换代应触发一次通知，实际 %d 次", fired)
+	}
+}
+
 // TestConcurrentRequestsDuringReload 守护并发取用与重编译之间没有数据竞争。
 //
 // 单飞闸改变了两把锁的嵌套关系（编译不再持锁），并发路径必须仍然只产出可用产物。

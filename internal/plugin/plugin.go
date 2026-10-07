@@ -222,6 +222,8 @@ type Middleware struct {
 	// reloading 是重编译的单飞闸：同一时刻只允许一个 goroutine 编译。
 	// 抢不到闸的请求不排队等结果，直接用当前产物继续服务。
 	reloading atomic.Bool
+	// onReload 是产物换代回调，由装配方在开始服务之前注册；无回调时为空操作。
+	onReload func()
 	// runtimeDeps 是动态 import() 触及的文件与登记时的指纹。
 	// 用 sync.Map：读在每次取用的指纹检查上，写在 JS 运行期的解析上，两者并发且互不阻塞。
 	runtimeDeps sync.Map
@@ -522,15 +524,22 @@ func (m *Middleware) recompile(mode reloadMode) {
 	// 编译在锁外进行：持锁编译会把所有请求一起挡在门外。
 	next, err := m.assemble()
 
+	reloaded := false
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err != nil {
 		m.reloadFailureLocked(err, time.Now())
-		return
+	} else {
+		m.cur = next
+		m.drainPoolLocked()
+		m.reloadSuccessLocked(time.Now())
+		reloaded = true
 	}
-	m.cur = next
-	m.drainPoolLocked()
-	m.reloadSuccessLocked(time.Now())
+	m.mu.Unlock()
+
+	// 回调在锁外调用：它可能去读配置、跑一致性检查，不能把持锁时间拉长到那上面。
+	if reloaded && m.onReload != nil {
+		m.onReload()
+	}
 }
 
 // reloadDueLocked 报告是否该尝试重编译。调用方必须已持有 m.mu。
@@ -585,6 +594,20 @@ func (s *Set) Reload() {
 	}
 	for _, middleware := range s.items {
 		middleware.recompile(reloadForced)
+	}
+}
+
+// OnReload 注册产物换代回调：任一中间件热重载成功后调用一次。
+//
+// 回调在中间件锁外执行，且必须自己限时：一次重载发生在某个请求的 goroutine 上，
+// 回调里做重活会把延迟加到那次转发上。装配方用它把「产物换代之后才成立」的检查
+// 再跑一遍（例如作用域漂移），因此应在开始服务之前注册。
+func (s *Set) OnReload(fn func()) {
+	if s == nil {
+		return
+	}
+	for _, middleware := range s.items {
+		middleware.onReload = fn
 	}
 }
 
