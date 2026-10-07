@@ -91,10 +91,10 @@ $ ./bin/tokenmp help
 `TOKENMP_UPSTREAM_PROBE_INTERVAL` 控制；探针不可达或配置写坏时保留旧快照，
 转发路径不受影响。上游套餐与配额的运营序列见 [docs/operations.md](docs/operations.md)。
 
-本机可配置网关中间件（`TOKENMP_PLUGIN_FILES`），在三个时机介入转发：`onRequest` 在选路
+本机可配置网关中间件（`TOKENMP_PLUGIN_FILES`），在四个时机介入转发：`onRequest` 在选路
 之前改写请求体，改写后的模型名参与选路；`onEvent` 在流式分片写回客户端之前改写或丢弃
-内容事件；`onResponse` 在非流式响应体写回之前改写。钩子抛错、超时或返回非法值一律按原样
-放行并记结构化日志。可改写范围、失败语义与沙箱边界见
+内容事件；`onStreamEnd` 在终止帧之前补发分片；`onResponse` 在非流式响应体写回之前改写。
+钩子抛错、超时或返回非法值一律按原样放行并记结构化日志。可改写范围、失败语义与沙箱边界见
 [docs/compatibility.md](docs/compatibility.md)。
 
 每请求写一条 JSON 请求日志到标准输出：请求 id（客户端带 `X-Request-Id` 时沿用）、
@@ -184,7 +184,7 @@ internal/billing/    计费指标与用量映射
 internal/quota/      窗口限额判定：窗口计算与超限比较
 internal/plan/       上游套餐与配额：耗尽判定、声明式探针与周期采集
 internal/settlement/ 用量结算：定价解析、倍率链与账本扣减
-internal/plugin/     网关中间件：moejs 沙箱加载、三个钩子与进程内统计
+internal/plugin/     网关中间件：moejs 沙箱加载、四个钩子与进程内统计
 internal/config/     环境变量到运行配置
 pkg/                 可被外部导入的包
 .github/workflows/   CI 与发布链路

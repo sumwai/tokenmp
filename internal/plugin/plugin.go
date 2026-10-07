@@ -248,6 +248,13 @@ func (m *Middleware) assemble() (*compiled, error) {
 	if len(result.eventsList) > maxDeclaredEvents {
 		m.logger.Warn("中间件声明的事件白名单过长", "plugin", m.name, "events", len(result.eventsList))
 	}
+	if unknown := unknownEventNames(result.events); len(unknown) > 0 {
+		// 拼错的事件名与「导出 onEvent 却没声明白名单」是同一类后果：钩子永不触发。
+		// 但前者原先完全静默 —— hooks 列看起来正常、Calls 恒不增长，
+		// 而后者有明确告警，同一份配置里两种反馈强度会让排查方向被带偏。
+		m.logger.Warn("中间件声明了无法送达的事件名，这些事件不会被送到钩子",
+			"plugin", m.name, "events", unknown)
+	}
 	return result, nil
 }
 
@@ -295,6 +302,19 @@ type moduleExports struct {
 	events  map[string]bool
 	options map[string]any
 	scope   scopeSpec
+}
+
+// unknownEventNames 返回声明了但不属于可处置分片类型的事件名，按字典序排列。
+//
+// 可处置集合由 contentKinds 定义：逐事件钩子只发内容分片，用量与结束原因不在其中。
+func unknownEventNames(events map[string]bool) []string {
+	unknown := map[string]bool{}
+	for name := range events {
+		if !contentKinds[name] {
+			unknown[name] = true
+		}
+	}
+	return sortedKeys(unknown)
 }
 
 // readEvents 读出模块导出的 events 白名单；未导出或形状非预期时返回空集。

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -33,6 +35,15 @@ func adminPlugin(_ context.Context, args []string, env *adminEnv) int {
 	}
 }
 
+// pluginListLogger 构造写向 stderr 的 logger。
+//
+// 传零值 Options 时内部落到 DiscardHandler，于是「scope 非法」「导出 onEvent 却没声明
+// events」「作用域取值在当前配置里不存在」这类告警全部消失 —— 而离线检查插件正是发现
+// 它们的场合。告警走 stderr，不混进 stdout 的清单表。
+func pluginListLogger(stderr io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(stderr, nil))
+}
+
 // adminPluginList 加载配置的中间件并输出清单与进程内统计。
 func adminPluginList(args []string, env *adminEnv) int {
 	fs := env.newFlagSet("admin plugin list")
@@ -40,7 +51,7 @@ func adminPluginList(args []string, env *adminEnv) int {
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
-	set, err := plugin.Load(config.LoadPluginFiles(), plugin.Options{})
+	set, err := plugin.Load(config.LoadPluginFiles(), plugin.Options{Logger: pluginListLogger(env.stderr)})
 	if err != nil {
 		return env.fail(err)
 	}
