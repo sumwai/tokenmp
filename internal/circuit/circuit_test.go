@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // fakeClock 是可推进的虚拟时钟：冷却判定不依赖真实时间，测试不做 sleep。
@@ -36,21 +37,26 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// 测试用的上游错误构造器：按统一错误码区分「计入熔断」与「不计入熔断」。
+// 测试用的上游错误构造器：计入熔断与否由失败分类给出，与错误码无关。
+//
+// ClassUpstream 带 ActionCountBreaker；请求级与限流虽然也来自上游，
+// 但说明渠道仍然存活，不该计入连续失败。
 func upstreamUnavailable() error {
-	return domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用")
+	return failure.NewError(domain.CodeUpstreamUnavailable, "上游不可用", "", failure.ClassUpstream)
 }
 
 func upstreamTimeout() error {
-	return domain.NewError(domain.CodeUpstreamTimeout, "上游超时")
+	return failure.NewError(domain.CodeUpstreamTimeout, "上游超时", "", failure.ClassUpstream)
 }
 
+// upstreamRejected 是认不出的 4xx：请求侧问题，换渠道重试无用，也不计入熔断。
 func upstreamRejected() error {
-	return domain.NewError(domain.CodeUpstreamRejected, "上游拒绝请求")
+	return failure.NewError(domain.CodeUpstreamRejected, "上游拒绝请求", "", failure.ClassRequest)
 }
 
+// upstreamRateLimited 是上游限流：可重试但不算渠道故障。
 func upstreamRateLimited() error {
-	return domain.NewError(domain.CodeUpstreamRateLimited, "上游限流")
+	return failure.NewError(domain.CodeUpstreamRateLimited, "上游限流", "", failure.ClassRateLimit)
 }
 
 // clientCancelled 是客户端取消在本仓库的口径：上游客户端把它归为平台内部错误。

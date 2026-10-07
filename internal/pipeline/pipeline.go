@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 const (
@@ -543,12 +544,14 @@ func (p *Pipeline) limitedAttempt(
 
 // retryableFailure 报告一次渠道尝试失败能不能换下一条候选。
 //
-// 上游错误分级给出可重试，或该失败已被标注为凭据类时就换：凭据类失败走完渠道内的凭据轮换
-// 后（Advance 返回 false），换一条候选意味着换一组凭据，可能成功；而分级里 4xx 一律不可重试的
-// 口径只描述「同一组凭据下重试无益」，不适用于跨渠道。未被标注的 4xx 仍按不可重试处理，
-// 免把一次参数错误放大成对候选渠道的逐个试探。
+// 判据只有一个：失败分类给出的动作集。原先这里读两处——错误码的可重试性与「是否凭据类」
+// 标注——两个来源对同一份上游报文可能给出不同答案，且新增一类失败要同时改两处。
+//
+// 额度、余额与认证类失败都带换渠道动作：同渠道的凭据轮换试完后（Advance 返回 false），
+// 换一条候选意味着换一组凭据，可能成功；而「同一组凭据下重试无益」的口径不适用于跨渠道。
+// 参数类错误不带换渠道动作，仍按不可重试处理，免把一次参数错误放大成对候选渠道的逐个试探。
 func retryableFailure(err error) bool {
-	return domain.Retryable(err) || domain.CredentialRejected(err)
+	return failure.ActionsOf(err).Retryable()
 }
 
 // advanceCredential 询问凭据轮换器能否在本次渠道尝试内换下一条凭据；未装配轮换器时恒为否。
@@ -697,7 +700,7 @@ func (p *Pipeline) recordAttempt(
 		Usage:            result.Usage,
 		ErrorCode:        errorCode(result.Err),
 		ErrorDetail:      errorDetail(result.Err),
-		FailureClass:     domain.FailureClassOf(result.Err),
+		FailureClass:     failure.ClassNameOf(result.Err),
 		StartedAt:        result.StartedAt,
 		EndedAt:          result.EndedAt,
 		RateLimitWait:    result.RateLimitWait,

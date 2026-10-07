@@ -13,6 +13,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/anthropic"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // 本文件覆盖用量落库的时序与终态判定。
@@ -21,7 +22,8 @@ import (
 // 协议编解码细节不属于本文件的目标，复用真实适配器可以避免另造一套假实现。
 
 // errRetryable 是一次可换渠道重试的上游失败。
-var errRetryable = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用")
+// errRetryable 是可换渠道重试的上游故障：类别带换渠道动作与熔断计数。
+var errRetryable = failure.NewError(domain.CodeUpstreamUnavailable, "上游不可用", "", failure.ClassUpstream)
 
 // fakeRouteResolver 按声明顺序返回固定候选。
 type fakeRouteResolver struct {
@@ -443,8 +445,8 @@ func (r *fakeRotation) Begin(ctx context.Context, _ domain.Route) context.Contex
 	return ctx
 }
 
-func (r *fakeRotation) Advance(ctx context.Context, _ domain.Route, failure error) (context.Context, bool) {
-	if r.remaining <= 0 || !domain.CredentialRejected(failure) {
+func (r *fakeRotation) Advance(ctx context.Context, _ domain.Route, cause error) (context.Context, bool) {
+	if r.remaining <= 0 || !failure.ActionsOf(cause).Has(failure.ActionRetryNextAccount) {
 		return ctx, false
 	}
 	r.remaining--
@@ -455,11 +457,16 @@ func (r *fakeRotation) Advance(ctx context.Context, _ domain.Route, failure erro
 func (r *fakeRotation) Renew(context.Context, domain.Route) { r.renewed++ }
 
 // credentialRejectedError 模拟上游客户端标注「本次凭据不被接受」的错误。
+//
+// 动作集里同时含换渠道：额度与余额类失败在组内凭据用尽后应当换候选渠道，
+// 只有换凭据会让「候选渠道都试一遍」的断言失去意义。
 type credentialRejectedError struct{}
 
 func (credentialRejectedError) Error() string { return "凭据被拒绝" }
 
-func (credentialRejectedError) CredentialRejected() bool { return true }
+func (credentialRejectedError) Actions() failure.Action {
+	return failure.ActionSuspendAccount | failure.ActionRetryNextAccount | failure.ActionRetryNextRoute
+}
 
 // TestForwardSwitchesCredentialWithinAttempt 断言凭据类失败在同一次渠道尝试内切换，
 // 且不消耗换渠道的尝试预算。
@@ -686,7 +693,7 @@ func fastBackoff() BackoffOptions {
 // TestForwardRateLimitTimeoutFallsBackToNextChannel 断言限流等待超时按可重试失败处理，
 // 换下一条候选而不是直接把失败回给客户端。
 func TestForwardRateLimitTimeoutFallsBackToNextChannel(t *testing.T) {
-	timeoutErr := domain.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时")
+	timeoutErr := failure.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时", "", failure.ClassRateLimit)
 	limiter := &fakeLimiter{replies: map[uint64]limiterReply{
 		7: {waited: 300 * time.Millisecond, err: timeoutErr},
 		8: {},

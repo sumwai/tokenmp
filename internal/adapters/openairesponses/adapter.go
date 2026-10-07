@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // Responses 协议的条目类型、内容类型与状态字面量。
@@ -948,30 +949,26 @@ func (a *Adapter) decodeStreamEnd(data []byte) ([]domain.Chunk, error) {
 
 // streamFailureError 把上游失败帧转为统一错误。
 //
-// 分级与另外两个适配器一致：请求级错误（参数/凭据/权限/资源）归不可重试的
-// CodeUpstreamRejected，其余归可换渠道重试的 CodeUpstreamUnavailable。
+// 归类交给 failure.ClassifyErrorEnvelope：它是出现在「本该成功的响应」里的错误信封，
+// 认不出的取值归上游故障（可换渠道），而不是按请求级错误终止。
 // 错误正文只放进 Detail，不直接作为用户文案，避免把上游内部细节原样透出。
 func streamFailureError(data []byte, event string) error {
 	var payload wireStreamFailure
 	if jsonErr := json.Unmarshal(data, &payload); jsonErr != nil {
-		return domain.NewError(domain.CodeUpstreamUnavailable, "上游流式响应失败").
-			WithDetail(fmt.Sprintf("%s 帧不是合法的 JSON: %v", event, jsonErr))
+		return failure.NewError(domain.CodeUpstreamUnavailable, "上游流式响应失败",
+			fmt.Sprintf("%s 帧不是合法的 JSON: %v", event, jsonErr), failure.ClassUpstream)
 	}
 	// 上游错误对象的 type 承载分级、code 承载机器码，两者都要看：
 	// 只看 code 会漏掉 {"error":{"type":"invalid_request_error"}} 这类不带 code 的形态。
-	// 判据统一由 domain.NonRetryableUpstreamErrorType 提供，避免各适配器各写一份而漂移。
-	code := domain.CodeUpstreamUnavailable
-	if domain.NonRetryableUpstreamErrorType(payload.Code) {
-		code = domain.CodeUpstreamRejected
+	// 顶层 type 是事件名（error、response.failed），不承载分级，故不入列。
+	candidates := []string{payload.Code}
+	if payload.Error != nil {
+		candidates = append(candidates, payload.Error.Type, payload.Error.Code)
 	}
-	if payload.Error != nil && (domain.NonRetryableUpstreamErrorType(payload.Error.Type) || domain.NonRetryableUpstreamErrorType(payload.Error.Code)) {
-		code = domain.CodeUpstreamRejected
+	if payload.Response != nil && payload.Response.Error != nil {
+		candidates = append(candidates, payload.Response.Error.Type, payload.Response.Error.Code)
 	}
-	if payload.Response != nil && payload.Response.Error != nil &&
-		(domain.NonRetryableUpstreamErrorType(payload.Response.Error.Type) || domain.NonRetryableUpstreamErrorType(payload.Response.Error.Code)) {
-		code = domain.CodeUpstreamRejected
-	}
-	err := domain.NewError(code, "上游流式响应失败")
+	class := failure.ClassifyErrorEnvelope(candidates...)
 	detail := payload.Message
 	if detail == "" && payload.Error != nil {
 		detail = payload.Error.Message
@@ -982,7 +979,7 @@ func streamFailureError(data []byte, event string) error {
 	if detail == "" {
 		detail = fmt.Sprintf("%s 帧未携带错误信息", event)
 	}
-	return err.WithDetail(detail)
+	return failure.NewError(failure.CodeForClass(class), "上游流式响应失败", detail, class)
 }
 
 // encodeOutput 把内部消息拆成 Responses 的 output 条目。

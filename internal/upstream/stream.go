@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 	"github.com/sumwai/tokenmp/internal/transport/sse"
 )
 
@@ -144,7 +145,7 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, req *domain.Req
 			if domainErr := domain.AsError(decodeErr); domainErr != nil {
 				return domainErr
 			}
-			return domain.NewError(domain.CodeUpstreamUnavailable, "上游流式帧无法解码").WithCause(decodeErr)
+			return failure.NewError(domain.CodeUpstreamUnavailable, "上游流式帧无法解码", "", failure.ClassUpstream).WithCause(decodeErr)
 		}
 		// 结束语义与下沉模式无关：两种模式都按分片判定本轮是否收到结束帧。
 		for _, chunk := range chunks {
@@ -166,15 +167,15 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, req *domain.Req
 	}
 
 	if !sawEnd {
-		return domain.NewError(domain.CodeUpstreamUnavailable, "上游流在结束标记出现前断开").
-			WithDetail("本轮未收到结束帧，按截断处理")
+		return failure.NewError(domain.CodeUpstreamUnavailable, "上游流在结束标记出现前断开",
+			"本轮未收到结束帧，按截断处理", failure.ClassUpstream)
 	}
 	return nil
 }
 
 // streamTimeoutError 构造可重试的上游流式超时错误。
-func streamTimeoutError(cause error) *domain.Error {
-	return domain.NewError(domain.CodeUpstreamTimeout, "上游流式调用超时").WithCause(cause)
+func streamTimeoutError(cause error) error {
+	return failure.NewError(domain.CodeUpstreamTimeout, "上游流式调用超时", "", failure.ClassTimeout).WithCause(cause)
 }
 
 // classifyStreamReadError 把逐帧读取错误分类为可向上报告的统一错误。
@@ -195,7 +196,7 @@ func classifyStreamReadError(ctx context.Context, readErr error, stalled, sawEnd
 		return mapTransportError(ctx, readErr)
 	}
 	if errors.Is(readErr, sse.ErrFrameTooLarge) {
-		return domain.NewError(domain.CodeUpstreamUnavailable, "上游流式单帧超过上限").WithCause(readErr)
+		return failure.NewError(domain.CodeUpstreamUnavailable, "上游流式单帧超过上限", "", failure.ClassUpstream).WithCause(readErr)
 	}
-	return domain.NewError(domain.CodeUpstreamUnavailable, "读取上游流式响应失败").WithCause(readErr)
+	return failure.NewError(domain.CodeUpstreamUnavailable, "读取上游流式响应失败", "", failure.ClassUpstream).WithCause(readErr)
 }

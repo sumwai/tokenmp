@@ -7,8 +7,8 @@
 // 多实例部署时每个实例各自统计连续失败，同一渠道的总探测次数可达实例数；
 // 落库共享状态要在每个请求上引入读写放大，换来的只是「重启后仍然记得」，尚未出现需要。
 //
-// 判定失败的唯一依据是上游调用的错误码（见 trippable）：只把上游不可用与上游超时
-// 计入连续失败，客户端取消、本端写出失败、上游 4xx 拒绝与上游限流都不计入，
+// 判定失败的依据是失败分类给出的动作集（见 trippable）：只有上游自身故障才计入连续失败，
+// 客户端取消、本端写出失败、上游 4xx 拒绝与上游限流都不计入，
 // 避免把客户侧或平台侧的问题算到渠道健康度上。
 package circuit
 
@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // State 是渠道熔断器的状态取值。
@@ -323,19 +323,13 @@ func (b *Breaker) logTransition(ch *channel, from, to State) {
 
 // trippable 报告错误是否属于「计入熔断」的上游硬故障。
 //
-// 判据只取统一错误码：上游不可用（HTTP 5xx、连接失败、响应无法解析）与上游超时
-// （网络超时、上游 408）。上游限流虽然可重试，但它说明渠道仍然存活、只是配额暂时用尽，
-// 计入会把限流误判成渠道故障；上游 4xx 拒绝、客户端取消（归为平台内部错误）与本端写出
+// 判据是失败分类给出的动作集：只有 ClassUpstream（上游 5xx、连接失败、响容无法解析、
+// 网络超时、上游 408）带 ActionCountBreaker。上游限流虽然可重试，但它说明渠道仍然存活、
+// 只是配额暂时用尽，计入会把限流误判成渠道故障；上游 4xx 拒绝、客户端取消与本端写出
 // 失败同理不计。
+//
+// 读动作而不是读错误码：错误码同时承担「对外状态码」与「是否可重试」两件事，
+// 拿它当熔断判据会把两个不相干的关注点绑在一起（限流可重试但不该计入熔断）。
 func trippable(err error) bool {
-	domainErr := domain.AsError(err)
-	if domainErr == nil {
-		return false
-	}
-	switch domainErr.Code {
-	case domain.CodeUpstreamUnavailable, domain.CodeUpstreamTimeout:
-		return true
-	default:
-		return false
-	}
+	return failure.ActionsOf(err).Has(failure.ActionCountBreaker)
 }

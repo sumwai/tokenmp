@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // defaultMaxWait 是未配置等待上限时等待令牌的最长时间。
@@ -243,9 +244,11 @@ func (l *limiter) waitToken(ctx context.Context) (time.Duration, error) {
 		}
 		need := l.waitForNextToken()
 		// 下一次唤醒就会超出等待上限时立即失败，不把最后的等待耗在必然超时的一次上。
+		// 带 ClassRateLimit：渠道限流可换下一条候选重试，但不计入渠道健康度
+		//（渠道仍然存活，只是令牌暂时用尽）。
 		if l.clock().Add(need).After(deadline) {
-			return waited, domain.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时").
-				WithDetail(fmt.Sprintf("等待上限 %s", l.maxWait))
+			return waited, failure.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时",
+				fmt.Sprintf("等待上限 %s", l.maxWait), failure.ClassRateLimit)
 		}
 		start := l.clock()
 		if err := l.wait(ctx, need); err != nil {

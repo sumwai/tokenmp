@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // signinTestHeader 是用例共用的信标头配置：头名与取值全部来自配置。
@@ -16,12 +17,25 @@ func signinTestHeader() domain.SigninHeader {
 
 // TestDecideCredentialOutcomeMatrix 覆盖判定优先级矩阵：信标 × 状态码，含未声明配置的回退。
 //
-// 判据：命中信标头时以信标为准（expired 拒绝、kept 不拒绝、renewed 请求解除冷却），
-// 且此时不附失败分类 —— 厂商已经声明了语义，另由状态码推一个分类只会自相矛盾；
-// 未声明信标头或取值未命中时回退到 classifyUpstreamFailure，分类与拒绝结论一同给出。
+// 判据：命中信标头时以信标为准（expired 停用并换凭据、kept 摘掉整组凭据动作、
+// renewed 请求解除冷却），未声明信标头或取值未命中时回退到报文与状态码分类。
+//
+// 信标头覆盖的是**动作**而非类别：它说的是「这个状态码不代表凭据有问题」，
+// 不是「这次失败不算认证问题」，所以 kept 情形下类别仍保留（见用例断言）。
 func TestDecideCredentialOutcomeMatrix(t *testing.T) {
 	const authBody = `{"error":{"type":"authentication_error"}}`
 	const requestBody = `{"error":{"type":"invalid_request_error"}}`
+
+	const (
+		// 认证类：停用本次凭据并在同渠道内换下一条。额度与余额还会多一个换渠道动作。
+		authActions = failure.ActionSuspendAccount | failure.ActionRetryNextAccount
+		// 上游自身故障：换渠道并计入熔断，不停用凭据。
+		upstreamActions = failure.ActionRetryNextRoute | failure.ActionCountBreaker
+		// 请求级：不重试。
+		surface = failure.ActionSurface
+		// kept 覆盖后：整组凭据动作被摘掉，剩下的就是空集。
+		keptActions = failure.Action(0)
+	)
 
 	tests := []struct {
 		name   string
@@ -32,29 +46,35 @@ func TestDecideCredentialOutcomeMatrix(t *testing.T) {
 		want   credentialOutcome
 	}{
 		// 未声明配置：全部回退到报文与状态码分类。
-		{name: "无配置 401", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
-		{name: "无配置 403", status: http.StatusForbidden, want: credentialOutcome{rejected: true, failure: failureAuth}},
-		{name: "无配置 400 认证字面量", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{rejected: true, failure: failureAuth}},
-		{name: "无配置 400 参数错误", status: http.StatusBadRequest, body: requestBody, want: credentialOutcome{rejected: false}},
-		{name: "无配置 429", status: http.StatusTooManyRequests, want: credentialOutcome{rejected: false, failure: failureRateLimit}},
+		{name: "无配置 401", status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "无配置 403", status: http.StatusForbidden, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "无配置 400 认证字面量", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "无配置 400 参数错误", status: http.StatusBadRequest, body: requestBody, want: credentialOutcome{class: failure.ClassRequest, actions: surface}},
+		{name: "无配置 429", status: http.StatusTooManyRequests, want: credentialOutcome{class: failure.ClassRateLimit, actions: failure.ActionRetryNextRoute}},
 		// 500 与其它 5xx 不进体扫描：上游自身故障里碰到同名字面量不代表凭据有问题。
-		{name: "无配置 500 认证字面量", status: http.StatusInternalServerError, body: authBody, want: credentialOutcome{rejected: false}},
+		{name: "无配置 500 认证字面量", status: http.StatusInternalServerError, body: authBody, want: credentialOutcome{class: failure.ClassUpstream, actions: upstreamActions}},
 		// 已声明配置但取值未命中：同样回退。
-		{name: "取值未命中 401 回退", signin: signinTestHeader(), value: "other", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
-		{name: "取值未命中 200 回退", signin: signinTestHeader(), value: "other", status: http.StatusOK, want: credentialOutcome{rejected: false}},
-		{name: "响应未带信标头 401 回退", signin: signinTestHeader(), status: http.StatusUnauthorized, want: credentialOutcome{rejected: true, failure: failureAuth}},
-		// expired：优先于状态码结论。
-		{name: "expired 200 也拒绝", signin: signinTestHeader(), value: "expired", status: http.StatusOK, want: credentialOutcome{rejected: true}},
-		{name: "expired 401", signin: signinTestHeader(), value: "expired", status: http.StatusUnauthorized, want: credentialOutcome{rejected: true}},
-		{name: "expired 502 仍拒绝", signin: signinTestHeader(), value: "expired", status: http.StatusBadGateway, want: credentialOutcome{rejected: true}},
-		{name: "expired 429 仍拒绝", signin: signinTestHeader(), value: "expired", status: http.StatusTooManyRequests, want: credentialOutcome{rejected: true}},
-		// kept：状态码另有含义的厂商不被误冷却。
-		{name: "kept 401 不拒绝", signin: signinTestHeader(), value: "kept", status: http.StatusUnauthorized, want: credentialOutcome{rejected: false}},
-		{name: "kept 403 不拒绝", signin: signinTestHeader(), value: "kept", status: http.StatusForbidden, want: credentialOutcome{rejected: false}},
-		{name: "kept 400 认证字面量也不拒绝", signin: signinTestHeader(), value: "kept", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{rejected: false}},
-		// renewed：判定为不拒绝并请求解除冷却。
-		{name: "renewed 200", signin: signinTestHeader(), value: "renewed", status: http.StatusOK, want: credentialOutcome{renewed: true}},
-		{name: "renewed 401", signin: signinTestHeader(), value: "renewed", status: http.StatusUnauthorized, want: credentialOutcome{renewed: true}},
+		{name: "取值未命中 401 回退", signin: signinTestHeader(), value: "other", status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "取值未命中 200 回退", signin: signinTestHeader(), value: "other", status: http.StatusOK, want: credentialOutcome{class: failure.ClassOther, actions: surface}},
+		{name: "响应未带信标头 401 回退", signin: signinTestHeader(), status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		// expired：厂商对凭据状态的直接断言，优先于由报文与状态码的间接推断，
+		// 因此无论状态码是什么都归为认证类并按认证处置。
+		{name: "expired 200 也停用", signin: signinTestHeader(), value: "expired", status: http.StatusOK, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "expired 401", signin: signinTestHeader(), value: "expired", status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		{name: "expired 502 仍停用", signin: signinTestHeader(), value: "expired", status: http.StatusBadGateway, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		// 这一行是「覆盖动作、不覆盖类别」的代价所在：本可归为限流（可重试且不停用），
+		// 但厂商声明了登录态失效，就以厂商为准。
+		{name: "expired 429 仍停用", signin: signinTestHeader(), value: "expired", status: http.StatusTooManyRequests, want: credentialOutcome{class: failure.ClassAuth, actions: authActions}},
+		// kept：状态码另有含义的厂商不被误冷却，但类别如实保留供排障。
+		{name: "kept 401 不停用", signin: signinTestHeader(), value: "kept", status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: keptActions}},
+		{name: "kept 403 不停用", signin: signinTestHeader(), value: "kept", status: http.StatusForbidden, want: credentialOutcome{class: failure.ClassAuth, actions: keptActions}},
+		{name: "kept 400 认证字面量也不停用", signin: signinTestHeader(), value: "kept", status: http.StatusBadRequest, body: authBody, want: credentialOutcome{class: failure.ClassAuth, actions: keptActions}},
+		// kept 只摘凭据动作，其余动作不受影响：请求级失败本来就无动作可摘。
+		{name: "kept 400 参数错误", signin: signinTestHeader(), value: "kept", status: http.StatusBadRequest, body: requestBody, want: credentialOutcome{class: failure.ClassRequest, actions: surface}},
+		{name: "kept 500 仍计入熔断", signin: signinTestHeader(), value: "kept", status: http.StatusInternalServerError, want: credentialOutcome{class: failure.ClassUpstream, actions: upstreamActions}},
+		// renewed：与 kept 同样摘掉凭据动作（厂商在说凭据不是问题所在），另请求解除冷却。
+		{name: "renewed 200", signin: signinTestHeader(), value: "renewed", status: http.StatusOK, want: credentialOutcome{class: failure.ClassOther, actions: surface, renewed: true}},
+		{name: "renewed 401", signin: signinTestHeader(), value: "renewed", status: http.StatusUnauthorized, want: credentialOutcome{class: failure.ClassAuth, actions: keptActions, renewed: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,8 +96,8 @@ func TestClassifyHTTPStatusMarksCredentialRenewal(t *testing.T) {
 	if !domain.CredentialRenewed(err) {
 		t.Fatal("renewed 结论应附加凭据续期能力")
 	}
-	if domain.CredentialRejected(err) {
-		t.Error("renewed 结论不应附带凭据类失败能力")
+	if failure.ActionsOf(err).Has(failure.ActionRetryNextAccount) {
+		t.Error("renewed 结论不应附带换凭据动作")
 	}
 	if got := domain.AsError(err).Code; got != domain.CodeUpstreamRejected {
 		t.Errorf("错误码 = %q，期望 %q", got, domain.CodeUpstreamRejected)
@@ -132,8 +152,8 @@ func TestCompleteHonorsSigninHeader(t *testing.T) {
 			if callErr == nil {
 				t.Fatal("非 2xx 上游响应应报错")
 			}
-			if got := domain.CredentialRejected(callErr); got != tt.wantRejected {
-				t.Errorf("CredentialRejected = %v，期望 %v", got, tt.wantRejected)
+			if got := failure.ActionsOf(callErr).Has(failure.ActionRetryNextAccount); got != tt.wantRejected {
+				t.Errorf("换凭据动作 = %v，期望 %v", got, tt.wantRejected)
 			}
 			if got := domain.CredentialRenewed(callErr); got != tt.wantRenewed {
 				t.Errorf("CredentialRenewed = %v，期望 %v", got, tt.wantRenewed)
@@ -180,7 +200,7 @@ func TestCompleteIgnoresSigninHeaderWhenUnconfigured(t *testing.T) {
 	if callErr == nil {
 		t.Fatal("401 应报错")
 	}
-	if !domain.CredentialRejected(callErr) {
+	if !failure.ActionsOf(callErr).Has(failure.ActionRetryNextAccount) {
 		t.Error("未声明信标头时 401 仍应按凭据类失败处理")
 	}
 }

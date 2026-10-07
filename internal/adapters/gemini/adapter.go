@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // 客户端端点形态与上游端点形态的固定字面量。
@@ -628,29 +629,41 @@ func grpcStatusForCode(code domain.Code) string {
 	}
 }
 
+// upstreamGRPCClass 把上游 gRPC 状态名映射为失败类别。
+//
+// Gemini 用 gRPC 状态名而不是 HTTP 语义表达错误，且认证失败也用 400 配
+// UNAUTHENTICATED 表达，只看 HTTP 状态码会把「该换 key」误判成「请求有问题」。
+func upstreamGRPCClass(status string) failure.Class {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "INVALID_ARGUMENT", "FAILED_PRECONDITION", "OUT_OF_RANGE", "UNIMPLEMENTED", "NOT_FOUND":
+		return failure.ClassRequest
+	case "UNAUTHENTICATED", "PERMISSION_DENIED":
+		return failure.ClassAuth
+	case "RESOURCE_EXHAUSTED":
+		return failure.ClassRateLimit
+	case "DEADLINE_EXCEEDED":
+		return failure.ClassTimeout
+	default:
+		// UNAVAILABLE 与认不出的状态名：上游侧故障，换渠道可能恢复。
+		return failure.ClassUpstream
+	}
+}
+
 // upstreamError 把上游错误体转为统一错误。
 //
-// gRPC 状态名映射到错误分级：请求级与凭据级错误不可重试，资源耗尽与超时可换渠道重试。
+// 分类交给 upstreamGRPCClass，处置由类别策略表给出：请求级与模型不可用不重试，
+// 凭据级换 key，资源耗尽与超时换渠道。
 // 上游原文只进 Detail，不作为面向用户的 Message。
 func upstreamError(wire *wireError) error {
 	if wire == nil {
-		return domain.NewError(domain.CodeUpstreamUnavailable, "上游返回错误")
+		return failure.NewError(domain.CodeUpstreamUnavailable, "上游返回错误", "", failure.ClassUpstream)
 	}
-	code := domain.CodeUpstreamUnavailable
-	switch strings.ToUpper(strings.TrimSpace(wire.Status)) {
-	case "INVALID_ARGUMENT", "FAILED_PRECONDITION", "OUT_OF_RANGE", "UNIMPLEMENTED",
-		"UNAUTHENTICATED", "PERMISSION_DENIED", "NOT_FOUND":
-		code = domain.CodeUpstreamRejected
-	case "RESOURCE_EXHAUSTED":
-		code = domain.CodeUpstreamRateLimited
-	case "DEADLINE_EXCEEDED":
-		code = domain.CodeUpstreamTimeout
-	}
+	class := upstreamGRPCClass(wire.Status)
 	detail := fmt.Sprintf("上游错误 code=%d status=%q", wire.Code, wire.Status)
 	if message := strings.TrimSpace(wire.Message); message != "" {
 		detail += " message=" + message
 	}
-	return domain.NewError(code, "上游返回错误").WithDetail(detail)
+	return failure.NewError(failure.CodeForClass(class), "上游返回错误", detail, class)
 }
 
 // ---------------------------------------------------------------------------

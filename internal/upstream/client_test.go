@@ -11,6 +11,7 @@ import (
 
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // stubHeaders 是 HeaderProvider 的空实现：本文件只考察响应体解码路径，不关心请求头。
@@ -54,11 +55,14 @@ func TestCompleteExposesUpstreamStatus(t *testing.T) {
 	}
 }
 
-// TestIsCredentialRejection 覆盖「凭据类失败」的判定口径：宁窄勿宽。
+// TestCredentialFailureDetection 覆盖「本次失败该不该换凭据」的判定口径：宁窄勿宽。
 //
 // 401/403 直接命中；其余 4xx 只在响应体出现已知的认证失败字面量时命中；
 // 请求参数类、限流与 5xx 一律不命中，否则一次参数错误会被放大成对整组 key 的枚举。
-func TestIsCredentialRejection(t *testing.T) {
+//
+// 问的是动作集里有没有换凭据，而不是某个专用的谓词：动作集是网关对「接下来做什么」的
+// 单一出处，多一个谓词就多一处会与被分类表漂移的判据。
+func TestCredentialFailureDetection(t *testing.T) {
 	tests := []struct {
 		name   string
 		status int
@@ -78,14 +82,15 @@ func TestIsCredentialRejection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isCredentialRejection(tt.status, []byte(tt.body)); got != tt.want {
-				t.Fatalf("isCredentialRejection(%d, %q) = %v，期望 %v", tt.status, tt.body, got, tt.want)
+			wantAction := failure.ActionsFor(failure.ClassifyHTTP(tt.status, []byte(tt.body))).Has(failure.ActionRetryNextAccount)
+			if wantAction != tt.want {
+				t.Fatalf("换凭据动作（%d, %q）= %v，期望 %v", tt.status, tt.body, wantAction, tt.want)
 			}
 		})
 	}
 }
 
-// TestClassifyHTTPStatusMarksCredentialRejection 断言凭据类失败带有能力标注，
+// TestClassifyHTTPStatusMarksCredentialRejection 断言凭据类失败带换凭据动作，
 // 且原有错误分级与状态码能力不受影响。
 func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
 	header := http.Header{}
@@ -93,8 +98,8 @@ func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
 	err := classifyHTTPStatus(
 		decideCredentialOutcome(domain.SigninHeader{}, http.StatusUnauthorized, header, body),
 		http.StatusUnauthorized, header, body)
-	if !domain.CredentialRejected(err) {
-		t.Fatal("401 应被标注为凭据类失败")
+	if !failure.ActionsOf(err).Has(failure.ActionRetryNextAccount) {
+		t.Fatal("401 应带换凭据动作")
 	}
 	if got := domain.AsError(err).Code; got != domain.CodeUpstreamRejected {
 		t.Errorf("错误码 = %q，期望 %q", got, domain.CodeUpstreamRejected)
@@ -109,8 +114,8 @@ func TestClassifyHTTPStatusMarksCredentialRejection(t *testing.T) {
 	tooMany := classifyHTTPStatus(
 		decideCredentialOutcome(domain.SigninHeader{}, http.StatusTooManyRequests, http.Header{}, nil),
 		http.StatusTooManyRequests, http.Header{}, nil)
-	if domain.CredentialRejected(tooMany) {
-		t.Error("429 不应被标注为凭据类失败")
+	if failure.ActionsOf(tooMany).Has(failure.ActionRetryNextAccount) {
+		t.Error("429 不应带换凭据动作")
 	}
 }
 
