@@ -233,6 +233,43 @@ func TestClassifyCodeAndEnvelope(t *testing.T) {
 	}
 }
 
+// TestRateLimitStatusOutranksCredentialWording 固定住优先级：429 就是限流，不因报文里
+// 出现认证字面量而改判。
+//
+// 这种矛盾报文是真存在的（渠道过载时在报文里提到 key）。定这一侧的理由：429 是上游对
+// **本次请求**的流量判决，而报文里的认证字面量可能是通用模板；且改判为认证会去停用一把
+// 没坏的 key，代价比“少停一次”大。报文不与状态码矛盾时仍按报文归。
+//
+// 正文刻意选一个不命中任何报文规则的串（否则规则分支先返回，测不到状态码分支）。
+func TestRateLimitStatusOutranksCredentialWording(t *testing.T) {
+	body := []byte(`{"error":{"type":"authentication_error"}}`)
+	if got := ClassifyCode("authentication_error"); got != ClassAuth {
+		t.Fatalf("该字面量本身应归认证，实际 %s", ClassName(got))
+	}
+	if got := ClassifyHTTP(http.StatusTooManyRequests, body); got != ClassRateLimit {
+		t.Fatalf("429 配认证字面量应归限流，实际 %s", ClassName(got))
+	}
+	// 400 上没有这层优先级：状态码不表态，报文说了算。
+	if got := ClassifyHTTP(http.StatusBadRequest, body); got != ClassAuth {
+		t.Fatalf("400 配认证字面量应归认证，实际 %s", ClassName(got))
+	}
+}
+
+// TestSuspendForIsGatedByAction 固定住「停用时长由动作把关」。
+//
+// 渠道信标头可以把停用动作摘掉而保留类别：此时即使类别本身带停用时长，也不该报出来，
+// 否则调用方会按被抹掉的类别去冷却一把厂商声明过“凭据没问题”的 key。
+func TestSuspendForIsGatedByAction(t *testing.T) {
+	masked := NewErrorWithActions(domain.CodeUpstreamRejected, "额度用尽", "", ClassQuota, ActionRetryNextRoute)
+	if got := SuspendFor(masked); got != 0 {
+		t.Fatalf("停用动作被摘掉后仍报出停用时长 %v，期望 0", got)
+	}
+	plain := NewError(domain.CodeUpstreamRejected, "额度用尽", "", ClassQuota)
+	if got := SuspendFor(plain); got != 15*time.Minute {
+		t.Fatalf("未覆盖时停用时长 = %v，期望 15 分钟", got)
+	}
+}
+
 // TestCodeForClassKeepsTimeoutDistinct 守护「超时单独成类」的理由：
 // 类别要能把对外的 504 与 502 区分开，否则客户端会把超时看成普通上游故障。
 func TestCodeForClassKeepsTimeoutDistinct(t *testing.T) {
