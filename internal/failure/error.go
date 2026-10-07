@@ -138,12 +138,27 @@ type ClassCarrier interface {
 
 // ClassOf 从错误里读出类别；未带分类时返回 ClassOther。只用于观测与排障，不参与控制流。
 func ClassOf(err error) Class {
-	var carrier ClassCarrier
-	if !errors.As(err, &carrier) {
-		return ClassOther
-	}
-	return carrier.Class()
+	class, _ := ClassOfKnown(err)
+	return class
 }
 
-// ClassNameOf 从错误里读出分类名，供写日志；未带分类时返回 ClassOther 的名字。
-func ClassNameOf(err error) string { return ClassName(ClassOf(err)) }
+// ClassOfKnown 从错误里读出类别，并报告该错误是否带了分类。
+func ClassOfKnown(err error) (Class, bool) {
+	var carrier ClassCarrier
+	if !errors.As(err, &carrier) {
+		return ClassOther, false
+	}
+	return carrier.Class(), true
+}
+
+// ClassNameOf 从错误里读出分类名，供写日志；未带分类时返回空串。
+//
+// 未带分类与「分类为 other」是两件事：前者是网关自身的错误（请求校验、平台故障），
+// 上游失败分类这根轴根本不该适用；后者是上游确实失败了但认不出成因。
+// 两者都记成 other 会给按类聚合的日志多一个含义不明的桶。
+func ClassNameOf(err error) string {
+	if _, ok := ClassOfKnown(err); !ok {
+		return ""
+	}
+	return ClassName(ClassOf(err))
+}
