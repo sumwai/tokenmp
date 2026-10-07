@@ -692,22 +692,57 @@ func TestStreamErrorFrameKeepsClassAndActions(t *testing.T) {
 	}
 }
 
-// TestPatternScansFullBodyRegardlessOfTruncation 固定住「分类扫全量、插件只看截断片段」这条不对称。
+// TestWordingScanIsBoundedAndSaysSo 守护有界扫描及其可观测性。
 //
-// 分类正则跑在完整报文上，而对插件暴露的正文是截断的（另有上限）。关键词落在截断点之后时，
-// 插件在 facts.body 里看不到任何线索，却可能去「纠正」一个基于全量报文得出的正确类别。
-func TestPatternScansFullBodyRegardlessOfTruncation(t *testing.T) {
-	padding := strings.Repeat("x", 64*1024)
-	script := mockScript{status: 400, body: `{"error":{"message":"` + padding + ` insufficient credits"}}`}
-	upstream := newMockUpstream(t, script)
-	client := newMockClient(t, Options{})
-	route := mockRoute(domain.ProtocolOpenAIChat, upstream.URL())
-
-	_, err := client.Complete(context.Background(), route, &domain.Request{Model: "mock-model"}, []byte(`{}`))
-	if err == nil {
-		t.Fatal("期望失败")
+// 分类原先扫完整报文，而上游响应体上限是 32MB：实测 32MB 报文要 30 秒、1MB 要 0.94 秒。
+// 一条坏上游因此能靠大报文本在**失败路径**上把 CPU 吃满。改为只扫首尾片段后，
+// 代价降下来，代价是「关键词埋在报文中段」不再被扫到——本用例把这个取舍的两个面都钉住，
+// 并确认超限时排障详情里会说清这件事，而不是静默地少扫一段。
+func TestWordingScanIsBoundedAndSaysSo(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		want  failure.Class
+		scant bool // 详情里是否应提到扫描受限
+	}{
+		{
+			name: "关键词在头部应被扫到",
+			body: `{"error":{"message":"insufficient credits"}}` + strings.Repeat(" ", 64*1024),
+			want: failure.ClassCredit,
+		},
+		{
+			name: "关键词在尾部（回显请求后报错）应被扫到",
+			body: `{"request_echo":"` + strings.Repeat("x", 64*1024) + `","error":{"message":"insufficient credits"}}`,
+			want: failure.ClassCredit,
+		},
+		{
+			// 取舍就在这里：中段的线索不再被扫到，因此归「认不出的 4xx」。
+			// 两头都填满超过扫描上限，把关键词夹在中间。
+			name: "关键词只在中段时不再扫到",
+			body: `{"a":"` + strings.Repeat("x", 32*1024) + `","m":"insufficient credits","z":"` + strings.Repeat("y", 32*1024) + `"}`,
+			want: failure.ClassRequest,
+		},
 	}
-	if got := failure.ClassOf(err); got != failure.ClassCredit {
-		t.Fatalf("关键词在 64KB 之后仍应被扫到，实际类别 %s", failure.ClassName(got))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newMockUpstream(t, mockScript{status: 400, body: tc.body})
+			client := newMockClient(t, Options{})
+			route := mockRoute(domain.ProtocolOpenAIChat, upstream.URL())
+
+			_, err := client.Complete(context.Background(), route, &domain.Request{Model: "mock-model"}, []byte(`{}`))
+			if err == nil {
+				t.Fatal("期望失败")
+			}
+			if got := failure.ClassOf(err); got != tc.want {
+				t.Fatalf("类别 = %s，期望 %s", failure.ClassName(got), failure.ClassName(tc.want))
+			}
+			// 报文超限时排障详情里必须说明只扫了首尾，无论本次是否命中。
+			// 它报告的是「扫描的实际情况」，而不是「本次结果是否可靠」；
+			// 大报文本身就值得让运营看到。
+			detail := domain.AsError(err).Detail
+			if !strings.Contains(detail, "措辞规则只扫首尾片段") {
+				t.Fatalf("超限报文应给出扫描受限标记：%s", detail)
+			}
+		})
 	}
 }
