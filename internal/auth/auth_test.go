@@ -614,5 +614,16 @@ func TestUnknownPathReturnsEnvelope(t *testing.T) {
 	}
 }
 
+// TestDataPlaneKeyIsNotSession 断言数据面的模型密钥不能充当会话令牌。
+//
+// 两套凭据的哈希与查询面完全分离：模型密钥在会话表里查不到，必然 401。
+func TestDataPlaneKeyIsNotSession(t *testing.T) {
+	e := newTestEnv(t, Options{})
+	status, env := e.do(t, http.MethodGet, PathSession, nil, "sk-mp-data-plane-key")
+	if status != http.StatusUnauthorized || codeOf(t, env) != codeUnauthorized {
+		t.Fatalf("数据面密钥应被会话端点拒绝: %d %s", status, env)
+	}
+}
+
 // sha256Hash 返回 OAEP 用的哈希实现，避免在辅助函数里重复引入依赖名。
 func sha256Hash() hash.Hash { return sha256.New() }
