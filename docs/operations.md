@@ -573,9 +573,10 @@ example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_del
 清单，计数为零；`last_error` 是该中间件最近一次钩子失败的文案。
 
 `--json` 另带 `reloaded_at` / `reload_failures` / `reload_error` / `stale` / `skipped` /
-`skip_error`：用来区分「在跑新版本还是旧版本」「重编译是不是一直失败」「插件是不是因为
-取不到运行时根本没被调用」。其中 `stale` 现场比对文件指纹，独立进程里同样有效；
-其余计数来自 `serve` 进程，在 `admin` 进程里为零。
+`skip_error`。这些字段描述的是 `serve` 进程的运行状态：计数与重载记录来自进程内存，
+在 `admin` 进程里恒为零；`stale` 的基准是本次加载时抓的指纹快照，同一进程里 `Load` 完
+立即读也几乎总为 `false`。因此独立执行 `admin plugin list` 得到的是静态清单 + 空状态，
+运行期状态需要 `serve` 进程自己上报（见 [docs/compatibility.md](compatibility.md) 的热重载节）。
 
 ### 9.4 样例：把 think 标签搬进 reasoning_content
 
