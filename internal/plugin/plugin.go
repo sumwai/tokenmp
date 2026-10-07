@@ -63,6 +63,16 @@ const (
 	hookOnStreamEnd = "onStreamEnd"
 	exportEvents    = "events"
 	exportOptions   = "options"
+	// exportScope 是模块导出的作用域：声明只对哪些模型 / 方言 / 厂商生效，
+	// 由宿主在 Go 侧判定，越界不进入 JS 运行时。
+	exportScope = "scope"
+)
+
+// 作用域的轴名，与模块导出的 scope 对象的键一一对应。导出给装配方做漂移检查。
+const (
+	AxisModels    = "models"
+	AxisProtocols = "protocols"
+	AxisVendors   = "vendors"
 )
 
 // Options 是加载中间件的可调参数；零值字段取对应默认值。
@@ -149,6 +159,9 @@ type compiled struct {
 	events         map[string]bool
 	eventsList     []string
 	options        map[string]any
+	// scope 是模块声明的作用域：越界的请求不进入 JS 运行时。
+	// 零值表示不限制任何轴，行为与未声明 scope 一致。
+	scope scopeSpec
 }
 
 // handles 报告事件白名单是否覆盖该事件名。
@@ -220,12 +233,13 @@ func (m *Middleware) assemble() (*compiled, error) {
 	if result.onStreamEnd, result.hasOnStreamEnd, err = resolveHook(module, hookOnStreamEnd); err != nil {
 		return nil, err
 	}
-	events, options, err := m.probeExports(module)
+	exports, err := m.probeExports(module)
 	if err != nil {
 		return nil, err
 	}
-	result.events, result.eventsList = events, sortedKeys(events)
-	result.options = options
+	result.events, result.eventsList = exports.events, sortedKeys(exports.events)
+	result.options = exports.options
+	result.scope = exports.scope
 	if result.hasOnEvent && len(result.events) == 0 {
 		// onEvent 导出但未声明 events 白名单：没有可调用的事件，按未启用处理并留痕。
 		m.logger.Warn("中间件导出了 onEvent 但未声明 events 白名单，该钩子不会生效", "plugin", m.name)
@@ -252,16 +266,35 @@ func resolveHook(module *moejs.Module, name string) (moejs.Hook, bool, error) {
 	}
 }
 
-// probeExports 在一个临时运行时里求值模块，读出 events 白名单与 options 配置。
-func (m *Middleware) probeExports(module *moejs.Module) (map[string]bool, map[string]any, error) {
+// probeExports 在一个临时运行时里求值模块，读出 events 白名单、options 配置与 scope 作用域。
+func (m *Middleware) probeExports(module *moejs.Module) (moduleExports, error) {
 	runtime, err := m.newBaseRuntime()
 	if err != nil {
-		return nil, nil, err
+		return moduleExports{}, err
 	}
-	if err := m.loadModule(runtime, module); err != nil {
-		return nil, nil, fmt.Errorf("求值插件顶层失败：%w", err)
+	if err = m.loadModule(runtime, module); err != nil {
+		return moduleExports{}, fmt.Errorf("求值插件顶层失败：%w", err)
 	}
-	return readEvents(runtime), readOptions(runtime), nil
+	scope, err := readScope(runtime)
+	if err != nil {
+		// 作用域写坏按「不限制」处理并留痕：让插件静默失效正是作用域要避免的失败形态，
+		// 但也不该因为一个声明性的优化项就让整个插件加载失败。
+		m.logger.Warn("中间件的 scope 声明非法，本次按不限制处理",
+			"plugin", m.name, "error", err.Error())
+		scope = scopeSpec{}
+	}
+	return moduleExports{
+		events:  readEvents(runtime),
+		options: readOptions(runtime),
+		scope:   scope,
+	}, nil
+}
+
+// moduleExports 是一次模块求值的产物：逐事件白名单、插件配置与作用域声明。
+type moduleExports struct {
+	events  map[string]bool
+	options map[string]any
+	scope   scopeSpec
 }
 
 // readEvents 读出模块导出的 events 白名单；未导出或形状非预期时返回空集。
@@ -407,6 +440,37 @@ func (m *Middleware) info() Info {
 	return info
 }
 
+// ScopeDeclaration 是一个中间件声明的作用域取值，供装配方做漂移检查。
+type ScopeDeclaration struct {
+	// Middleware 是中间件名（入口文件名），用于告警定位。
+	Middleware string
+	// Values 按轴分组，只含声明过的轴。
+	Values map[string][]string
+}
+
+// ScopeDeclarations 返回各中间件声明的作用域取值；未声明 scope 的中间件不出现在结果里。
+//
+// 装配方拿它与当前配置比对，把「声明了却一个都匹配不上」的名字报出来：三个名字轴都依赖
+// 运营在数据里的命名，改了名字就会让作用域静默失效，靠告警而不是靠文档发现漂移。
+func (s *Set) ScopeDeclarations() []ScopeDeclaration {
+	if s == nil {
+		return nil
+	}
+	var out []ScopeDeclaration
+	for _, middleware := range s.items {
+		comp := middleware.current()
+		if comp == nil {
+			continue
+		}
+		values := comp.scope.declared()
+		if len(values) == 0 {
+			continue
+		}
+		out = append(out, ScopeDeclaration{Middleware: middleware.name, Values: values})
+	}
+	return out
+}
+
 // stats 累计一个中间件的调用数与耗时。
 type stats struct {
 	calls    atomic.Int64
@@ -515,8 +579,14 @@ func (s *Set) OnRequest(ctx context.Context, client domain.Adapter, req *domain.
 	if state == nil || client == nil || req == nil {
 		return nil
 	}
+	// 本次调用的事实只算一次：循环里逐中间件重复求值没有任何好处。
+	model, protocol, vendor, known := scopeFacts(ctx, req)
 	for _, runtime := range state.runtimes {
 		if !runtime.comp.hasOnRequest {
+			continue
+		}
+		// 选路之前厂商未知，作用域里的厂商轴不参与判定（见 scopeSpec.allows）。
+		if !runtime.comp.scope.allows(model, protocol, vendor, known) {
 			continue
 		}
 		started := time.Now()
@@ -572,8 +642,12 @@ func (s *Set) OnEvent(ctx context.Context, req *domain.Request, chunk domain.Chu
 	}
 	current := chunk
 	changed := false
+	model, protocol, vendor, known := scopeFacts(ctx, req)
 	for _, runtime := range state.runtimes {
 		if !runtime.comp.handles(string(current.Kind)) {
+			continue
+		}
+		if !runtime.comp.scope.allows(model, protocol, vendor, known) {
 			continue
 		}
 		started := time.Now()
@@ -607,8 +681,12 @@ func (s *Set) OnStreamEnd(ctx context.Context, req *domain.Request) []domain.Chu
 		return nil
 	}
 	var flushed []domain.Chunk
+	model, protocol, vendor, known := scopeFacts(ctx, req)
 	for _, runtime := range state.runtimes {
 		if !runtime.comp.hasOnStreamEnd {
+			continue
+		}
+		if !runtime.comp.scope.allows(model, protocol, vendor, known) {
 			continue
 		}
 		started := time.Now()
@@ -632,8 +710,12 @@ func (s *Set) OnResponse(ctx context.Context, req *domain.Request, body []byte) 
 		return body
 	}
 	current := body
+	model, protocol, vendor, known := scopeFacts(ctx, req)
 	for _, runtime := range state.runtimes {
 		if !runtime.comp.hasResponse {
+			continue
+		}
+		if !runtime.comp.scope.allows(model, protocol, vendor, known) {
 			continue
 		}
 		started := time.Now()

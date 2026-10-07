@@ -218,6 +218,11 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	if !middleware.Empty() {
 		streamMiddleware = middleware
 		responseMiddleware = middleware
+		// 作用域里的名字必须在当前配置里存在，否则插件会静默失效（见 warnScopeDrift）。
+		// 存储层不满足读取面时跳过检查，不拦启动。
+		if reader, ok := st.(scopeConfigReader); ok {
+			warnScopeDrift(context.Background(), opts.PluginLogger, middleware, reader)
+		}
 	}
 
 	// 协议适配器做成单例：不持有跨请求业务状态（流式状态由 NewStream 派生），可按协议共享。

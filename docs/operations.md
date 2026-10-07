@@ -495,11 +495,13 @@ serve 启动后立即采一轮，随后按周期执行。探针报满额且快�
 ### 9.1 写一个中间件文件
 
 中间件是单文件 `*.mw.js`（或 `*.mw.mjs`、带 `package.json` 入口的目录）。导出可选的
-`onRequest` / `onEvent` / `onStreamEnd` / `onResponse` 四个函数，并用 `events` 声明逐事件钩子的白名单：
+`onRequest` / `onEvent` / `onStreamEnd` / `onResponse` 四个函数，用 `events` 声明逐事件钩子的
+白名单，用 `scope` 声明只对哪些名字生效：
 
 ```js
 // /path/to/example.mw.js
 export const events = ["text_delta"];
+export const scope = { models: ["glm-5"], vendors: ["zai"] };
 
 export function onRequest(body, ctx) {
   // 按模型别名分派；改写后的 model 参与选路。
@@ -561,8 +563,11 @@ example.mw.js   /path/to/example.mw.js    onRequest,onEvent,onResponse  text_del
 另外只能缓冲「可能是个不完整标签的后缀」——把整个思考块攼到 `</think>` 才发会让客户端在
 整个思考阶段收不到字节。
 
+头部 `scope` 声明它只对 MiniMax 渠道生效：越界的请求不进 JS 运行时，而不是进去了再原样返回：
+
 ```js
 // /path/to/think-tag.mw.js
+export const scope = { vendors: ["minimax"] };
 export const events = ["text_delta"];
 
 const OPEN = "<think>";
@@ -664,6 +669,6 @@ $ curl -s localhost:8080/v1/chat/completions -H 'Authorization: Bearer ***' \
 }
 ```
 
-两点需要在启用前知道：中间件是**进程级**的，会对所有渠道的所有流式响应生效（靠 `events`
-声明的分片类型与标签特征判断，无标签时零改动）；不认 `reasoning_content` 的客户端在推理阶段
-收不到正文，看上去像串行了一下，那不是延迟而是内容换了字段。
+两点需要在启用前知道：作用域按 `vendors` 限定，所以依赖渠道建时填的 `--vendor` 标签 ——
+改了它就等于换了作用域，服务启动时会因匹配不上而告警；不认 `reasoning_content` 的客户端在
+推理阶段收不到正文，看上去像串行了一下，那不是延迟而是内容换了字段。

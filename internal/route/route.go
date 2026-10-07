@@ -172,6 +172,7 @@ func routeOf(candidate store.RouteCandidate, protocol domain.Protocol) domain.Ro
 		Protocol:              protocol,
 		UpstreamModel:         candidate.UpstreamModel,
 		BaseURL:               endpointURL(candidate.BaseURL, protocol),
+		Vendor:                candidate.Vendor,
 		CredentialRef:         candidate.CredGroup,
 		RequestOverrides:      sanitizeRequestOverrides(candidate),
 		SigninHeader:          parseSigninHeader(candidate.Config),

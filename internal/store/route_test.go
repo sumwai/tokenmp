@@ -176,8 +176,8 @@ func TestResolveMerchantID(t *testing.T) {
 
 func TestRouteCandidates(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(11), "openai_chat", "https://up.example.com/api/v3", "group-a", 200, 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
-		{uint64(12), "openai_chat", "https://up.example.com", "group-b", 100, 100, 0, 0, nil, "glm-4", nil},
+		{uint64(11), "openai_chat", "https://up.example.com/api/v3", "group-a", "minimax", 200, 200, 10, 4, []byte(`{"headers":{"x":"y"}}`), "glm-5", []byte(`{"temperature":0.2}`)},
+		{uint64(12), "openai_chat", "https://up.example.com", "group-b", "", 100, 100, 0, 0, nil, "glm-4", nil},
 	}}
 
 	got, err := routeCandidates(context.Background(), fake, ChannelTypeOpenAIChat, "alias", 7)
@@ -198,6 +198,7 @@ func TestRouteCandidates(t *testing.T) {
 		{
 			ChannelID: 11, ChannelType: ChannelTypeOpenAIChat,
 			BaseURL: "https://up.example.com/api/v3", CredGroup: "group-a",
+			Vendor:   "minimax",
 			Priority: 200, Weight: 200, RateLimitQPS: 10, RateLimitConcurrency: 4,
 			Config: []byte(`{"headers":{"x":"y"}}`), UpstreamModel: "glm-5",
 			RequestOverrides: []byte(`{"temperature":0.2}`),
@@ -241,8 +242,8 @@ func TestRouteCandidatesRejectsBadInput(t *testing.T) {
 // 并如实给出每行的协议方言。
 func TestRouteCandidatesAnyType(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(21), "anthropic_messages", "https://claude.example.com", "group-c", 300, 100, 0, 0, nil, "claude-sonnet", nil},
-		{uint64(22), "openai_chat", "https://up.example.com", "group-a", 200, 100, 5, 2, nil, "glm-5", nil},
+		{uint64(21), "anthropic_messages", "https://claude.example.com", "group-c", "anthropic", 300, 100, 0, 0, nil, "claude-sonnet", nil},
+		{uint64(22), "openai_chat", "https://up.example.com", "group-a", "zai", 200, 100, 5, 2, nil, "glm-5", nil},
 	}}
 
 	got, err := routeCandidatesAnyType(context.Background(), fake, "alias", 7)
@@ -263,11 +264,13 @@ func TestRouteCandidatesAnyType(t *testing.T) {
 		{
 			ChannelID: 21, ChannelType: ChannelTypeAnthropicMessages,
 			BaseURL: "https://claude.example.com", CredGroup: "group-c",
+			Vendor:   "anthropic",
 			Priority: 300, Weight: 100, UpstreamModel: "claude-sonnet",
 		},
 		{
 			ChannelID: 22, ChannelType: ChannelTypeOpenAIChat,
 			BaseURL: "https://up.example.com", CredGroup: "group-a",
+			Vendor:   "zai",
 			Priority: 200, Weight: 100, RateLimitQPS: 5, RateLimitConcurrency: 2, UpstreamModel: "glm-5",
 		},
 	}
@@ -303,7 +306,7 @@ func TestRouteCandidatesAnyTypeRejectsBadInput(t *testing.T) {
 // 库表出现本版本不认识的协议方言时原样带出，由上层跳过该行而不是让整批查询失败。
 func TestRouteCandidatesAnyTypeKeepsUnknownChannelType(t *testing.T) {
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(31), "gemini_generate", "https://gemini.example.com", "group-d", 100, 100, 0, 0, nil, "gemini-2", nil},
+		{uint64(31), "gemini_generate", "https://gemini.example.com", "group-d", "google", 100, 100, 0, 0, nil, "gemini-2", nil},
 	}}
 
 	got, err := routeCandidatesAnyType(context.Background(), fake, "alias", 1)
