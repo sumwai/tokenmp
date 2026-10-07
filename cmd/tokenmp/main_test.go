@@ -123,6 +123,56 @@ func TestAdminPluginListReadsConfigWithoutDatabase(t *testing.T) {
 	}
 }
 
+// TestAdminPluginCheckReportsVerdicts 守护离线校验逐项给结论、按结果定退出码。
+//
+// 与 list 的分工在这里体现：check 接受路径参数，不依赖 TOKENMP_PLUGIN_FILES；
+// 一个坏文件不影响其余文件的结论。
+func TestAdminPluginCheckReportsVerdicts(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.mw.js")
+	if err := os.WriteFile(good, []byte("export function onRequest(body) { return body; }\n"), 0o600); err != nil {
+		t.Fatalf("写插件文件失败：%v", err)
+	}
+	bad := filepath.Join(dir, "bad.mw.js")
+	if err := os.WriteFile(bad, []byte("export function onRequest(body) { this is not javascript\n"), 0o600); err != nil {
+		t.Fatalf("写插件文件失败：%v", err)
+	}
+
+	t.Setenv("TOKENMP_MYSQL_DSN", "")
+	t.Setenv("TOKENMP_PLUGIN_FILES", "")
+
+	t.Run("全部可用", func(t *testing.T) {
+		var stdout, stderr strings.Builder
+		if code := run([]string{"admin", "plugin", "check", good}, &stdout, &stderr); code != exitOK {
+			t.Fatalf("退出码 = %d，期望 %d，stderr：%s", code, exitOK, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "ok") || !strings.Contains(stdout.String(), "onRequest") {
+			t.Errorf("输出应含结论与钩子，实际：%s", stdout.String())
+		}
+	})
+
+	t.Run("一项坏仍报出其余项", func(t *testing.T) {
+		var stdout, stderr strings.Builder
+		if code := run([]string{"admin", "plugin", "check", good, bad}, &stdout, &stderr); code != exitFailure {
+			t.Fatalf("退出码 = %d，期望 %d", code, exitFailure)
+		}
+		logged := stdout.String()
+		if !strings.Contains(logged, "good.mw.js") || !strings.Contains(logged, "bad.mw.js") {
+			t.Errorf("两个文件都应在结论里，实际：%s", logged)
+		}
+		if !strings.Contains(logged, "fail") {
+			t.Errorf("坏文件应标记为 fail，实际：%s", logged)
+		}
+	})
+
+	t.Run("未给路径且未配置", func(t *testing.T) {
+		var stdout, stderr strings.Builder
+		if code := run([]string{"admin", "plugin", "check"}, &stdout, &stderr); code != exitUsage {
+			t.Fatalf("退出码 = %d，期望 %d", code, exitUsage)
+		}
+	})
+}
+
 // TestAdminPluginListRejectsInvalidPath 守护非法插件路径在启动期报出。
 func TestAdminPluginListRejectsInvalidPath(t *testing.T) {
 	t.Setenv("TOKENMP_MYSQL_DSN", "")
