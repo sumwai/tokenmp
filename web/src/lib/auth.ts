@@ -10,7 +10,6 @@ export interface SessionUser {
   id: number;
   username: string;
   role: string;
-  merchant_id: number | null;
   identities: string[];
 }
 

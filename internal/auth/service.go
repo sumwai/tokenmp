@@ -73,13 +73,12 @@ type accessTokenData struct {
 
 // sessionUser 是会话端点与登录响应共用的身份数据，字段与契约 SessionUser 对齐。
 //
-// MerchantID 恒为 nil：web_user 尚未建立与 account / merchant 的关联，
-// 关联关系落地时再补字段语义，不预置占位值。
+// 不含商家标识：商家是结算内部概念，账户的结算归属由 account.default_merchant_id
+// 决定，不对登录主体暴露。页面作用域由账户归属（account.owner_user_id）推导。
 type sessionUser struct {
 	ID         uint64   `json:"id"`
 	Username   string   `json:"username"`
 	Role       string   `json:"role"`
-	MerchantID *uint64  `json:"merchant_id"`
 	Identities []string `json:"identities"`
 }
 
@@ -183,7 +182,6 @@ func (s *Service) SessionByAccess(ctx context.Context, accessToken string) (*ses
 		ID:         row.User.ID,
 		Username:   row.User.Username,
 		Role:       row.User.Role,
-		MerchantID: nil,
 		Identities: identities,
 	}, nil
 }
@@ -298,7 +296,6 @@ func (s *Service) issueSession(ctx context.Context, user *store.WebUser) (*sessi
 			ID:         user.ID,
 			Username:   user.Username,
 			Role:       user.Role,
-			MerchantID: nil,
 			Identities: identities,
 		},
 	}, nil

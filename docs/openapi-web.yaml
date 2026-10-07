@@ -804,6 +804,51 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/user/requests/stats:
+    get:
+      tags: [user]
+      summary: 请求记录聚合
+      description: |
+        按维度聚合当前账户的请求计数，用于回答时间跨度上的趋势与错误率。
+
+        明细超过保留期后进入归档，本端点的数据源是随明细同步维护的按天聚合缓存，
+        因此超期区间同样可查，不触发回源归档；区间内明细尚在热表时，两者口径一致。
+
+        它只回答计数，不返回单条记录；按 `request_id` 定位具体请求走详情端点。
+      operationId: getUserRequestStats
+      parameters:
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - name: group_by
+          in: query
+          required: false
+          description: 分组维度；缺省 `day`。
+          schema:
+            type: string
+            enum: [day, model, status]
+        - $ref: "#/components/parameters/ModelFilter"
+        - $ref: "#/components/parameters/ApiKeyFilter"
+      responses:
+        "200":
+          description: 聚合计数，按 `key` 升序。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RequestStatsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     webSession:
@@ -958,10 +1003,6 @@ components:
             角色标识：`member` 调用方（注册默认）、`partner` 商户、`admin` 平台管理员。
             三者都是用户，都拥有自己的账户，都能签发密钥并调用模型；角色只决定控制台与
             管理能力范围。取值由服务端下发，前端按值渲染导航与权限，不硬编码。
-        merchant_id:
-          type: [integer, "null"]
-          format: int64
-          description: 归属商家标识；无归属时为 null。
         identities:
           type: array
           description: 已绑定的登录身份，`password` 表示已设密码，其余为第三方提供方标识。
@@ -1382,6 +1423,35 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RequestItem"
+      additionalProperties: false
+
+    RequestStatsItem:
+      type: object
+      description: 一个分组维度的请求计数。
+      required: [key, total, success, failed, cancelled]
+      properties:
+        key:
+          type: string
+          description: |
+            分组值：`day` 为日期（`YYYY-MM-DD`），`model` 为模型名，`status` 为终态。
+        total:
+          type: integer
+        success:
+          type: integer
+        failed:
+          type: integer
+        cancelled:
+          type: integer
+      additionalProperties: false
+
+    RequestStatsPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestStatsItem"
       additionalProperties: false
 
     RequestAttempt:
