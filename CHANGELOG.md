@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.9](https://github.com/sumwai/tokenmp/compare/v0.1.8...v0.1.9) (2026-10-07)
+
+
+### Bug Fixes
+
+* 措辞扫描改为有界，并补上语义差分、生成式与 fuzz 测试 ([#98](https://github.com/sumwai/tokenmp/issues/98)) ([1a1f6ab](https://github.com/sumwai/tokenmp/commit/1a1f6ab824645c67651617a3d1cde622a2a6b5d8))
+* 流式错误帧丢失类别与动作集，并补上模拟上游的逐类测试 ([#95](https://github.com/sumwai/tokenmp/issues/95)) ([5688db0](https://github.com/sumwai/tokenmp/commit/5688db0802d03d5a7b24280677dc8f42910b8751))
+
 ## [0.1.8](https://github.com/sumwai/tokenmp/compare/v0.1.7...v0.1.8) (2026-10-07)
 
 
