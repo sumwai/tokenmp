@@ -34,6 +34,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/gateway"
+	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -392,12 +393,20 @@ func pluginOnboard(t *testing.T, ctx context.Context, svc *admin.Service, upstre
 	return merchantID, accountID, issued.Plaintext
 }
 
-// pluginStartServe 用生产装配函数起真实监听，并加载剧本的中间件文件。
+// pluginStartServe 用生产装配函数起真实监听，并按剧本的中间件文件写一份本机清单。
 func pluginStartServe(t *testing.T, st *store.Store, pluginPath string) (string, func()) {
 	t.Helper()
+	stateFile := filepath.Join(t.TempDir(), "plugins.json")
+	registry := &plugin.Registry{Plugins: []plugin.Entry{{
+		Name: filepath.Base(pluginPath), Path: pluginPath, Enabled: true,
+	}}}
+	if err := plugin.SaveRegistry(stateFile, registry); err != nil {
+		t.Fatalf("写插件清单失败：%v", err)
+	}
+
 	gw, err := gateway.New(st, gateway.Options{
 		CompleteTimeout: 10 * time.Second,
-		PluginFiles:     []string{pluginPath},
+		PluginStateFile: stateFile,
 	})
 	e2eMust(t, err)
 

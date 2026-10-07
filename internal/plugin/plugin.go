@@ -130,27 +130,46 @@ type Set struct {
 	items []*Middleware
 }
 
-// Load 加载配置里的全部中间件；空列表返回一个空 Set。
+// LoadFailure 是一个装不上的路径及其原因。
+type LoadFailure struct {
+	Path   string
+	Reason error
+}
+
+// Load 装配路径列表：任一项不可用即返回错误，不返回集合。
 //
-// 任一项不可用（路径不存在、后缀不符、包入口缺失、编译失败或钩子导出不是函数）
-// 都返回错误：非法配置在启动期报出，不推迟到第一个请求。加载不因单项失败而中止，
-// 一次报出全部不可用的项：多个插件同时写坏时，逐个修复逐次重启没有意义。
+// 用于「这些文件都必须能用」的场合（注册前校验、离线检查）：任一项不可用
+// （路径不存在、后缀不符、包入口缺失、编译失败或钩子导出不是函数）都报错，
+// 且一次报出全部不可用的项 —— 多个插件同时写坏时，逐个修复逐次重启没有意义。
 func Load(paths []string, opts Options) (*Set, error) {
+	set, failures := LoadAvailable(paths, opts)
+	if len(failures) == 0 {
+		return set, nil
+	}
+	errs := make([]error, 0, len(failures))
+	for _, failure := range failures {
+		errs = append(errs, failure.Reason)
+	}
+	return nil, errors.Join(errs...)
+}
+
+// LoadAvailable 装配路径列表，返回可用的集合与装不上的项。
+//
+// 用于运行期装配：坏的那一个跳过、其余照常服务，否则一个写坏的文件会把
+// 整个插件层（连带进程）拖住。集合内的顺序与传入顺序一致，即注册顺序。
+func LoadAvailable(paths []string, opts Options) (*Set, []LoadFailure) {
 	opts = opts.withDefaults()
 	set := &Set{opts: opts}
-	var failures []error
+	var failures []LoadFailure
 	for _, path := range paths {
 		middleware, err := loadMiddleware(path, opts)
 		if err != nil {
-			failures = append(failures, err)
+			failures = append(failures, LoadFailure{Path: path, Reason: err})
 			continue
 		}
 		set.items = append(set.items, middleware)
 	}
-	if len(failures) > 0 {
-		return nil, errors.Join(failures...)
-	}
-	return set, nil
+	return set, failures
 }
 
 // Empty 报告是否没有加载任何中间件。
@@ -492,35 +511,20 @@ func (m *Middleware) current() *compiled {
 		return cur
 	}
 	// 需要重编译：只有抢到单飞闸的 goroutine 编译，其余不排队。
-	m.recompile(reloadLazy)
+	m.recompile()
 	return m.snapshot()
 }
-
-// reloadMode 区分惰性重载与强制重载。
-type reloadMode bool
-
-const (
-	// reloadLazy 按指纹判断，缓存命中即复用已编译模块。
-	reloadLazy reloadMode = false
-	// reloadForced 忽略指纹并丢掉编译缓存，重新读文件。
-	// 指纹是「修改时间 + 大小」，cp -p、同尺寸覆盖、网络文件系统丢精度都会漏检；
-	// 强制重载是不依赖指纹的兜底，因此连缓存一起丢，否则缓存会把旧模块还回来。
-	reloadForced reloadMode = true
-)
 
 // recompile 在锁外编译一次并换代；抢不到单飞闸时直接返回。
 //
 // 返回值不给调用方，因为它取决于另一把锁上的进度：抢不到闸的调用方取快照即可，
 // 拿到的是此刻真正的当前产物。
-func (m *Middleware) recompile(mode reloadMode) {
+func (m *Middleware) recompile() {
 	if !m.reloading.CompareAndSwap(false, true) {
 		return
 	}
 	defer m.reloading.Store(false)
 
-	if mode == reloadForced {
-		m.compiler.reset()
-	}
 	// 编译在锁外进行：持锁编译会把所有请求一起挡在门外。
 	next, err := m.assemble()
 
@@ -582,19 +586,6 @@ func (m *Middleware) snapshot() *compiled {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cur
-}
-
-// Reload 立刻重编译全部中间件，忽略文件指纹与退避窗口。
-//
-// 指纹是「修改时间 + 大小」，cp -p、网络文件系统丢精度、同尺寸覆盖一类操作会让它漏检；
-// 该方法是不依赖指纹的兜底手段。触发源（信号、管理接口）不在本包内，由装配层决定。
-func (s *Set) Reload() {
-	if s == nil {
-		return
-	}
-	for _, middleware := range s.items {
-		middleware.recompile(reloadForced)
-	}
 }
 
 // OnReload 注册产物换代回调：任一中间件热重载成功后调用一次。

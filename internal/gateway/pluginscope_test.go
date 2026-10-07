@@ -122,18 +122,53 @@ func TestScheduleScopeDriftCheckSkipsWhileRunning(t *testing.T) {
 	}
 }
 
-// TestReloadPluginsForcesRecompile 守护外部触发能穿透到产物的强制换代。
-//
-// 指纹看不到的改动只能靠这条路径生效，因此它必须真的换代；未装配插件时为空操作。
-func TestReloadPluginsForcesRecompile(t *testing.T) {
-	set := loadScopedMiddleware(t, "")
-	fired := 0
-	set.OnReload(func() { fired++ })
+// writeRegistryEntry 写一个中间件文件并返回它的清单条目。
+func writeRegistryEntry(t *testing.T, dir, name, source string) plugin.Entry {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(source+"\nexport function onResponse(body) { return body; }\n"), 0o600); err != nil {
+		t.Fatalf("写中间件失败：%v", err)
+	}
+	return plugin.Entry{Name: name, Path: path, Enabled: true}
+}
 
-	gw := &Gateway{plugins: set}
+// writeRegistryFile 写本机插件清单。
+func writeRegistryFile(t *testing.T, path string, entries ...plugin.Entry) {
+	t.Helper()
+	if err := plugin.SaveRegistry(path, &plugin.Registry{Plugins: entries}); err != nil {
+		t.Fatalf("写清单失败：%v", err)
+	}
+}
+
+// TestReloadPluginsRereadsRegistry 守护外部触发会重读清单并换装。
+//
+// 新增、停用、删除与文件修好后的重新装配都靠这条路径，不需要重启进程。
+func TestReloadPluginsRereadsRegistry(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "plugins.json")
+	first := writeRegistryEntry(t, dir, "first.mw.js", "")
+	writeRegistryFile(t, stateFile, first)
+
+	live, err := plugin.NewLive(stateFile, plugin.Options{})
+	if err != nil {
+		t.Fatalf("初次装配失败：%v", err)
+	}
+	if got := len(live.Current().Stats()); got != 1 {
+		t.Fatalf("初次装配应有 1 个插件，实际 %d", got)
+	}
+
+	swapped := 0
+	live.SetOnSwap(func() { swapped++ })
+	second := writeRegistryEntry(t, dir, "second.mw.js", "")
+	writeRegistryFile(t, stateFile, first, second)
+
+	gw := &Gateway{plugins: live}
 	gw.ReloadPlugins()
-	if fired != 1 {
-		t.Fatalf("强制重载应换代一次，实际 %d 次", fired)
+	if got := len(live.Current().Stats()); got != 2 {
+		t.Fatalf("换装后应有 2 个插件，实际 %d", got)
+	}
+	if swapped != 1 {
+		t.Fatalf("换装回调应触发一次，实际 %d", swapped)
 	}
 
 	var nilGateway *Gateway

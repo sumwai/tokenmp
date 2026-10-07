@@ -96,15 +96,6 @@ func newCompiler(root string, noteRuntimeDep func(path string, stamp fileStamp))
 	return &compiler{root: abs, cache: map[string]cacheEntry{}, noteRuntimeDep: noteRuntimeDep}, nil
 }
 
-// reset 丢弃全部已编译模块，使下一次编译重新读文件。
-//
-// 强制的重载靠它绕开指纹：指纹未变时缓存会直接把旧模块还回来，清缓存是必要的。
-func (c *compiler) reset() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cache = map[string]cacheEntry{}
-}
-
 // compileGraph 编译入口模块并链接它的全部静态导入，返回链接后的模块、
 // 触及的文件路径与各自的指纹。
 //

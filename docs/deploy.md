@@ -92,9 +92,11 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 4. 装配网关：协议适配器、凭据轮换、上游客户端、渠道限流、熔断、中间件插件、上游套餐采集、流水与鉴权。
 5. 监听 `TOKENMP_LISTEN`。
 
-清单里启用的中间件在装配期编译并校验，任一项不可用即启动失败；
+清单里启用的中间件在装配期编译并校验：装不上的那一个只记 ERROR 并跳过，serve 照常启动，
+其余插件与转发不受影响；清单文件本身读不出来才是配置错误（退出码 1）。
 套餐采集器在 serve 启动后立即采一轮，随后按 `TOKENMP_UPSTREAM_PROBE_INTERVAL` 周期执行。
-注册与启停用 `tokenmp admin plugin`（见 [docs/operations.md](operations.md) 的中间件步骤）。
+注册与启停用 `tokenmp admin plugin`，改动在下一次重读清单时生效（SIGHUP）；见
+[docs/operations.md](operations.md) 的中间件步骤。
 
 迁移在启动时执行，表结构随二进制一同对齐，避免新版本对着旧表运行。迁移可重入：DDL 使用
 `CREATE TABLE IF NOT EXISTS`，版本登记用 `ON DUPLICATE KEY UPDATE` 去重，多实例并发启动

@@ -14,7 +14,6 @@ import (
 	"github.com/sumwai/tokenmp/internal/config"
 	"github.com/sumwai/tokenmp/internal/gateway"
 	"github.com/sumwai/tokenmp/internal/observability"
-	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -46,14 +45,8 @@ func cmdServe(stderr io.Writer) int {
 	// 在装配之前建立：探针采集器与 HTTP 服务共用同一个可取消的上下文。
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// 中间件清单在本机文件里，由 `admin plugin` 维护：读出启用项交给网关装配。
-	// 清单读不出来按配置错误处理，不静默当作没有插件。
-	registry, err := plugin.LoadRegistry(cfg.PluginStateFile)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
-		return exitFailure
-	}
-
+	// 中间件清单在本机文件里，由 `admin plugin` 维护：网关按清单装配，
+	// 并在收到 SIGHUP 时重读清单换装。
 	gw, err := gateway.New(st, gateway.Options{
 		CompleteTimeout:             cfg.CompleteTimeout,
 		StreamFirstByteTimeout:      cfg.StreamFirstByteTimeout,
@@ -75,7 +68,7 @@ func cmdServe(stderr io.Writer) int {
 		ProbeLogger:                 observability.NewJSONLogger(os.Stdout),
 		Logger:                      observability.NewAccessLogger(os.Stdout),
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
-		PluginFiles:                 registry.EnabledPaths(),
+		PluginStateFile:             cfg.PluginStateFile,
 		PluginLogger:                observability.NewJSONLogger(os.Stdout),
 		WebSignupEnabled:            cfg.WebSignupEnabled,
 		WebTrustProxy:               cfg.WebTrustProxy,
@@ -96,8 +89,9 @@ func cmdServe(stderr io.Writer) int {
 	}
 	defer gw.Close()
 
-	// SIGHUP 表示「重编译中间件」，不进入退出上下文：指纹是「修改时间 + 大小」，
-	// cp -p 一类操作看不出变化，这是不依赖指纹的兜底。Windows 下该信号不会到达。
+	// SIGHUP 表示「重读清单并换装」，不进入退出上下文：插件的新增、停用、删除，
+	// 以及文件修好后的重新装配都在这一步生效；指纹是「修改时间 + 大小」，
+	// cp -p 一类改动看不出变化，重读清单也一并避开它。Windows 下该信号不会到达。
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
