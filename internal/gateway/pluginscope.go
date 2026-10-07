@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -22,6 +23,27 @@ import (
 type scopeConfigReader interface {
 	ListChannels(ctx context.Context) ([]store.Channel, error)
 	ListModelMaps(ctx context.Context) ([]store.ModelMap, error)
+}
+
+// scopeDriftTimeout 是重载后重跑漂移检查的读取预算。
+//
+// 检查要读渠道与模型映射；超时只影响这一次提示性检查，不拦任何转发。
+const scopeDriftTimeout = 5 * time.Second
+
+// scheduleScopeDriftCheck 在后台重跑一次作用域漂移检查；已有一轮在跑时跳过。
+//
+// 产物换代后作用域声明可能刚被改过，启动期那一遍已经过时。检查放到后台：重载发生在
+// 某个请求的 goroutine 上，把配置查询挂到那次转发上不划算；单飞闸避免连续重载堆起查询。
+func (g *Gateway) scheduleScopeDriftCheck(logger *slog.Logger, middleware *plugin.Set, reader scopeConfigReader) {
+	if g == nil || !g.scopeCheck.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer g.scopeCheck.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), scopeDriftTimeout)
+		defer cancel()
+		warnScopeDrift(ctx, logger, middleware, reader)
+	}()
 }
 
 // warnScopeDrift 把中间件作用域里匹配不到任何配置的取值记一条告警。
