@@ -56,6 +56,14 @@ info:
     登录方式：账号密码（signin / signup）与第三方 OAuth（Google、GitHub 等，
     经 `providers` 列出、`oauth` 跳转、`exchange` 换取会话）。注销账号（erase）
     与重置密码（reset）各自需要对应用途的 OTP。
+
+    路径分区：
+
+    - `/api/v1/auth/*`：认证面，注册、登录、会话、密码与第三方登录。
+    - `/api/v1/user/*`：用户级业务数据。作用域由会话推导，不接受账户 id 参数；
+      一个登录主体拥有一个账户（`account.owner_user_id`），密钥、用量与请求记录
+      都挂在该账户上。列表端点用偏移分页，分页信息在信封的 `page` / `size` / `total`。
+    - `/api/v1/merchant/*`、`/api/v1/admin/*`：商家面与管理面，尚未定义。
 servers:
   - url: http://localhost:8080
     description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
@@ -65,6 +73,8 @@ tags:
     description: 注册、登录、会话与密码管理
   - name: oauth
     description: 第三方登录
+  - name: user
+    description: 用户级业务数据：账户概览、密钥、用量、请求记录与模型目录
 
 # 默认端点需要会话令牌；公开端点逐个置空。
 security:
@@ -492,6 +502,308 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  # ------------------------------------------------------------------
+  # 用户级业务数据：作用域由会话推导，路径不接受账户 id。
+  # ------------------------------------------------------------------
+  /api/v1/user/account:
+    get:
+      tags: [user]
+      summary: 账户概览
+      description: |
+        返回当前登录主体所属账户的摘要：账户标识、可用包存量、生效中的窗口限额与最近流水。
+        与数据面的账户自助查询（`docs/openapi.yaml` 的 `/v1/me/account`）口径一致，
+        差别只在鉴权与作用域推导；判定复用同一份实现，展示与判定不会漂移。
+        响应不含密钥、上游凭据或商家内部标识。
+      operationId: getUserAccount
+      parameters:
+        - name: recent
+          in: query
+          required: false
+          description: 最近流水条数；缺省 10，超过 100 截到 100，`0` 表示不返回流水。
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: 账户摘要。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AccountSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/keys:
+    get:
+      tags: [user]
+      summary: 密钥列表
+      description: |
+        列出当前账户下的 API 密钥，按主键倒序。只返回密钥前缀，哈希与明文从不返回。
+      operationId: listUserKeys
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: enabled
+          in: query
+          required: false
+          description: 按启用状态过滤；缺省不过滤。
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: 密钥列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfApiKey"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [user]
+      summary: 创建密钥
+      description: |
+        为当前账户签发一把 API 密钥。明文只在本次响应出现一次，之后任何端点都不再返回；
+        列表只给出前缀。密钥归属固定为当前账户，不接受归属参数。
+      operationId: createUserKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "200":
+          description: 创建成功，响应携带一次性明文。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CreatedApiKey"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/keys/{id}/revoke:
+    post:
+      tags: [user]
+      summary: 吊销密钥
+      description: |
+        吊销一把属于当前账户的密钥；已吊销的密钥再次吊销同样返回成功。
+        不属于当前账户的密钥返回 `code=404`，不以 403 区分存在性。
+      operationId: revokeUserKey
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: 吊销成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/usage:
+    get:
+      tags: [user]
+      summary: 用量流水
+      description: |
+        列出当前账户的用量流水，按写入时刻倒序。流水是 append-only 的计费事实，
+        一次请求一行；被重试过的失败尝试不产生流水。
+      operationId: listUserUsage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - $ref: "#/components/parameters/ModelFilter"
+        - $ref: "#/components/parameters/ApiKeyFilter"
+      responses:
+        "200":
+          description: 用量流水。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfUsageItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/models:
+    get:
+      tags: [user]
+      summary: 可用模型
+      description: |
+        列出当前账户可调用的模型及其支持的线协议。模型可用性由渠道与模型映射决定，
+        响应只给出客户端可用的模型名，不含上游模型名与渠道标识。
+      operationId: listUserModels
+      responses:
+        "200":
+          description: 模型列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfModelInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/requests:
+    get:
+      tags: [user]
+      summary: 请求记录
+      description: |
+        列出当前账户的请求记录，按请求时刻倒序。粒度是客户端发起的一次请求：
+        重试过的失败尝试不单独成行，因此条数与实际调用次数一致。
+
+        记录只覆盖摘要层与归属层字段。渠道标识、上游标识、商家标识与上游错误详情
+        不对用户暴露；这些字段属于商家面与管理面的统计口径。
+      operationId: listUserRequests
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - $ref: "#/components/parameters/ModelFilter"
+        - $ref: "#/components/parameters/ApiKeyFilter"
+        - name: status
+          in: query
+          required: false
+          description: 按终态过滤；缺省不过滤。
+          schema:
+            type: string
+            enum: [success, failed, cancelled]
+        - name: request_id
+          in: query
+          required: false
+          description: 按请求标识精确匹配，用于定位单条记录。
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 请求记录。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfRequestItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/requests/{request_id}:
+    get:
+      tags: [user]
+      summary: 请求详情
+      description: |
+        按请求标识返回单条记录的完整视图：摘要与归属层字段、尝试时间线，以及脱敏后的
+        请求结构与错误响应结构。
+
+        报文按「落盘即脱敏」处理：原文从不落盘，只有键名、嵌套结构与参数真值被保留，
+        用户内容替换为带长度的类型标记。因此报文可解析、可对比，但不含用户数据。
+
+        成功请求不保留报文，`request_shape` 与 `error_response_shape` 为 `null`；
+        报文只保留 7 天，超期后同样为 `null`。这两点由 `payload_available` 显式区分：
+        为 `false` 表示本次没有可取的报文，而不是接口异常。
+      operationId: getUserRequest
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: 请求标识，取自列表端点。
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 请求详情。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RequestDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     webSession:
@@ -721,6 +1033,463 @@ components:
           $ref: "#/components/schemas/Fingerprint"
       additionalProperties: false
 
+    # ------------------------------------------------------------------
+    # 用户级业务数据
+    # ------------------------------------------------------------------
+    AccountSummary:
+      type: object
+      description: 账户摘要。字段只增不改语义；与数据面自助查询同口径。
+      required: [account, buckets, quotas, recent]
+      properties:
+        account:
+          $ref: "#/components/schemas/AccountRef"
+        buckets:
+          type: array
+          description: |
+            可用包存量：未过期且剩余大于 0 的账本行。同单位的包相邻排列，
+            不合并成每单位一条合计，因为各包的 fallback 与到期时间不同。
+          items:
+            $ref: "#/components/schemas/AccountBucket"
+        quotas:
+          type: array
+          description: 生效中的窗口限额行，账户维度在前。
+          items:
+            $ref: "#/components/schemas/AccountQuota"
+        recent:
+          type: array
+          description: 最近流水摘要，按写入时刻倒序；条数由 `recent` 参数决定。
+          items:
+            $ref: "#/components/schemas/AccountRecentUsage"
+      additionalProperties: false
+
+    AccountRef:
+      type: object
+      required: [id, code]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        code:
+          type: string
+          description: 账户业务编码。
+      additionalProperties: false
+
+    AccountBucket:
+      type: object
+      description: 一条可用包存量。
+      required: [unit, remaining, fallback, expires_at]
+      properties:
+        unit:
+          type: string
+          description: 结算单位 `currency` / `token` / `credit`。
+        remaining:
+          type: string
+          description: 剩余存量，十进制字符串。
+        fallback:
+          type: string
+          description: 包扣尽后的处置 `charge_balance` / `reject`。
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: 到期时刻；`null` 表示不过期。
+      additionalProperties: false
+
+    AccountQuota:
+      type: object
+      description: 一条窗口限额及其当前窗口的已用量。
+      required: [scope, metric, window_kind, period, used, limit, action, resets_at]
+      properties:
+        scope:
+          type: string
+          description: 限额维度 `account` 或 `api_key`。
+        metric:
+          type: string
+          description: 计量指标。
+        window_kind:
+          type: string
+          description: 窗口类型 `rolling` / `calendar`。
+        period:
+          type: string
+          description: 窗口周期 `5h` / `day` / `week` / `month` / `total`。
+        used:
+          type: string
+          description: 当前窗口已用量，十进制字符串。
+        limit:
+          type: string
+          description: 限额，十进制字符串。
+        action:
+          type: string
+          description: 超限处置 `reject` / `throttle`。
+        resets_at:
+          type: [string, "null"]
+          format: date-time
+          description: 当前窗口结束时刻；`null` 表示不会自然重置（total）。
+      additionalProperties: false
+
+    AccountRecentUsage:
+      type: object
+      description: 一条流水摘要。
+      required: [model, created_at, charged_amount]
+      properties:
+        model:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        charged_amount:
+          type: string
+          description: 本次应扣量，十进制字符串。
+      additionalProperties: false
+
+    ApiKey:
+      type: object
+      description: 一把 API 密钥的可见部分；哈希与明文从不出现。
+      required: [id, name, key_prefix, enabled, expires_at, last_used_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        key_prefix:
+          type: string
+          description: 明文前缀，仅供展示与检索。
+        enabled:
+          type: boolean
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: false
+
+    PageOfApiKey:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKey"
+      additionalProperties: false
+
+    CreateApiKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: 过期时刻；`null` 或省略表示不过期。
+      additionalProperties: false
+
+    CreatedApiKey:
+      type: object
+      description: 创建响应；`secret` 只在此处出现一次。
+      required: [id, name, key_prefix, enabled, expires_at, last_used_at, secret]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        key_prefix:
+          type: string
+        enabled:
+          type: boolean
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        last_used_at:
+          type: [string, "null"]
+          format: date-time
+        secret:
+          type: string
+          description: 密钥明文，仅本次响应返回，不落库、不再查询。
+      additionalProperties: false
+
+    UsageTokens:
+      type: object
+      description: 一次调用的 token 用量分量。子项包含于主计数：缓存读写属于输入，推理属于输出。
+      required: [input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        cache_write_5m_tokens, cache_write_1h_tokens, reasoning_tokens, server_tool_uses]
+      properties:
+        input_tokens:
+          type: integer
+          description: 输入 token 总数，含缓存读写。
+        output_tokens:
+          type: integer
+          description: 输出 token 总数，含推理。
+        cache_read_tokens:
+          type: integer
+        cache_write_tokens:
+          type: integer
+          description: 不分档的缓存写计数；与两个分档字段互斥使用。
+        cache_write_5m_tokens:
+          type: integer
+        cache_write_1h_tokens:
+          type: integer
+        reasoning_tokens:
+          type: integer
+        server_tool_uses:
+          type: integer
+          description: 服务端工具执行次数，按次计费，不是 token 计数。
+      additionalProperties: false
+
+    UsageItem:
+      type: object
+      description: 一条用量流水。
+      required: [id, model, upstream_model, protocol, cross_protocol, usage, charged_amount, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        model:
+          type: string
+          description: 客户端请求的模型名。
+        upstream_model:
+          type: string
+          description: 实际履约的模型名。
+        protocol:
+          type: string
+          description: 客户端使用的线协议。
+        cross_protocol:
+          type: boolean
+        usage:
+          $ref: "#/components/schemas/UsageTokens"
+        charged_amount:
+          type: string
+          description: 本次应扣量，十进制字符串。
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PageOfUsageItem:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageItem"
+      additionalProperties: false
+
+    ModelInfo:
+      type: object
+      description: 一个当前账户可调用的模型。
+      required: [name, protocols]
+      properties:
+        name:
+          type: string
+          description: 客户端可用的模型名，可直接用于请求体。
+        protocols:
+          type: array
+          description: 支持调用的线协议标识。
+          items:
+            type: string
+      additionalProperties: false
+
+    PageOfModelInfo:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelInfo"
+      additionalProperties: false
+
+    RequestItem:
+      type: object
+      description: 一条请求记录的摘要与归属层字段。
+      required: [request_id, created_at, status, http_status, upstream_status, failure_class,
+        error_code, duration_ms, model, upstream_model, protocol, upstream_protocol,
+        cross_protocol, api_key_id, usage, payload_available]
+      properties:
+        request_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [success, failed, cancelled]
+          description: 请求终态。
+        http_status:
+          type: integer
+          description: 返回给客户端的 HTTP 状态码。
+        upstream_status:
+          type: [integer, "null"]
+          description: 上游返回的状态码；未取得时为 `null`。
+        failure_class:
+          type: [string, "null"]
+          description: 失败分类；成功时为 `null`。
+        error_code:
+          type: [string, "null"]
+          description: 网关错误码；成功时为 `null`。
+        duration_ms:
+          type: integer
+          description: 上游调用耗时，不含向客户端写出的耗时。
+        model:
+          type: string
+          description: 客户端请求的模型名。
+        upstream_model:
+          type: string
+          description: 实际发往上游的模型名；与 `model` 不同表示网关改写过。
+        protocol:
+          type: string
+          description: 客户端使用的线协议。
+        upstream_protocol:
+          type: string
+          description: 本次请求发往上游的线协议。
+        cross_protocol:
+          type: boolean
+          description: 两侧协议是否不同，即本次是否发生跨协议重建。
+        api_key_id:
+          type: integer
+          format: int64
+          description: 签发本次调用的密钥 id，可按它过滤。
+        usage:
+          oneOf:
+            - $ref: "#/components/schemas/UsageTokens"
+            - type: "null"
+          description: 取得的 token 用量；未取得时为 `null`。
+        payload_available:
+          type: boolean
+          description: |
+            是否存在可取的脱敏报文。仅失败请求保留报文，且只保留 7 天，
+            其余情况为 `false`。
+      additionalProperties: false
+
+    PageOfRequestItem:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequestItem"
+      additionalProperties: false
+
+    RequestAttempt:
+      type: object
+      description: 一次上游尝试。重试、渠道回退各占一条，按尝试序号排列。
+      required: [attempt, outcome, upstream_status, failure_class, error_code,
+        cross_protocol, duration_ms]
+      properties:
+        attempt:
+          type: integer
+          description: 尝试序号，从 1 起。
+        outcome:
+          type: string
+          enum: [ok, failed, cancelled, skipped]
+        upstream_status:
+          type: [integer, "null"]
+        failure_class:
+          type: [string, "null"]
+        error_code:
+          type: [string, "null"]
+        cross_protocol:
+          type: boolean
+        duration_ms:
+          type: integer
+      additionalProperties: false
+
+    RedactedPayload:
+      type: object
+      description: |
+        脱敏后的报文结构。键名与嵌套层次原样保留，值按规则处理：请求参数白名单保留
+        真值；用户内容替换为 `{"__redacted": "<类型>", "len": <长度>}`；数组保留
+        元素形状，元素数超过采样上限时补 `__total` 给出实际数量。
+
+        原文从不落盘，本结构可解析、可对比，用于判定请求形状与参数是否符合预期，
+        但不含用户数据。
+      additionalProperties: true
+
+    RequestDetail:
+      type: object
+      description: 一条请求记录的完整视图。
+      required: [request, attempts, request_shape, error_response_shape]
+      properties:
+        request:
+          $ref: "#/components/schemas/RequestItem"
+        attempts:
+          type: array
+          description: 尝试时间线，按尝试序号排列。
+          items:
+            $ref: "#/components/schemas/RequestAttempt"
+        request_shape:
+          oneOf:
+            - $ref: "#/components/schemas/RedactedPayload"
+            - type: "null"
+          description: 脱敏后的请求结构；无报文时为 `null`。
+        error_response_shape:
+          oneOf:
+            - $ref: "#/components/schemas/RedactedPayload"
+            - type: "null"
+          description: 脱敏后的错误响应结构；成功请求或超期后为 `null`。
+      additionalProperties: false
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 页码，从 1 起；缺省 1。
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      required: false
+      description: 每页条数；缺省 20，上限 100。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Since:
+      name: since
+      in: query
+      required: false
+      description: 起始时刻（含），RFC3339；缺省不限。
+      schema:
+        type: string
+        format: date-time
+    Until:
+      name: until
+      in: query
+      required: false
+      description: 结束时刻（含），RFC3339；缺省不限。
+      schema:
+        type: string
+        format: date-time
+    ModelFilter:
+      name: model
+      in: query
+      required: false
+      description: 按模型名精确匹配；缺省不过滤。
+      schema:
+        type: string
+    ApiKeyFilter:
+      name: api_key_id
+      in: query
+      required: false
+      description: 按签发本次调用的密钥 id 过滤；缺省不过滤。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
   responses:
     BadRequest:
       description: 参数缺失或非法，`code=400`。
@@ -742,6 +1511,30 @@ components:
             $ref: "#/components/schemas/Envelope"
     TooManyRequests:
       description: 触发频率限制，`code=429`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    Forbidden:
+      description: 已登录但无权访问该资源，`code=403`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    NotFound:
+      description: 资源不存在或不属于当前账户，`code=404`；两者不作区分，避免探测他人资源。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    Conflict:
+      description: 状态冲突，`code=409`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    InternalError:
+      description: 服务端错误，`code=500`。
       content:
         application/json:
           schema:
