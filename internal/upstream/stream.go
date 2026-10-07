@@ -142,8 +142,11 @@ func (c *Client) Stream(ctx context.Context, route domain.Route, req *domain.Req
 
 		chunks, decodeErr := streamAdapter.DecodeStreamFrame(frame.Event, frame.Data)
 		if decodeErr != nil {
-			if domainErr := domain.AsError(decodeErr); domainErr != nil {
-				return domainErr
+			// 适配器已经给出统一错误时原样上抛，**不得**用 domain.AsError 取出内层 *domain.Error：
+			// errors.As 会穿透 failure.Error 的 Unwrap 拿到内层错误，适配器携带的类别与动作集
+			// 随之丢失，于是流式错误帧既不重试也不停用凭据 —— 而这正是分类重构要建立的承诺。
+			if domain.AsError(decodeErr) != nil {
+				return decodeErr
 			}
 			return failure.NewError(domain.CodeUpstreamUnavailable, "上游流式帧无法解码", "", failure.ClassUpstream).WithCause(decodeErr)
 		}
