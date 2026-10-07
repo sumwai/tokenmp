@@ -51,6 +51,9 @@ const (
 	defaultMaxDynamicSource = 4 << 10
 	// defaultPoolSize 是每个中间件缓存的运行时数量上限。
 	defaultPoolSize = 8
+	// defaultReloadBackoff 是重编译失败后的退避窗口。
+	// 取秒级：写坏的文件往往会连着被读写，逐请求重试只会把编译开销平摊到每次转发上。
+	defaultReloadBackoff = time.Second
 )
 
 // 模块导出名。
@@ -89,6 +92,9 @@ type Options struct {
 	MaxDynamicSource int
 	// PoolSize 是每个中间件缓存的运行时数量上限；<= 0 时取默认值。
 	PoolSize int
+	// ReloadBackoff 是重编译失败后的退避窗口：窗口内不再检查指纹、也不再重试。
+	// <= 0 时取默认值。
+	ReloadBackoff time.Duration
 }
 
 // withDefaults 补齐零值字段。
@@ -107,6 +113,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.PoolSize <= 0 {
 		o.PoolSize = defaultPoolSize
+	}
+	if o.ReloadBackoff <= 0 {
+		o.ReloadBackoff = defaultReloadBackoff
 	}
 	return o
 }
@@ -202,9 +211,26 @@ type Middleware struct {
 	hookLog  rateLimiter
 	// hookSuppressed 累计被限频压掉的钩子失败日志条数；下一条放行的日志把它报出并归零。
 	hookSuppressed atomic.Int64
+	// reloading 是重编译的单飞闸：同一时刻只允许一个 goroutine 编译。
+	// 抢不到闸的请求不排队等结果，直接用当前产物继续服务。
+	reloading atomic.Bool
 
 	mu  sync.Mutex
 	cur *compiled
+	// reload 是重编译的状态位，与 cur 共锁。
+	reload reloadState
+}
+
+// reloadState 是一个中间件的重编译状态。
+type reloadState struct {
+	// lastSuccess 是最近一次成功重编译的时刻；零值表示启动后未重编译过。
+	lastSuccess time.Time
+	// consecutiveFailures 是连续失败次数，成功一次即归零。
+	consecutiveFailures int64
+	// lastError 是最近一次失败原因；成功后清空。
+	lastError string
+	// backoffUntil 之前不再检查指纹、也不再重试。
+	backoffUntil time.Time
 }
 
 // loadMiddleware 完成一个中间件的启动期装配：解析入口、编译链接、解析钩子与选项。
@@ -432,20 +458,82 @@ func sortedKeys(set map[string]bool) []string {
 // current 返回当前生效的编译产物；文件指纹变化时惰性重编译。
 //
 // 重编译失败时保留上一份产物并留痕：一次写坏的插件不该让正在服务的网关整体失效。
+// 三条可用性约束：
+//   - 单飞：同一时刻只有一个 goroutine 编译，其余请求不排队，直接用当前产物；
+//     否则 N 个并发请求会各编译一遍，并在锁上互相排队。
+//   - 退避：失败后一个退避窗口内不再检查指纹、不再重试。写坏的文件会被一连串
+//     请求反复撞上，逐请求重试等于把编译开销平摊到每次转发上。
+//   - 兜底：编译失败不清空产物、不清空运行时池，旧产物继续服务。
 func (m *Middleware) current() *compiled {
+	now := time.Now()
+	m.mu.Lock()
+	cur := m.cur
+	due := m.reloadDueLocked(now)
+	m.mu.Unlock()
+
+	if cur != nil && !due {
+		return cur
+	}
+	if !m.reloading.CompareAndSwap(false, true) {
+		// 已有一个请求在编译：不等它的结果，本次直接用当前产物。
+		return cur
+	}
+	defer m.reloading.Store(false)
+
+	// 编译在锁外进行：持锁编译会把所有请求一起挡在门外。
+	next, err := m.assemble()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cur != nil && !m.staleLocked() {
-		return m.cur
-	}
-	next, err := m.assemble()
 	if err != nil {
-		m.logger.Warn("中间件热重载失败，继续使用上一份产物", "plugin", m.name, logKeyError, err.Error())
+		m.reloadFailureLocked(err, time.Now())
 		return m.cur
 	}
 	m.cur = next
 	m.drainPoolLocked()
+	m.reloadSuccessLocked(time.Now())
+	return m.cur
+}
+
+// reloadDueLocked 报告是否该尝试重编译。调用方必须已持有 m.mu。
+//
+// 退避窗口内不做指纹检查：失败已经记过，再查一遍只会让每个请求都去 stat。
+func (m *Middleware) reloadDueLocked(now time.Time) bool {
+	if m.cur == nil {
+		return true
+	}
+	if now.Before(m.reload.backoffUntil) {
+		return false
+	}
+	return m.staleLocked()
+}
+
+// reloadFailureLocked 记一次重编译失败并开启退避窗口。调用方必须已持有 m.mu。
+func (m *Middleware) reloadFailureLocked(err error, now time.Time) {
+	m.reload.consecutiveFailures++
+	m.reload.lastError = err.Error()
+	m.reload.backoffUntil = now.Add(m.opts.ReloadBackoff)
+	m.logger.Warn("中间件热重载失败，继续使用上一份产物",
+		"plugin", m.name, logKeyError, err.Error(),
+		"consecutive_failures", m.reload.consecutiveFailures,
+		"retry_after_ms", m.opts.ReloadBackoff.Milliseconds())
+}
+
+// reloadSuccessLocked 记一次重编译成功并清掉失败状态。调用方必须已持有 m.mu。
+func (m *Middleware) reloadSuccessLocked(now time.Time) {
+	m.reload.lastSuccess = now
+	m.reload.consecutiveFailures = 0
+	m.reload.lastError = ""
+	m.reload.backoffUntil = time.Time{}
 	m.logger.Info("中间件已热重载", "plugin", m.name, "entry", m.entry)
+}
+
+// snapshot 返回当前产物的只读快照，不触发重编译。
+//
+// 状态读取不该有副作用：调用方只想知道此刻在跑什么，不该顺带把一次重编译拉进自己的路径。
+func (m *Middleware) snapshot() *compiled {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.cur
 }
 
@@ -481,11 +569,19 @@ type Info struct {
 	Failures  int64    `json:"failures"`
 	AverageMS float64  `json:"average_ms"`
 	LastError string   `json:"last_error,omitempty"`
+	// ReloadedAt 是最近一次成功重编译的时刻（RFC3339）；空表示启动后未重编译过。
+	ReloadedAt string `json:"reloaded_at,omitempty"`
+	// ReloadFailures 是连续重编译失败次数；成功一次即归零。
+	ReloadFailures int64 `json:"reload_failures,omitempty"`
+	// ReloadError 是最近一次重编译失败的原因。
+	ReloadError string `json:"reload_error,omitempty"`
+	// Stale 表示文件指纹已变化但重编译尚未成功，即当前在跑旧版本。
+	Stale bool `json:"stale,omitempty"`
 }
 
 // Stats 返回全部中间件的统计快照，顺序与配置一致。
 //
-// 运行时代码池中新建的运行时需要重新求值模块，装配期已求值一次，故统计快照随取随算。
+// 该调用不触发重编译：它是状态读取，不是取用路径。
 func (s *Set) Stats() []Info {
 	if s == nil {
 		return nil
@@ -498,8 +594,16 @@ func (s *Set) Stats() []Info {
 }
 
 // info 汇总一个中间件的当前状态。
+//
+// 只读快照与状态位，不做重编译，也不改任何状态；stale 需要比对文件指纹，
+// 因此该调用会 stat 一遍依赖文件，但它不在转发热路径上。
 func (m *Middleware) info() Info {
-	comp := m.current()
+	m.mu.Lock()
+	comp := m.cur
+	reload := m.reload
+	stale := comp != nil && m.staleLocked()
+	m.mu.Unlock()
+
 	info := Info{Name: m.name, Path: m.entry}
 	if comp != nil {
 		if comp.hasOnRequest {
@@ -517,6 +621,12 @@ func (m *Middleware) info() Info {
 		info.Events = append(info.Events, comp.eventsList...)
 	}
 	info.Calls, info.Failures, info.AverageMS, info.LastError = m.stats.snapshot()
+	if !reload.lastSuccess.IsZero() {
+		info.ReloadedAt = reload.lastSuccess.UTC().Format(time.RFC3339)
+	}
+	info.ReloadFailures = reload.consecutiveFailures
+	info.ReloadError = reload.lastError
+	info.Stale = stale
 	return info
 }
 
@@ -538,7 +648,7 @@ func (s *Set) ScopeDeclarations() []ScopeDeclaration {
 	}
 	var out []ScopeDeclaration
 	for _, middleware := range s.items {
-		comp := middleware.current()
+		comp := middleware.snapshot()
 		if comp == nil {
 			continue
 		}
