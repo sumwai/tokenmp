@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.8](https://github.com/sumwai/tokenmp/compare/v0.1.7...v0.1.8) (2026-10-07)
+
+
+### Features
+
+* 中间件作用域——按名字声明范围，越界不进入 JS 运行时 ([#89](https://github.com/sumwai/tokenmp/issues/89)) ([e450ffd](https://github.com/sumwai/tokenmp/commit/e450ffdedb9e3c81a33e1f794b7a74b1957f38a4)), closes [#88](https://github.com/sumwai/tokenmp/issues/88)
+* 推理透传——插件流结束钩子与 OpenAI 编码器下发 reasoning_content ([#86](https://github.com/sumwai/tokenmp/issues/86)) ([daad501](https://github.com/sumwai/tokenmp/commit/daad5011a1cbba9133f1e4f49471030037a9807e)), closes [#85](https://github.com/sumwai/tokenmp/issues/85)
+
+
+### Bug Fixes
+
+* **failure:** 区分「未带分类」与「分类为 other」 ([#94](https://github.com/sumwai/tokenmp/issues/94)) ([1b899b4](https://github.com/sumwai/tokenmp/commit/1b899b48f2e26478618a105b5d54495a269f91cc))
+* **plugin:** 拦下 async 钩子并补上被静默吞掉的配置告警 ([#92](https://github.com/sumwai/tokenmp/issues/92)) ([9412bc8](https://github.com/sumwai/tokenmp/commit/9412bc8adc4d657b8aff8dad2c0519fd232322e5))
+
+
+### Code Refactoring
+
+* 失败分类收敛为单一出处 ([#91](https://github.com/sumwai/tokenmp/issues/91)) ([4079a45](https://github.com/sumwai/tokenmp/commit/4079a4564c0357107db73e5c7b58975d8682fcd7))
+
 ## [0.1.7](https://github.com/sumwai/tokenmp/compare/v0.1.6...v0.1.7) (2026-10-06)
 
 
