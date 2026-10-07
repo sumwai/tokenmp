@@ -15,7 +15,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/domain"
 )
 
-// 控制台输出的上限与限频。
+// 控制台输出与日志的上限与限频。
 const (
 	// consoleGlobal 是注入到插件的控制台全局名。
 	consoleGlobal = "console"
@@ -23,6 +23,10 @@ const (
 	consoleMaxRunes = 512
 	// consolePerSecond 是每个中间件每秒放行的控制台日志条数上限。
 	consolePerSecond = 20
+	// hookFailurePerSecond 是每个中间件每秒放行的钩子失败日志条数上限。
+	// 取值低于控制台输出：失败日志每请求一条，热路径上会盖住其它记录，
+	// 而它要说明的只是「仍在失败」与失败原因，5 条足以看到。
+	hookFailurePerSecond = 5
 	// maxDeclaredEvents 是单个中间件声明的最大事件数，超过时只留痕提示，不拒绝加载。
 	maxDeclaredEvents = 12
 )
@@ -468,11 +472,57 @@ func truncateRunes(value string, limit int) string {
 	return string([]rune(value)[:limit])
 }
 
+// stackError 给引擎错误附上 JS 栈，并保留错误链供分类与 errors.As 使用。
+type stackError struct {
+	err   error
+	stack string
+}
+
+// Error 返回错误文本加栈。
+func (e *stackError) Error() string {
+	return e.err.Error() + "\n" + e.stack
+}
+
+// Unwrap 暴露原错误，使 errors.As / errors.Is 仍能命中引擎错误类型。
+func (e *stackError) Unwrap() error { return e.err }
+
+// withJSStack 给异常补上 JS 栈。
+//
+// 引擎把 Exception.Stack 留空，栈挂在错误对象的 stack 属性上，只能向运行时取；
+// 不取的话日志里只剩一句 "Error: boom"，在几十行的插件里等于零信息。
+// StackTrace 的首行是 "Name: message"，与错误自身文本重复，附上前先去掉。
+// 中断与内部错误没有栈可补，原样返回。
+func withJSStack(rt *moejs.Runtime, err error) error {
+	if rt == nil || err == nil {
+		return err
+	}
+	var exc *moejs.Exception
+	if !errors.As(err, &exc) {
+		return err
+	}
+	stack := rt.StackTrace(exc)
+	if first, rest, ok := strings.Cut(stack, "\n"); ok && strings.TrimSpace(first) == strings.TrimSpace(err.Error()) {
+		stack = rest
+	}
+	if stack == "" || strings.Contains(err.Error(), stack) {
+		return err
+	}
+	return &stackError{err: err, stack: stack}
+}
+
 // rateLimiter 是每秒固定条数的简单窗口限频器。
 type rateLimiter struct {
 	mu     sync.Mutex
+	limit  int
 	window time.Time
 	count  int
+}
+
+// newRateLimiter 构造一个每秒放行 limit 条的限频器。
+//
+// 配额随实例走，两类日志不共用一个限频器：共用时一方的突发会挤掉另一方的记录。
+func newRateLimiter(limit int) rateLimiter {
+	return rateLimiter{limit: limit}
 }
 
 // allow 报告本秒窗口是否还在配额内。
@@ -484,7 +534,7 @@ func (l *rateLimiter) allow() bool {
 		l.window = now
 		l.count = 0
 	}
-	if l.count >= consolePerSecond {
+	if l.count >= l.limit {
 		return false
 	}
 	l.count++

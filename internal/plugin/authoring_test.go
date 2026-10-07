@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -142,5 +143,96 @@ export function onResponse(body) { body.marker = "mw"; return body; }
 	rewritten := set.OnResponse(pluginCtx, req, []byte(`{"ok":true}`))
 	if !strings.Contains(string(rewritten), "mw") {
 		t.Fatalf("作用域非法时按不限制处理，实际：%s", rewritten)
+	}
+}
+
+// TestTopLevelExceptionLogsLocation 守护顶层抛异常带文件名与行号。
+//
+// 启动期的语法错误有 file:line:col，而顶层代码抛异常原先只有一句错误文本、没有位置，
+// 两头的反馈质量倒挂。
+func TestTopLevelExceptionLogsLocation(t *testing.T) {
+	dir := t.TempDir()
+	path := writeSource(t, dir, "top-throw.mw.js", "throw new Error(\"top-level boom\");\n")
+	err := loadErr(t, path)
+	if err == nil {
+		t.Fatal("顶层抛异常应当加载失败")
+	}
+	for _, want := range []string{"top-level boom", "top-throw.mw.js:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误缺少 %q，实际：%v", want, err)
+		}
+	}
+}
+
+// TestHookExceptionLogsStackAndRequestID 守护失败日志带 JS 栈与请求标识。
+//
+// 引擎把 Exception.Stack 留空，栈挂在错误对象的 stack 属性上；插件层不取栈时日志里
+// 只有一句 "Error: boom"，在几十行的插件里等于零信息，也无法与某次转发对上。
+func TestHookExceptionLogsStackAndRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	set, _ := loadOne(t, t.TempDir(), "throw.mw.js", `
+export function onRequest(body) {
+  throw new Error("boom");
+}
+`, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+
+	req := chatRequest(chatBody)
+	pluginCtx, release := scopeCtx(t, set, req, "minimax")
+	defer release()
+	if err := set.OnRequest(pluginCtx, openaichat.New(), req); err != nil {
+		t.Fatalf("钩子抛错应当静默放行：%v", err)
+	}
+
+	logged := logs.String()
+	for _, want := range []string{"boom", "request_id=req-test", "throw.mw.js:"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("日志缺少 %q，实际：%s", want, logged)
+		}
+	}
+	// 栈的首行与错误文本重复，去掉后才接上帧，否则同一句话出现两遍。
+	if !strings.Contains(logged, `boom\n    at onRequest`) {
+		t.Fatalf("日志应把帧接在错误文本之后，实际：%s", logged)
+	}
+	if strings.Contains(logged, `boom\nError: boom`) {
+		t.Fatalf("错误文本不应重复，实际：%s", logged)
+	}
+}
+
+// TestHookFailureLogsAreRateLimited 守护失败日志限频并保留被压掉的条数。
+//
+// 一次写坏的文件会让每个请求各失败一次：不限频时同一句话把日志刷满，排障现场看不到
+// 别的东西。限频又不能把计数丢掉，否则「持续失败」与「偶发失败」看起来一样。
+func TestHookFailureLogsAreRateLimited(t *testing.T) {
+	var logs bytes.Buffer
+	set, _ := loadOne(t, t.TempDir(), "always-throw.mw.js",
+		`export function onRequest() { throw new Error("boom"); }`,
+		Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+
+	const calls = 40
+	req := chatRequest(chatBody)
+	pluginCtx, release := scopeCtx(t, set, req, "minimax")
+	defer release()
+	for i := 0; i < calls; i++ {
+		if err := set.OnRequest(pluginCtx, openaichat.New(), req); err != nil {
+			t.Fatalf("第 %d 次钩子抛错应当静默放行：%v", i, err)
+		}
+	}
+
+	logged := logs.String()
+	recorded := strings.Count(logged, "中间件钩子失败")
+	if recorded == 0 {
+		t.Fatal("失败日志一条都没记")
+	}
+	if recorded >= calls {
+		t.Fatalf("%d 次调用产生了 %d 条失败日志，未限频", calls, recorded)
+	}
+
+	// 被压掉的条数在下一条放行的日志里报出，因此跨过一个限频窗口再触发一次。
+	time.Sleep(1100 * time.Millisecond)
+	if err := set.OnRequest(pluginCtx, openaichat.New(), req); err != nil {
+		t.Fatalf("限频窗口后的钩子抛错应当静默放行：%v", err)
+	}
+	if !strings.Contains(logs.String(), "suppressed=") {
+		t.Fatalf("限频后应报出被压掉的条数，实际：%s", logs.String())
 	}
 }

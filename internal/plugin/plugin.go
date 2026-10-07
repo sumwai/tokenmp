@@ -169,6 +169,26 @@ func (c *compiled) handles(kind string) bool {
 	return c.hasOnEvent && c.events[kind]
 }
 
+// hooks 返回已解析的钩子，键为导出名；未导出的不出现在结果里。
+//
+// 供装配期校验可调用性：Module.Hook 只回答导出槽是否存在，形状问题要另判。
+func (c *compiled) hooks() map[string]moejs.Hook {
+	hooks := map[string]moejs.Hook{}
+	if c.hasOnRequest {
+		hooks[hookOnRequest] = c.onRequest
+	}
+	if c.hasOnEvent {
+		hooks[hookOnEvent] = c.onEvent
+	}
+	if c.hasResponse {
+		hooks[hookOnResponse] = c.onResponse
+	}
+	if c.hasOnStreamEnd {
+		hooks[hookOnStreamEnd] = c.onStreamEnd
+	}
+	return hooks
+}
+
 // Middleware 是一个已加载的中间件：入口、编译缓存、运行时池与统计。
 type Middleware struct {
 	name     string
@@ -179,6 +199,9 @@ type Middleware struct {
 	pool     chan *pooledRuntime
 	stats    stats
 	console  rateLimiter
+	hookLog  rateLimiter
+	// hookSuppressed 累计被限频压掉的钩子失败日志条数；下一条放行的日志把它报出并归零。
+	hookSuppressed atomic.Int64
 
 	mu  sync.Mutex
 	cur *compiled
@@ -205,6 +228,8 @@ func loadMiddleware(path string, opts Options) (*Middleware, error) {
 		logger:   logger,
 		compiler: comp,
 		pool:     make(chan *pooledRuntime, opts.PoolSize),
+		console:  newRateLimiter(consolePerSecond),
+		hookLog:  newRateLimiter(hookFailurePerSecond),
 	}
 	assembled, err := middleware.assemble()
 	if err != nil {
@@ -233,7 +258,7 @@ func (m *Middleware) assemble() (*compiled, error) {
 	if result.onStreamEnd, result.hasOnStreamEnd, err = resolveHook(module, hookOnStreamEnd); err != nil {
 		return nil, err
 	}
-	exports, err := m.probeExports(module)
+	exports, err := m.probeExports(module, result.hooks())
 	if err != nil {
 		return nil, err
 	}
@@ -273,21 +298,56 @@ func resolveHook(module *moejs.Module, name string) (moejs.Hook, bool, error) {
 	}
 }
 
-// probeExports 在一个临时运行时里求值模块，读出 events 白名单、options 配置与 scope 作用域。
-func (m *Middleware) probeExports(module *moejs.Module) (moduleExports, error) {
+// hookNames 是装配期校验可调用性的钩子，顺序固定使错误文案稳定。
+var hookNames = []string{hookOnRequest, hookOnEvent, hookOnResponse, hookOnStreamEnd}
+
+// logKeyError 是结构化日志里错误文本的键名。
+//
+// 抽成常量而不是到处写 "error"：同一个键名散在多个日志调用里，改口径时容易漏改。
+const logKeyError = "error"
+
+// verifyHooks 确认已解析的钩子确实是可调用的函数。
+//
+// moejs 的 Module.Hook 只回答导出槽是否存在：`export const onRequest = 42` 也返回成功，
+// 于是 hooks 列显示正常、直到第一个请求才失败，属反向信心。可调用性只能在求值顶层之后
+// 于运行时里判，因此这一步不在 resolveHook 里做。
+func verifyHooks(runtime *moejs.Runtime, hooks map[string]moejs.Hook) error {
+	for _, name := range hookNames {
+		hook, ok := hooks[name]
+		if !ok {
+			continue
+		}
+		callable, err := runtime.Has(hook)
+		if err != nil {
+			return fmt.Errorf("导出 %s 无法解析：%w", name, err)
+		}
+		if !callable {
+			return fmt.Errorf("导出 %s 不是函数", name)
+		}
+	}
+	return nil
+}
+
+// probeExports 在一个临时运行时里求值模块，校验钩子可调用性，读出 events 白名单、
+// options 配置与 scope 作用域。
+func (m *Middleware) probeExports(module *moejs.Module, hooks map[string]moejs.Hook) (moduleExports, error) {
 	runtime, err := m.newBaseRuntime()
 	if err != nil {
 		return moduleExports{}, err
 	}
 	if err = m.loadModule(runtime, module); err != nil {
-		return moduleExports{}, fmt.Errorf("求值插件顶层失败：%w", err)
+		// 顶层抛异常原先只有一句错误文本、没有抛出位置；栈在错误对象上，向运行时取。
+		return moduleExports{}, fmt.Errorf("求值插件顶层失败：%w", withJSStack(runtime, err))
+	}
+	if err = verifyHooks(runtime, hooks); err != nil {
+		return moduleExports{}, err
 	}
 	scope, err := readScope(runtime)
 	if err != nil {
 		// 作用域写坏按「不限制」处理并留痕：让插件静默失效正是作用域要避免的失败形态，
 		// 但也不该因为一个声明性的优化项就让整个插件加载失败。
 		m.logger.Warn("中间件的 scope 声明非法，本次按不限制处理",
-			"plugin", m.name, "error", err.Error())
+			"plugin", m.name, logKeyError, err.Error())
 		scope = scopeSpec{}
 	}
 	return moduleExports{
@@ -380,7 +440,7 @@ func (m *Middleware) current() *compiled {
 	}
 	next, err := m.assemble()
 	if err != nil {
-		m.logger.Warn("中间件热重载失败，继续使用上一份产物", "plugin", m.name, "error", err.Error())
+		m.logger.Warn("中间件热重载失败，继续使用上一份产物", "plugin", m.name, logKeyError, err.Error())
 		return m.cur
 	}
 	m.cur = next
@@ -529,9 +589,10 @@ func (s *stats) snapshot() (calls, failures int64, averageMS float64, lastError 
 
 // requestState 是一次请求的插件上下文：每个中间件一个运行时与一个共享状态对象。
 type requestState struct {
-	path     string
-	agent    *Agent
-	runtimes []*requestRuntime
+	path      string
+	requestID string
+	agent     *Agent
+	runtimes  []*requestRuntime
 }
 
 // requestRuntime 是一个中间件在一次请求内的运行时。
@@ -562,7 +623,11 @@ func (s *Set) BeginRequest(ctx context.Context, req *domain.Request) (context.Co
 	if s.Empty() || req == nil {
 		return ctx, func() {}
 	}
-	state := &requestState{path: PathFromContext(ctx)}
+	requestID := req.RequestID
+	if requestID == "" {
+		requestID = "-"
+	}
+	state := &requestState{path: PathFromContext(ctx), requestID: requestID}
 	if agent, ok := AgentFromContext(ctx); ok {
 		state.agent = &agent
 	}
@@ -570,14 +635,14 @@ func (s *Set) BeginRequest(ctx context.Context, req *domain.Request) (context.Co
 		runtime, comp, err := middleware.acquire()
 		if err != nil {
 			middleware.logger.Warn("中间件运行时不可用，本次请求跳过该插件",
-				"plugin", middleware.name, "error", err.Error())
+				"plugin", middleware.name, logKeyError, err.Error())
 			continue
 		}
 		stateValue, err := runtime.FromGo(map[string]any{})
 		if err != nil {
 			middleware.release(runtime, comp)
 			middleware.logger.Warn("中间件状态对象创建失败，本次请求跳过该插件",
-				"plugin", middleware.name, "error", err.Error())
+				"plugin", middleware.name, logKeyError, err.Error())
 			continue
 		}
 		state.runtimes = append(state.runtimes, &requestRuntime{
@@ -611,20 +676,18 @@ func (s *Set) OnRequest(ctx context.Context, client domain.Adapter, req *domain.
 		}
 		started := time.Now()
 		rewritten, err := runtime.middleware.callRequest(state, runtime, req)
+		if err == nil && rewritten != nil && !runtime.rejected {
+			// 宿主侧解码失败属于这一次钩子调用的失败，并进同一条记录：
+			// 另记一次会让 Calls 多算一拍，失败也落到第二次调用上。
+			err = applyRequestRewrite(client, req, rewritten)
+		}
 		runtime.middleware.stats.record(time.Since(started), err)
 		if err != nil {
-			runtime.middleware.logHookFailure(hookOnRequest, err)
+			runtime.middleware.logHookFailure(runtime.runtime, state.requestID, hookOnRequest, err)
 			continue
 		}
 		if runtime.rejected {
 			return rejectError(runtime.status, runtime.message)
-		}
-		if rewritten == nil {
-			continue
-		}
-		if err := applyRequestRewrite(client, req, rewritten); err != nil {
-			runtime.middleware.stats.record(0, err)
-			runtime.middleware.logHookFailure(hookOnRequest, err)
 		}
 	}
 	return nil
@@ -674,7 +737,7 @@ func (s *Set) OnEvent(ctx context.Context, req *domain.Request, chunk domain.Chu
 		next, drop, err := runtime.middleware.callEvent(state, runtime, req, current)
 		runtime.middleware.stats.record(time.Since(started), err)
 		if err != nil {
-			runtime.middleware.logHookFailure(hookOnEvent, err)
+			runtime.middleware.logHookFailure(runtime.runtime, state.requestID, hookOnEvent, err)
 			continue
 		}
 		if drop {
@@ -713,7 +776,7 @@ func (s *Set) OnStreamEnd(ctx context.Context, req *domain.Request) []domain.Chu
 		chunks, err := runtime.middleware.callStreamEnd(state, runtime, req)
 		runtime.middleware.stats.record(time.Since(started), err)
 		if err != nil {
-			runtime.middleware.logHookFailure(hookOnStreamEnd, err)
+			runtime.middleware.logHookFailure(runtime.runtime, state.requestID, hookOnStreamEnd, err)
 			continue
 		}
 		flushed = append(flushed, chunks...)
@@ -742,7 +805,7 @@ func (s *Set) OnResponse(ctx context.Context, req *domain.Request, body []byte) 
 		next, err := runtime.middleware.callResponse(state, runtime, req, current)
 		runtime.middleware.stats.record(time.Since(started), err)
 		if err != nil {
-			runtime.middleware.logHookFailure(hookOnResponse, err)
+			runtime.middleware.logHookFailure(runtime.runtime, state.requestID, hookOnResponse, err)
 			continue
 		}
 		if next != nil {
@@ -753,9 +816,22 @@ func (s *Set) OnResponse(ctx context.Context, req *domain.Request, body []byte) 
 }
 
 // logHookFailure 写一条钩子失败日志；失败一律按原样放行，因此固定记录放行语义。
-func (m *Middleware) logHookFailure(hook string, err error) {
-	m.logger.Warn("中间件钩子失败，按原样放行",
-		"plugin", m.name, "hook", hook, "kind", hookErrorKind(err), "error", err.Error())
+//
+// 日志按中间件限频：一次写坏的文件会让每个请求各失败一次，不限频时同一句话把日志刷满，
+// 排障现场看不到别的东西。被压掉的条数在下一条放行的日志里报出，症状消失前不丢计数。
+func (m *Middleware) logHookFailure(rt *moejs.Runtime, requestID, hook string, err error) {
+	if !m.hookLog.allow() {
+		m.hookSuppressed.Add(1)
+		return
+	}
+	attrs := []any{
+		"plugin", m.name, "hook", hook, "kind", hookErrorKind(err),
+		"request_id", requestID, logKeyError, withJSStack(rt, err).Error(),
+	}
+	if suppressed := m.hookSuppressed.Swap(0); suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	m.logger.Warn("中间件钩子失败，按原样放行", attrs...)
 }
 
 // hookErrorKind 把钩子错误归成便于聚合的类别。

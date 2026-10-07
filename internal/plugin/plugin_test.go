@@ -83,18 +83,43 @@ func TestLoadRejectsInvalidPaths(t *testing.T) {
 	}
 }
 
-// TestNonCallableHookSilentlyPasses 验证导出存在但不是函数时按钩子失败静默放行。
+// TestNonCallableHookFailsAssembly 验证导出存在但不是函数时在装配期报错。
 //
-// moejs 的 Hook 只回答「导出存在」，可调用性在调用时才判定；这里断言该失败
-// 不会阻断转发，也不会改动请求。
-func TestNonCallableHookSilentlyPasses(t *testing.T) {
-	set, _ := loadOne(t, t.TempDir(), "nofn.mw.js", `export const onRequest = 42;`, Options{})
+// moejs 的 Module.Hook 只回答导出槽是否存在：`export const onRequest = 42` 也返回成功，
+// 于是 hooks 列显示正常、直到第一个请求才失败，属反向信心。可调用性判定移到装配期后，
+// 错误必须点名是哪个导出、以及原因。
+func TestNonCallableHookFailsAssembly(t *testing.T) {
+	dir := t.TempDir()
+	path := writeSource(t, dir, "nofn.mw.js", `export const onRequest = 42;`)
+	err := loadErr(t, path)
+	if err == nil {
+		t.Fatal("非函数钩子应当在装配期报错")
+	}
+	if !strings.Contains(err.Error(), "onRequest") || !strings.Contains(err.Error(), "不是函数") {
+		t.Fatalf("错误应点名导出与原因，实际：%v", err)
+	}
+}
+
+// TestRewriteDecodeFailureCountsOnce 守护改写后解码失败只计一次调用。
+//
+// 宿主侧解码失败原先会再调一次 record：Calls 多算一拍，Failures 记在第二次调用上，
+// 于是失败率与真实调用数都对不上。
+func TestRewriteDecodeFailureCountsOnce(t *testing.T) {
+	// 返回值是合法 JSON 对象，但缺少 messages，适配器会拒绝解码。
+	set, _ := loadOne(t, t.TempDir(), "drop-messages.mw.js",
+		`export function onRequest(body) { return { model: "alias" }; }`, Options{})
+
 	req := chatRequest(chatBody)
 	if err := runRequest(t, set, context.Background(), req); err != nil {
-		t.Fatalf("非函数钩子应当静默放行：%v", err)
+		t.Fatalf("解码失败应当静默放行：%v", err)
 	}
-	if req.Model != "alias" {
-		t.Fatalf("非函数钩子不应改动请求，模型名 = %q", req.Model)
+	infos := set.Stats()
+	if len(infos) != 1 {
+		t.Fatalf("统计项数 = %d，期望 1", len(infos))
+	}
+	if infos[0].Calls != 1 || infos[0].Failures != 1 {
+		t.Fatalf("一次失败的改写应记 1 次调用与 1 次失败，实际 calls=%d failures=%d",
+			infos[0].Calls, infos[0].Failures)
 	}
 }
 
