@@ -52,7 +52,8 @@ type cacheEntry struct {
 
 // compileSession 累计一次图编译触及的文件路径，供调用方登记依赖。
 //
-// 动态导入不参与依赖登记：它的解析时机由插件代码决定，不属启动期已知的模块图。
+// 动态导入不参与这里的依赖登记：它的解析时机由插件代码决定，不属启动期已知的模块图。
+// 这类文件由 noteRuntimeDep 单独登记，同样进入热重载的指纹判定。
 type compileSession struct {
 	deps []string
 }
@@ -76,18 +77,32 @@ func (s *compileSession) add(path string) {
 type compiler struct {
 	// root 是沙箱根目录：模块导入不得解析到该目录之外。
 	root string
+	// noteRuntimeDep 记录一次运行期解析（动态 import）触及的文件与当时的指纹，
+	// 供热重载判定。为 nil 时不记录。
+	noteRuntimeDep func(path string, stamp fileStamp)
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
 }
 
 // newCompiler 构造一个以 root 为边界的编译器；root 会被转为绝对路径。
-func newCompiler(root string) (*compiler, error) {
+//
+// noteRuntimeDep 可以为 nil；它只会在运行期解析路径上被调用。
+func newCompiler(root string, noteRuntimeDep func(path string, stamp fileStamp)) (*compiler, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("解析插件目录失败：%w", err)
 	}
-	return &compiler{root: abs, cache: map[string]cacheEntry{}}, nil
+	return &compiler{root: abs, cache: map[string]cacheEntry{}, noteRuntimeDep: noteRuntimeDep}, nil
+}
+
+// reset 丢弃全部已编译模块，使下一次编译重新读文件。
+//
+// 强制的重载靠它绕开指纹：指纹未变时缓存会直接把旧模块还回来，清缓存是必要的。
+func (c *compiler) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache = map[string]cacheEntry{}
 }
 
 // compileGraph 编译入口模块并链接它的全部静态导入，返回链接后的模块、
@@ -125,10 +140,17 @@ func (c *compiler) compileGraph(entry string) (*moejs.Module, []string, map[stri
 }
 
 // compileFile 按指纹复用或重新编译一个模块文件。调用方必须已持有 c.mu。
+//
+// session 为 nil 表示这次编译来自运行期解析（动态 import）：这类文件不在启动期的
+// 静态模块图里，要把路径与指纹回传给调用方，否则改它不会触发重载，也不会清掉池里
+// 已经装载旧模块的运行时。
 func (c *compiler) compileFile(path string, session *compileSession) (*moejs.Module, error) {
 	stamp, err := statFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("读取插件文件 %s 失败：%w", path, err)
+	}
+	if session == nil && c.noteRuntimeDep != nil {
+		c.noteRuntimeDep(path, stamp)
 	}
 	if cached, ok := c.cache[path]; ok && cached.stamp == stamp {
 		session.add(path)

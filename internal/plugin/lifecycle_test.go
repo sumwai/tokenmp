@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -129,6 +131,100 @@ func TestStatsDoesNotTriggerReload(t *testing.T) {
 	// hooks 取自当前在跑的产物，仍应是旧版本的导出。
 	if len(infos[0].Hooks) != 1 || infos[0].Hooks[0] != hookOnRequest {
 		t.Fatalf("状态应描述当前产物，实际 hooks=%v", infos[0].Hooks)
+	}
+}
+
+// TestRuntimeImportDependencyTriggersReload 守护动态 import() 的文件参与热重载指纹。
+//
+// 这类文件不在启动期的静态依赖图里：不补登记，改它既不会触发换代，也不会清掉池里
+// 已经装载旧模块的运行时，插件会一直停在旧版本。
+func TestRuntimeImportDependencyTriggersReload(t *testing.T) {
+	dir := t.TempDir()
+	writeSource(t, dir, "value.js", `export const value = "one";`)
+	entry := writeSource(t, dir, "dyn.mw.js", `
+const { value } = await import("./value.js");
+export function onRequest(body) { body.v = value; return body; }
+`)
+	set, err := Load([]string{entry}, Options{ReloadBackoff: time.Minute})
+	if err != nil {
+		t.Fatalf("加载插件失败：%v", err)
+	}
+	if got := runOnce(t, set); got != "one" {
+		t.Fatalf("首版依赖未生效，得到 %q", got)
+	}
+
+	writeSource(t, dir, "value.js", `export const value = "second";`)
+	if got := runOnce(t, set); got != "second" {
+		t.Fatalf("动态导入的文件变化应触发重载，得到 %q", got)
+	}
+}
+
+// TestForcedReloadIgnoresFingerprint 守护强制重载是不依赖指纹的兜底。
+//
+// 指纹是「修改时间 + 大小」：等长内容加复原的时间戳就落在它看不见的区间里。
+// 强制重载必须连编译缓存一起丢，否则缓存会把旧模块还回来。
+func TestForcedReloadIgnoresFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	path := writeSource(t, dir, "forced.mw.js", `export function onRequest(body) { body.v = "v1"; return body; }`)
+	set, err := Load([]string{path}, Options{ReloadBackoff: time.Minute})
+	if err != nil {
+		t.Fatalf("加载插件失败：%v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("读取文件状态失败：%v", err)
+	}
+	if got := runOnce(t, set); got != "v1" {
+		t.Fatalf("首版插件未生效，得到 %q", got)
+	}
+
+	// 等长内容 + 复原修改时间：指纹看不出变化。
+	writeSource(t, dir, "forced.mw.js", `export function onRequest(body) { body.v = "v2"; return body; }`)
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("复原文件时间失败：%v", err)
+	}
+	if got := runOnce(t, set); got != "v1" {
+		t.Fatalf("指纹相同的改动不应被惰性重载发现，得到 %q", got)
+	}
+
+	set.Reload()
+	if got := runOnce(t, set); got != "v2" {
+		t.Fatalf("强制重载应换成新产物，得到 %q", got)
+	}
+}
+
+// TestSkipIsCountedAndThrottled 守护「转发放行但插件未介入」这件事可被看见。
+//
+// 取用失败（运行时建不出来）在正常插件上难以复现，这里直接驱动记录路径：
+// 要断言的是计数与限频，不是复现引擎级故障。
+func TestSkipIsCountedAndThrottled(t *testing.T) {
+	set, logs := newLoggingSet(t, t.TempDir(), lifecycleV1, Options{})
+	if len(set.items) != 1 {
+		t.Fatalf("中间件数 = %d，期望 1", len(set.items))
+	}
+	middleware := set.items[0]
+
+	const calls = 40
+	for i := 0; i < calls; i++ {
+		middleware.noteSkip(errors.New("运行时建不出来"))
+	}
+
+	infos := set.Stats()
+	if infos[0].Skipped != calls {
+		t.Fatalf("跳过计数 = %d，期望 %d", infos[0].Skipped, calls)
+	}
+	if infos[0].SkipError == "" {
+		t.Fatal("应当能读到最近一次取用失败的原因")
+	}
+	recorded := strings.Count(logs.String(), "中间件取用失败")
+	if recorded == 0 || recorded >= calls {
+		t.Fatalf("%d 次取用失败产生了 %d 条日志，未限频", calls, recorded)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	middleware.noteSkip(errors.New("运行时建不出来"))
+	if !strings.Contains(logs.String(), "suppressed=") {
+		t.Fatalf("限频后应报出被压掉的条数，实际：%s", logs.String())
 	}
 }
 
