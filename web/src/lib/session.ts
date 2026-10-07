@@ -34,3 +34,18 @@ export function clearSession(): void {
   sessionStorage.removeItem(ACCESS_KEY);
   sessionStorage.removeItem(REFRESH_KEY);
 }
+
+/** 第三方授权发起时记录提供方：回调页跨页面跳转后据此选 exchange 路径。 */
+const OAUTH_PROVIDER_KEY = 'tokenmp_oauth_provider';
+
+/** saveOauthProvider 记录正在授权的提供方。 */
+export function saveOauthProvider(provider: string): void {
+  sessionStorage.setItem(OAUTH_PROVIDER_KEY, provider);
+}
+
+/** takeOauthProvider 取出并清除记录中的提供方。 */
+export function takeOauthProvider(): string | null {
+  const value = sessionStorage.getItem(OAUTH_PROVIDER_KEY);
+  sessionStorage.removeItem(OAUTH_PROVIDER_KEY);
+  return value;
+}

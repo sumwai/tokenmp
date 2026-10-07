@@ -69,20 +69,27 @@ type oauthAuthorizeData struct {
 	State        string `json:"state"`
 }
 
+// oauthStateEntry 是一条未消费的 state：它与签发时的提供方绑定，
+// 兑换时两边必须一致，避免同一 state 被拿到另一个提供方路径上使用。
+type oauthStateEntry struct {
+	provider string
+	expires  time.Time
+}
+
 // stateSet 是一次性 CSRF state 的内存表。
 type stateSet struct {
-	mu   sync.Mutex
-	used map[string]time.Time
-	ttl  time.Duration
-	now  func() time.Time
+	mu    sync.Mutex
+	used  map[string]oauthStateEntry
+	ttl   time.Duration
+	now   func() time.Time
 }
 
 func newStateSet(ttl time.Duration, now func() time.Time) *stateSet {
-	return &stateSet{used: make(map[string]time.Time), ttl: ttl, now: now}
+	return &stateSet{used: make(map[string]oauthStateEntry), ttl: ttl, now: now}
 }
 
-// put 生成并登记一个 state。
-func (s *stateSet) put() (string, error) {
+// put 生成并登记一个与 provider 绑定的 state。
+func (s *stateSet) put(provider string) (string, error) {
 	pair, err := newTokenPair()
 	if err != nil {
 		return "", err
@@ -90,28 +97,31 @@ func (s *stateSet) put() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 顺手清理过期项：表规模与限频同量级，逐次线性清理足够。
-	for st, expires := range s.used {
-		if s.now().After(expires) {
+	for st, entry := range s.used {
+		if s.now().After(entry.expires) {
 			delete(s.used, st)
 		}
 	}
-	s.used[pair.plain] = s.now().Add(s.ttl)
+	s.used[pair.plain] = oauthStateEntry{provider: provider, expires: s.now().Add(s.ttl)}
 	return pair.plain, nil
 }
 
-// take 校验并消费 state；未登记、已消费或已过期都返回 false。
-func (s *stateSet) take(state string) bool {
+// take 校验并消费 state，返回它绑定的提供方；未登记、已消费或已过期返回空串。
+func (s *stateSet) take(state string) string {
 	if state == "" {
-		return false
+		return ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	expires, ok := s.used[state]
+	entry, ok := s.used[state]
 	if !ok {
-		return false
+		return ""
 	}
 	delete(s.used, state)
-	return s.now().Before(expires)
+	if !s.now().Before(entry.expires) {
+		return ""
+	}
+	return entry.provider
 }
 
 // oauthStateTTL 是 state 寿命：覆盖「打开授权页 → 用户同意 → 回调」一段交互。
@@ -142,7 +152,7 @@ func (s *Service) OAuthAuthorizeURL(providerID string) (*oauthAuthorizeData, err
 	if p == nil {
 		return nil, ErrOAuthProviderMissing
 	}
-	state, err := s.oauthStates.put()
+	state, err := s.oauthStates.put(p.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -169,8 +179,9 @@ func (s *Service) OAuthExchange(ctx context.Context, addr, providerID, code, sta
 	if p == nil {
 		return nil, ErrOAuthProviderMissing
 	}
-	// state 先于一切网络调用校验：无效请求不应消耗提供方配额。
-	if !s.oauthStates.take(strings.TrimSpace(state)) {
+	// state 先于一切网络调用校验，且必须绑定当前提供方：
+	// 无效或跨提供方的请求不应消耗提供方配额。
+	if s.oauthStates.take(strings.TrimSpace(state)) != providerID {
 		return nil, ErrInvalidParams
 	}
 	if strings.TrimSpace(code) == "" {

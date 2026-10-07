@@ -1,6 +1,7 @@
 import { request } from './client';
 import { ApiError, Code } from './envelope';
 import { encryptSecret, fetchChallenge, fingerprint } from './crypto';
+import { saveOauthProvider } from './session';
 
 /** 认证端点的请求与响应类型，与 docs/openapi-web.yaml 对齐。 */
 
@@ -170,7 +171,7 @@ export async function listProviders(): Promise<AuthProvider[]> {
   return data?.items ?? [];
 }
 
-/** oauthAuthorize 取第三方授权跳转地址。 */
+/** oauthAuthorize 取第三方授权跳转地址；发起时记录提供方供回调页使用。 */
 export async function oauthAuthorize(provider: string): Promise<OAuthAuthorizeData> {
   const data = await request<OAuthAuthorizeData>(`/api/v1/auth/oauth/${provider}`, {
     method: 'GET',
@@ -179,6 +180,7 @@ export async function oauthAuthorize(provider: string): Promise<OAuthAuthorizeDa
   if (!data) {
     throw new ApiError(Code.NotFound, '登录方式未启用');
   }
+  saveOauthProvider(provider);
   return data;
 }
 
