@@ -64,6 +64,13 @@ const (
 	envSMTPFrom     = "TOKENMP_SMTP_FROM"
 	envSMTPUser     = "TOKENMP_SMTP_USER"
 	envSMTPPassword = "TOKENMP_SMTP_PASSWORD" //nolint:gosec // G101：这是环境变量名，不是凭据值
+
+	// 第三方登录：成对的客户端凭据与共用回调地址；ID 或 secret 任一为空视为未配置。
+	envOAuthGoogleClientID     = "TOKENMP_OAUTH_GOOGLE_CLIENT_ID"
+	envOAuthGoogleClientSecret = "TOKENMP_OAUTH_GOOGLE_CLIENT_SECRET" //nolint:gosec // G101：环境变量名
+	envOAuthGitHubClientID     = "TOKENMP_OAUTH_GITHUB_CLIENT_ID"
+	envOAuthGitHubClientSecret = "TOKENMP_OAUTH_GITHUB_CLIENT_SECRET" //nolint:gosec // G101：环境变量名
+	envOAuthRedirectURI        = "TOKENMP_OAUTH_REDIRECT_URI"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -155,6 +162,13 @@ type Serve struct {
 	SMTPFrom     string
 	SMTPUser     string
 	SMTPPassword string
+	// 第三方登录的客户端凭据；任一提供方的 ID 或 secret 为空即不启用该提供方。
+	OAuthGoogleClientID     string
+	OAuthGoogleClientSecret string
+	OAuthGitHubClientID     string
+	OAuthGitHubClientSecret string
+	// OAuthRedirectURI 是第三方授权回调地址，必须与提供方控制台登记的一致。
+	OAuthRedirectURI string
 }
 
 // Load 从进程环境读出存储层配置。
@@ -258,6 +272,11 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	smtpFrom, _ := lookup(envSMTPFrom)
 	smtpUser, _ := lookup(envSMTPUser)
 	smtpPassword, _ := lookup(envSMTPPassword)
+	googleID, _ := lookup(envOAuthGoogleClientID)
+	googleSecret, _ := lookup(envOAuthGoogleClientSecret)
+	githubID, _ := lookup(envOAuthGitHubClientID)
+	githubSecret, _ := lookup(envOAuthGitHubClientSecret)
+	redirectURI, _ := lookup(envOAuthRedirectURI)
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -283,6 +302,11 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		SMTPFrom:                    strings.TrimSpace(smtpFrom),
 		SMTPUser:                    strings.TrimSpace(smtpUser),
 		SMTPPassword:                smtpPassword,
+		OAuthGoogleClientID:         strings.TrimSpace(googleID),
+		OAuthGoogleClientSecret:     googleSecret,
+		OAuthGitHubClientID:         strings.TrimSpace(githubID),
+		OAuthGitHubClientSecret:     githubSecret,
+		OAuthRedirectURI:            strings.TrimSpace(redirectURI),
 	}, nil
 }
 

@@ -31,6 +31,9 @@ const (
 	PathReset     = "/api/v1/auth/reset"
 	PathPassword  = "/api/v1/auth/password" //nolint:gosec // G101：这是 URL 路径，不是凭据
 	PathErase     = "/api/v1/auth/erase"
+	PathProviders = "/api/v1/auth/providers"
+	// PathOAuthPrefix 是第三方登录子树：{provider} 与 {provider}/exchange 两段。
+	PathOAuthPrefix = "/api/v1/auth/oauth/"
 	// PathPrefix 是整个页面认证面的子树前缀，装配层按它挂载。
 	PathPrefix = "/api/v1/auth/"
 )
@@ -69,6 +72,9 @@ type Store interface {
 	WebRevokeUserSessions(ctx context.Context, userID uint64) error
 	WebRevokeOtherSessions(ctx context.Context, userID, keepSessionID uint64) error
 	WebIdentityProviders(ctx context.Context, userID uint64) ([]string, error)
+	WebUserByID(ctx context.Context, id uint64) (*store.WebUser, error)
+	WebIdentityByProvider(ctx context.Context, provider, subject string) (*store.WebIdentity, error)
+	WebInsertIdentity(ctx context.Context, id store.WebIdentity) error
 	WebInsertOTP(ctx context.Context, email, purpose, codeHash string, expiresAt time.Time) error
 	WebConsumeOTP(ctx context.Context, email, purpose, codeHash string, now time.Time) (bool, error)
 	WebUpdatePassword(ctx context.Context, userID uint64, passwordHash string) error
@@ -95,6 +101,8 @@ type Options struct {
 	// Mailer 是验证码投递端口；nil 表示邮件通道未配置，
 	// 发送入口一律回 500（不因账号是否存在而分化）。
 	Mailer Mailer
+	// OAuthProviders 是已配置的第三方登录提供方；空列表时 providers 返回空。
+	OAuthProviders []OAuthProvider
 }
 
 const (
@@ -105,6 +113,9 @@ const (
 
 // statusActive 是账号可登录状态，与 0006 迁移的 status 列取值一致。
 const statusActive = "active"
+
+// roleMember 是注册与第三方建号的默认角色；管理角色经其它通道授予。
+const roleMember = "member"
 
 // normalize 把零值选项折算成默认值，返回生效配置。
 func (o Options) normalize() Options {

@@ -335,6 +335,39 @@ func (s *Store) WebEraseUser(ctx context.Context, userID uint64) error {
 	return nil
 }
 
+// WebIdentity 是 web_identity 的一行。
+type WebIdentity struct {
+	UserID   uint64
+	Provider string
+	Subject  string
+	Email    string
+}
+
+// WebIdentityByProvider 按提供方与主体标识查绑定；无匹配时返回 sql.ErrNoRows。
+func (s *Store) WebIdentityByProvider(ctx context.Context, provider, subject string) (*WebIdentity, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT user_id, provider, subject, email FROM web_identity
+		  WHERE provider = ? AND subject = ?`, provider, subject)
+	var id WebIdentity
+	if err := row.Scan(&id.UserID, &id.Provider, &id.Subject, &id.Email); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("store: 读取 web_identity 失败: %w", err)
+	}
+	return &id, nil
+}
+
+// WebInsertIdentity 写入绑定；同一提供方与主体重复绑定回 ErrConflict。
+func (s *Store) WebInsertIdentity(ctx context.Context, id WebIdentity) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO web_identity (user_id, provider, subject, email) VALUES (?, ?, ?, ?)`,
+		id.UserID, id.Provider, id.Subject, id.Email); err != nil {
+		return conflictFromWrite("web_identity", err)
+	}
+	return nil
+}
+
 // lastInsertID 取自增主键；负值守卫后才转换，与 billing.insertID 同一口径。
 func lastInsertID(res sql.Result) (uint64, error) {
 	id, err := res.LastInsertId()

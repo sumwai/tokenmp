@@ -36,6 +36,7 @@ type memStore struct {
 	byRefresh   map[string]uint64
 	byPrev      map[string]uint64
 	otps        map[string]*memOTP
+	identities  []store.WebIdentity
 	nextUser    uint64
 	nextSession uint64
 }
@@ -180,6 +181,41 @@ func (m *memStore) WebRevokeUserSessions(_ context.Context, userID uint64) error
 
 func (m *memStore) WebIdentityProviders(context.Context, uint64) ([]string, error) {
 	return []string{}, nil
+}
+
+func (m *memStore) WebUserByID(_ context.Context, id uint64) (*store.WebUser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func (m *memStore) WebIdentityByProvider(_ context.Context, provider, subject string) (*store.WebIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.identities {
+		if id.Provider == provider && id.Subject == subject {
+			cp := id
+			return &cp, nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (m *memStore) WebInsertIdentity(_ context.Context, id store.WebIdentity) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.identities {
+		if existing.Provider == id.Provider && existing.Subject == id.Subject {
+			return store.ErrConflict
+		}
+	}
+	m.identities = append(m.identities, id)
+	return nil
 }
 
 // otpKey 是验证码的复合键：邮箱、用途与摘要拼接，与库表核销条件同构。

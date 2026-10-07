@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -26,12 +27,15 @@ const rateLimitPerMinute = 30
 
 // Service 承载页面认证业务；经 Store 访问数据库，经 challengeSet 持有内存密钥。
 type Service struct {
-	store      Store
-	opts       Options
-	challenges *challengeSet
-	limiter    *rateLimiter
-	logger     *slog.Logger
-	mailer     Mailer
+	store          Store
+	opts           Options
+	challenges     *challengeSet
+	limiter        *rateLimiter
+	logger         *slog.Logger
+	mailer         Mailer
+	oauthProviders []OAuthProvider
+	oauthStates    *stateSet
+	oauthClient    *http.Client
 }
 
 // New 构造页面认证服务。logger 为 nil 时丢弃日志。
@@ -41,12 +45,15 @@ func New(st Store, opts Options) *Service {
 	// signin/signup 每次要 bcrypt 比对，两者都是毫秒级 CPU。
 	// 一分钟 30 次对真人绰绰有余，对脚本足以把 keygen 成本压到无害。
 	return &Service{
-		store:      st,
-		opts:       opts,
-		challenges: newChallengeSet(opts.ChallengeTTL, opts.Now),
-		limiter:    newRateLimiter(time.Minute, rateLimitPerMinute, opts.Now),
-		logger:     opts.Logger,
-		mailer:     opts.Mailer,
+		store:          st,
+		opts:           opts,
+		challenges:     newChallengeSet(opts.ChallengeTTL, opts.Now),
+		limiter:        newRateLimiter(time.Minute, rateLimitPerMinute, opts.Now),
+		logger:         opts.Logger,
+		mailer:         opts.Mailer,
+		oauthProviders: opts.OAuthProviders,
+		oauthStates:    newStateSet(oauthStateTTL, opts.Now),
+		oauthClient:    &http.Client{Timeout: oauthHTTPTimeout},
 	}
 }
 
@@ -141,7 +148,7 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 		Email:        email,
 		Username:     username,
 		PasswordHash: string(hash),
-		Role:         "member",
+		Role:         roleMember,
 		Status:       statusActive,
 	})
 	if err != nil {
@@ -155,7 +162,7 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 		Email:        email,
 		Username:     username,
 		PasswordHash: string(hash),
-		Role:         "member",
+		Role:         roleMember,
 		Status:       statusActive,
 	})
 }

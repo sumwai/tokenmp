@@ -182,6 +182,8 @@ type Options struct {
 	WebAuthLogger *slog.Logger
 	// WebMailer 是验证码投递端口；nil 表示邮件通道未配置，发送入口回 500。
 	WebMailer webauth.Mailer
+	// WebOAuthProviders 是已配置的第三方登录提供方；空表示不对外列出。
+	WebOAuthProviders []webauth.OAuthProvider
 }
 
 // Gateway 是一次装配的产物：HTTP 入口与它持有的连接资源。
@@ -379,6 +381,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		TrustProxy:     opts.WebTrustProxy,
 		Logger:         opts.WebAuthLogger,
 		Mailer:         opts.WebMailer,
+		OAuthProviders: opts.WebOAuthProviders,
 	})))
 	mux.HandleFunc("/", notFoundJSON)
 

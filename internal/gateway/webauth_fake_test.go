@@ -67,3 +67,13 @@ func (f *fakeGatewayStore) WebConsumeOTP(context.Context, string, string, string
 func (f *fakeGatewayStore) WebUpdatePassword(context.Context, uint64, string) error { return nil }
 
 func (f *fakeGatewayStore) WebEraseUser(context.Context, uint64) error { return nil }
+
+func (f *fakeGatewayStore) WebUserByID(context.Context, uint64) (*store.WebUser, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeGatewayStore) WebIdentityByProvider(context.Context, string, string) (*store.WebIdentity, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeGatewayStore) WebInsertIdentity(context.Context, store.WebIdentity) error { return nil }

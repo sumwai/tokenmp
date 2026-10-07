@@ -74,6 +74,12 @@ type eraseRequest struct {
 	OTP string `json:"otp"`
 }
 
+// oauthExchangeRequest 与契约的 exchange 请求体对齐。
+type oauthExchangeRequest struct {
+	Code  string `json:"code"`
+	State string `json:"state"`
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case PathChallenge:
@@ -96,7 +102,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.changePassword(w, r)
 	case PathErase:
 		h.erase(w, r)
+	case PathProviders:
+		h.providers(w, r)
 	default:
+		// OAuth 子树两段式：{provider} 与 {provider}/exchange，先于 404 兜底分发。
+		if strings.HasPrefix(r.URL.Path, PathOAuthPrefix) {
+			h.oauth(w, r)
+			return
+		}
 		// 子树内未声明的路径回信封 404，不落到网关的 / 兜底：
 		// 页面契约的错误形状在整条 /api/v1/auth/ 前缀上保持一致。
 		writeErr(w, http.StatusNotFound, codeNotFound, "接口不存在")
@@ -292,6 +305,55 @@ func (h *handler) erase(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, nil)
 }
 
+// providers GET → 已配置的登录方式列表。
+func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 GET 方法")
+		return
+	}
+	writeOK(w, map[string]any{"items": h.svc.Providers()})
+}
+
+// oauth 分发第三方登录的两个端点：授权地址（GET）与换取会话（POST exchange）。
+func (h *handler) oauth(w http.ResponseWriter, r *http.Request) {
+	sub := strings.TrimPrefix(r.URL.Path, PathOAuthPrefix)
+	switch {
+	case strings.HasSuffix(sub, "/exchange"):
+		providerID := strings.TrimSuffix(sub, "/exchange")
+		if providerID == "" || strings.Contains(providerID, "/") {
+			writeErr(w, http.StatusNotFound, codeNotFound, "接口不存在")
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 POST 方法")
+			return
+		}
+		var req oauthExchangeRequest
+		if !decodeBody(w, r, &req) {
+			return
+		}
+		tokens, err := h.svc.OAuthExchange(r.Context(), h.addr(r), providerID, req.Code, req.State)
+		if err != nil {
+			writeServiceErr(w, err)
+			return
+		}
+		writeOK(w, tokens)
+	case !strings.Contains(sub, "/") && sub != "":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusBadRequest, codeBadRequest, "只支持 GET 方法")
+			return
+		}
+		data, err := h.svc.OAuthAuthorizeURL(sub)
+		if err != nil {
+			writeServiceErr(w, err)
+			return
+		}
+		writeOK(w, data)
+	default:
+		writeErr(w, http.StatusNotFound, codeNotFound, "接口不存在")
+	}
+}
+
 // addr 取本次请求用于限频的来源地址。
 func (h *handler) addr(r *http.Request) string {
 	return clientAddr(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.svc.opts.TrustProxy)
@@ -350,6 +412,12 @@ func writeServiceErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusTooManyRequests, codeTooManyRequests, "请求过于频繁，请稍后再试")
 	case errors.Is(err, ErrMailerNotConfigured):
 		writeErr(w, http.StatusInternalServerError, codeInternal, "邮件服务未配置")
+	case errors.Is(err, ErrOAuthProviderMissing):
+		writeErr(w, http.StatusNotFound, codeNotFound, "登录方式未启用")
+	case errors.Is(err, ErrOAuthEmailMissing):
+		writeErr(w, http.StatusUnauthorized, codeUnauthorized, "第三方未提供邮箱，无法完成登录")
+	case errors.Is(err, ErrOAuthUpstream):
+		writeErr(w, http.StatusInternalServerError, codeInternal, "第三方登录服务不可用")
 	default:
 		writeErr(w, http.StatusInternalServerError, codeInternal, "服务端错误")
 	}
