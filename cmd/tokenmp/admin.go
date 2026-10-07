@@ -201,7 +201,7 @@ var adminGroups = []adminGroupSpec{
 	{"adjust", []string{actionAdd, actionList}},
 	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
 	{"plan", []string{actionAdd, actionList}},
-	{pluginGroupName, []string{actionList, "check"}},
+	{pluginGroupName, []string{actionAdd, actionList, actionEnable, actionDisable, actionDel, "check"}},
 }
 
 // lookupGroup 按名字找组声明。
@@ -246,7 +246,7 @@ func cmdAdmin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return writeAdminUsage(stderr, exitUsage, fmt.Sprintf("%s 未知动作 %q", group.name, args[1]))
 	}
 
-	// plugin 组只读进程配置，不连数据库：在打开存储之前分发。
+	// plugin 组只读写本机清单文件，不连数据库：在打开存储之前分发。
 	if group.name == pluginGroupName {
 		return dispatchAdmin(context.Background(), args, &adminEnv{stdout: stdout, stderr: stderr})
 	}
