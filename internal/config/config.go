@@ -54,6 +54,10 @@ const (
 
 	// 网关中间件插件：逗号分隔的文件或包目录列表，空值表示禁用插件层。
 	envPluginFiles = "TOKENMP_PLUGIN_FILES"
+
+	// 页面注册入口开关与反代信任：见 Serve 对应字段注释。
+	envWebSignupEnabled = "TOKENMP_WEB_SIGNUP_ENABLED"
+	envWebTrustProxy    = "TOKENMP_WEB_TRUST_PROXY"
 )
 
 // defaultListen 是未配置监听地址时的默认值。
@@ -134,6 +138,11 @@ type Serve struct {
 	// 列表内每一项的合法性（存在性、扩展名、能否编译）在插件层加载时校验，
 	// 非法项在启动期报错而不是拖到第一个请求。
 	PluginFiles []string
+	// WebSignupEnabled 是页面注册入口开关；关闭时 signup 回 403，默认开。
+	WebSignupEnabled bool
+	// WebTrustProxy 为真时页面认证按 X-Forwarded-For 首段做频率限制；
+	// 默认关：直连暴露时该头可被客户端伪造，仅在可信反代之后打开。
+	WebTrustProxy bool
 }
 
 // Load 从进程环境读出存储层配置。
@@ -224,6 +233,15 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 	if err != nil {
 		return Serve{}, err
 	}
+	// 注册默认开、反代信任默认关：两个默认值都取「不配就安全/可用」的一侧。
+	webSignupEnabled, err := lookupBool(lookup, envWebSignupEnabled, true)
+	if err != nil {
+		return Serve{}, err
+	}
+	webTrustProxy, err := lookupBool(lookup, envWebTrustProxy, false)
+	if err != nil {
+		return Serve{}, err
+	}
 	return Serve{
 		Listen:                      listen,
 		Store:                       storeCfg,
@@ -243,7 +261,28 @@ func loadServe(lookup func(string) (string, bool)) (Serve, error) {
 		BreakerProbes:               breakerProbes,
 		ProbeInterval:               probeInterval,
 		PluginFiles:                 lookupPluginFiles(lookup),
+		WebSignupEnabled:            webSignupEnabled,
+		WebTrustProxy:               webTrustProxy,
 	}, nil
+}
+
+// lookupBool 读取布尔环境变量；缺失或空值取 fallback，其余取值必须可辨识。
+//
+// 拼错的值静默回落默认值，会让「明明配了却不生效」变成难排查的问题，
+// 因此无法识别的取值直接报错，与其它环境变量「非法即退出」的口径一致。
+func lookupBool(lookup func(string) (string, bool), key string, fallback bool) (bool, error) {
+	raw, ok := lookup(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s 取值 %q 无法识别：只接受 true/false（及 1/0、yes/no、on/off）", key, raw)
+	}
 }
 
 // lookupPluginFiles 读取逗号分隔的插件文件列表；缺失、空值或全空白项返回 nil，

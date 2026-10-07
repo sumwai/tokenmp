@@ -68,6 +68,9 @@ func cmdServe(stderr io.Writer) int {
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
 		PluginFiles:                 cfg.PluginFiles,
 		PluginLogger:                observability.NewJSONLogger(os.Stdout),
+		WebSignupEnabled:            cfg.WebSignupEnabled,
+		WebTrustProxy:               cfg.WebTrustProxy,
+		WebAuthLogger:               observability.NewJSONLogger(os.Stdout),
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "启动失败：%v\n", err)
