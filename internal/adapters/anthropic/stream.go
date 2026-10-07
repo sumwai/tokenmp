@@ -54,15 +54,18 @@ type streamDelta struct {
 //
 // 错误出现在流式帧里，而帧是「本该成功的响应」的一部分，因此按错误信封归类：
 // 认得出的取值精确归类，认不出的归上游故障（可换渠道），而不是按请求级错误终止。
+// 报文原文也作为证据：部分上游只在 message 里说原因。
 // 上游原文只进 Detail，不作为面向用户的 Message。
 func upstreamError(errDetail *wireErrorDetail) error {
 	errorType := ""
+	message := ""
 	detail := "上游返回错误事件"
 	if errDetail != nil {
 		errorType = errDetail.Type
+		message = errDetail.Message
 		detail = appendUpstreamMessage(detail, errDetail.Message)
 	}
-	class := failure.ClassifyErrorEnvelope(errorType)
+	class := failure.ClassifyErrorEnvelope(errorType, message)
 	return failure.NewError(failure.CodeForClass(class), "上游返回错误", detail, class)
 }
 

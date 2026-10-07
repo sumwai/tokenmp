@@ -645,6 +645,7 @@ func upstreamGRPCClass(status string) failure.Class {
 		return failure.ClassTimeout
 	default:
 		// UNAVAILABLE 与认不出的状态名：上游侧故障，换渠道可能恢复。
+		// 调用方在归类后还会用报文措辞兜底一次。
 		return failure.ClassUpstream
 	}
 }
@@ -659,6 +660,13 @@ func upstreamError(wire *wireError) error {
 		return failure.NewError(domain.CodeUpstreamUnavailable, "上游返回错误", "", failure.ClassUpstream)
 	}
 	class := upstreamGRPCClass(wire.Status)
+	// 状态名没给出可用线索时退回报文措辞：部分渠道只用 message 表达原因。
+	// 有结构化状态名时不用措辞——那比自然语言可靠。
+	if class == failure.ClassUpstream {
+		if byWording := failure.ClassifyWording(wire.Message); byWording != failure.ClassOther {
+			class = byWording
+		}
+	}
 	detail := fmt.Sprintf("上游错误 code=%d status=%q", wire.Code, wire.Status)
 	if message := strings.TrimSpace(wire.Message); message != "" {
 		detail += " message=" + message

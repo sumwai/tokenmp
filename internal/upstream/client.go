@@ -367,6 +367,11 @@ func classifyHTTPStatus(outcome credentialOutcome, status int, header http.Heade
 	if snippet := errorSnippet(body); snippet != "" {
 		detail += "：" + snippet
 	}
+	if failure.WordingScanLimited(len(body)) {
+		// 措辞规则只扫首尾片段，超限时把这件事写进排障详情：
+		// 「分类结果可能因为没扫到报文中段而偏保守」不该靠读代码才知道。
+		detail += fmt.Sprintf("；报文 %d 字节，措辞规则只扫首尾片段", len(body))
+	}
 	code, message := upstreamStatusFailure(status)
 	err := failure.NewErrorWithActions(code, message, detail, outcome.class, outcome.actions)
 	return withCredentialRenewal(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status), outcome.renewed)

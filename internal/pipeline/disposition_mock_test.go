@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -132,6 +133,8 @@ type dispositionFixture struct {
 	breaker  *circuit.Breaker
 	clock    *advanceableClock
 	writer   *recordingWriter
+	// streamOut 收集流式路径写给客户端的原始字节。
+	streamOut *bytes.Buffer
 }
 
 // newDispositionFixture 用真实轮换器、真实熔断器与真实上游客户端装配一条流水线。
@@ -198,10 +201,11 @@ func newDispositionFixture(t *testing.T, urls []string, cooldown time.Duration) 
 		t.Fatalf("构造流水线失败：%v", err)
 	}
 	return &dispositionFixture{
-		pipeline: pipeline,
-		breaker:  breaker,
-		clock:    clock,
-		writer:   &recordingWriter{events: &[]string{}},
+		pipeline:  pipeline,
+		breaker:   breaker,
+		clock:     clock,
+		writer:    &recordingWriter{events: &[]string{}},
+		streamOut: &bytes.Buffer{},
 	}
 }
 
@@ -209,6 +213,14 @@ func newDispositionFixture(t *testing.T, urls []string, cooldown time.Duration) 
 func (f *dispositionFixture) run(t *testing.T) error {
 	t.Helper()
 	return f.pipeline.Forward(context.Background(), openaichat.New(), newChatRequest(false), f.writer)
+}
+
+// runStream 发一次流式请求，返回写给客户端的原始字节与结果错误。
+func (f *dispositionFixture) runStream(t *testing.T) (string, error) {
+	t.Helper()
+	f.streamOut.Reset()
+	err := f.pipeline.Forward(context.Background(), openaichat.New(), newChatRequest(true), f.streamOut)
+	return f.streamOut.String(), err
 }
 
 // TestDispositionKeepsFailedCredentialCooling 断言「哪些类别会真的停用凭据」。

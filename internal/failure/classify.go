@@ -12,6 +12,12 @@ import (
 // insufficient_quota，只看 429 会把它当成限流退避重试 —— 而那条路径无论重试多少次
 // 都不会成功，真正该做的是换一条凭据。反过来，403 既可能是 key 无效，也可能是账号被
 // 停用：两者都要换 key，但被停用的那把要停得更久。
+//
+// statusOverloaded 是非标准状态码 529：Cloudflare 定义为「站点过载」。
+//
+// 它按定义是「忙」而不是「坏」，因此必须与 5xx 分开：当成上游故障会误计入渠道健康度，
+// 使一条只是暂时过载的渠道被熔断。
+const statusOverloaded = 529
 
 // credentialTokens 是上游报文里明确表示「凭据或权限不被接受」的标记。
 //
@@ -57,10 +63,10 @@ var classRules = []classRule{
 			`上下文长度|超出.{0,8}上下文|超过.{0,8}上下文`)},
 	{ClassCredit, regexp.MustCompile(
 		`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|` +
-			`余额不足|余额耗尽|账户余额|欠费|请充值|账户.{0,4}(停用|冻结)`)},
+			`余额不足|余额耗尽|账户余额|欠费|请充值|账[户号].{0,4}(停用|冻结)`)},
 	{ClassRateLimit, regexp.MustCompile(
 		`(?i)rate.?limit|too many requests|overloaded|` +
-			`限流|请求过于频繁|请求频率.{0,6}超|并发.{0,6}超`)},
+			`限流|请求过于频繁|请求过多|请求数过多|访问过于频繁|请求频率.{0,6}超|并发.{0,6}超`)},
 	{ClassQuota, regexp.MustCompile(
 		`(?i)quota|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|` +
 			`配额|额度.{0,6}(用尽|不足|已用完)|用量上限|已达.{0,6}(上限|限额)`)},
@@ -105,15 +111,13 @@ var codeRules = map[string]Class{
 // 报文优先、状态码兜底：报文能区分同一状态码下的不同含义（429 既可能是限流，也可能是
 // 余额耗尽），状态码只在报文没给出线索时用来认认证类与上游故障。
 func ClassifyHTTP(status int, body []byte) Class {
-	for _, rule := range classRules {
-		if rule.pattern.Match(body) {
-			return rule.class
-		}
+	if class := matchPatterns(body); class != ClassOther {
+		return class
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return ClassAuth
 	}
-	if status == http.StatusTooManyRequests {
+	if status == http.StatusTooManyRequests || status == statusOverloaded {
 		return ClassRateLimit
 	}
 	if hasCredentialToken(status, body) {
@@ -133,6 +137,63 @@ func ClassifyHTTP(status int, body []byte) Class {
 	}
 }
 
+// ClassifyWording 在自由文本上跑词表（上游消息、类型名或机器码），未命中时返回 ClassOther。
+//
+// 给适配器在结构化字段认不出时兜底：部分渠道只用 message 表达原因（限流与余额类尤多），
+// 而帧路径原先只看结构化字段，于是同一句措辞在非 2xx 里归限流、在流式帧里退化成上游故障
+// 并计入渠道健康度。有结构化字段时仍应优先用它——那比措辞可靠。
+func ClassifyWording(text string) Class {
+	return matchPatterns([]byte(strings.ToLower(strings.TrimSpace(text))))
+}
+
+// wordingScanHead 与 wordingScanTail 是措辞的扫描上限，单位字节。
+//
+// 分类原先跑在完整响应体上，而上游响应体上限是 32MB。实测代价：
+//
+//	 1KiB  1.0 ms
+//	 1MiB  0.94 s
+//	32MiB 30.6 s
+//
+// 即约 1.1 MB/s —— 少数带嵌套重复的正则在长串上退化得厉重，而不是报文本身慢。
+// 错误信封实际只有几百字节到几 KB，扫全量换来的只是「关键词埋在几十 MB 之后」这种病态
+// 情形，代价却落在**每一次失败转发**的关键路径上：一条坏上游能靠大报文把 CPU 吃满。
+//
+// 改为只扫首部一段与尾部一段：首部覆盖正常错误报文，尾部覆盖把结论写在报文末尾的上游
+// （部分渠道先回显请求再报错）。超限时调用方会给出一条可见信号，
+// 使「可能没扫到」不被静默吞掉，也确实需要时还能用插件钩子补规则。
+const (
+	wordingScanHead = 16 << 10
+	wordingScanTail = 4 << 10
+)
+
+// WordingScanLimited 报告该长度的报文不会被完整扫到，供调用方记录可观测信号。
+func WordingScanLimited(bodyLength int) bool {
+	return bodyLength > wordingScanHead+wordingScanTail
+}
+
+// scanTargets 返回措辞规则要扫的片段；报文未超限时就是它自己。
+func scanTargets(body []byte) [][]byte {
+	if !WordingScanLimited(len(body)) {
+		return [][]byte{body}
+	}
+	return [][]byte{body[:wordingScanHead], body[len(body)-wordingScanTail:]}
+}
+
+// matchPatterns 在报文或结构化取值上跑词表，未命中时返回 ClassOther。
+//
+// 两条路径共用同一份词表：非 2xx 把它跑在报文上，结构化取值把它当变体兜底。
+// 分开写会让两处慢慢漂开，而漂开的后果是同一件事实在流式与非流式下得到不同处置。
+func matchPatterns(text []byte) Class {
+	for _, target := range scanTargets(text) {
+		for _, rule := range classRules {
+			if rule.pattern.Match(target) {
+				return rule.class
+			}
+		}
+	}
+	return ClassOther
+}
+
 // ClassifyCode 按上游给出的类型名或机器码归类，认不出时返回 ClassOther。
 //
 // 用于非 2xx 里带结构化字段的场合：认不出说明既不能断言是请求问题、也不能断言是上游故障，
@@ -144,6 +205,13 @@ func ClassifyCode(values ...string) Class {
 			continue
 		}
 		if class, ok := codeRules[normalized]; ok {
+			return class
+		}
+		// 精确取值未命中时退回报文词表：结构化取值常是词表词汇的变体
+		// （overloaded_error 对 overloaded、rate_limit_error 对 rate limit），
+		// 而词表已经积累了各厂商的措辞。不退回会退化成「认不出」，
+		// 从而把一件「渠道还活着」的事记成渠道故障。
+		if class := matchPatterns([]byte(normalized)); class != ClassOther {
 			return class
 		}
 	}
