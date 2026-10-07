@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // 本文件覆盖凭据轮换与失败切换：轮换顺序、凭据类失败切换、组内耗尽、
@@ -38,20 +39,20 @@ func (c *fakeClock) Now() time.Time { return c.now }
 func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 
 // credentialRejectedError 模拟上游客户端标注「本次凭据不被接受」的错误。
+//
+// 动作集里没有换渠道：认证类失败只换凭据，渠道本身没问题。
 type credentialRejectedError struct{}
 
 func (credentialRejectedError) Error() string { return "凭据被拒绝" }
 
-func (credentialRejectedError) CredentialRejected() bool { return true }
+func (credentialRejectedError) Actions() failure.Action {
+	return failure.ActionSuspendAccount | failure.ActionRetryNextAccount
+}
 
-// classCooldownError 模拟分类器额外给出冷却时长的凭据类失败（如额度用尽）。
-type classCooldownError struct{ cooldown time.Duration }
-
-func (classCooldownError) Error() string { return "额度用尽" }
-
-func (classCooldownError) CredentialRejected() bool { return true }
-
-func (e classCooldownError) CredentialCooldown() time.Duration { return e.cooldown }
+// quotaFailure 模拟分类器给出的额度类失败：冷却时长由类别策略表给出，不写死在用例里。
+func quotaFailure() error {
+	return failure.NewError(domain.CodeUpstreamRejected, "额度用尽", "", failure.ClassQuota)
+}
 
 // rotationRoute 是轮换用例共用的路由：分组名与协议不影响轮换逻辑，只用作游标键。
 func rotationRoute() domain.Route {
@@ -217,7 +218,7 @@ func TestAdvanceUsesFailureClassCooldown(t *testing.T) {
 	if _, err := r.Resolve(ctx, route); err != nil {
 		t.Fatalf("解析失败：%v", err)
 	}
-	if _, switched := r.Advance(ctx, route, classCooldownError{cooldown: 15 * time.Minute}); !switched {
+	if _, switched := r.Advance(ctx, route, quotaFailure()); !switched {
 		t.Fatal("凭据类失败应触发切换")
 	}
 

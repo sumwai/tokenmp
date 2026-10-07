@@ -44,10 +44,11 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 		body   string
 		want   Class
 	}{
+		// 余额耗尽：commandcode 用 400 + insufficient credits，OpenAI 系用 429 + insufficient_quota。
 		{
-			name:   "commandcode 余额不足",
+			name:   "commandcode 余额不足 400",
 			status: http.StatusBadRequest,
-			body:   `{"error":{"message":"You have insufficient credits to make this request."}}`,
+			body:   `{"error":{"message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service."}}`,
 			want:   ClassCredit,
 		},
 		{
@@ -57,10 +58,25 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 			want:   ClassCredit,
 		},
 		{
+			name:   "欠费停服",
+			status: http.StatusForbidden,
+			body:   `{"error":{"message":"Your account is overdue and has been suspended."}}`,
+			want:   ClassCredit,
+		},
+		{
+			// OpenAI 的 insufficient_quota 报文里带 billing，按「厂商在让你去付钱」归到余额。
+			// 两类都会停用凭据，差别只在 15m 与 30m，按余额停更贴近事实。
 			name:   "openai insufficient_quota 带 billing",
 			status: http.StatusTooManyRequests,
 			body:   `{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota"}}`,
 			want:   ClassCredit,
+		},
+		// 额度用尽：与余额分开，两者的停用时长不同。
+		{
+			name:   "套餐限额",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"You have hit your weekly limit. limit reached|1791291355"}}`,
+			want:   ClassQuota,
 		},
 		{
 			name:   "套餐额度用尽",
@@ -68,8 +84,9 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 			body:   `{"error":{"message":"当前套餐配额已用尽，请升级套餐"}}`,
 			want:   ClassQuota,
 		},
+		// 限流：必须排在额度规则之前，「Rate limit reached」里的 limit reached 会命中额度规则。
 		{
-			name:   "限流不该被额度规则抢走",
+			name:   "标准限流",
 			status: http.StatusTooManyRequests,
 			body:   `{"error":{"message":"Rate limit reached for requests"}}`,
 			want:   ClassRateLimit,
@@ -77,14 +94,40 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 		{
 			name:   "过载",
 			status: http.StatusServiceUnavailable,
-			body:   `{"error":{"message":"The engine is currently overloaded"}}`,
+			body:   `{"error":{"message":"The engine is currently overloaded, please try again later"}}`,
 			want:   ClassRateLimit,
 		},
 		{
-			name:   "上下文超限不该被额度规则抢走",
+			name:   "限流中文",
+			status: http.StatusTooManyRequests,
+			body:   `{"error":{"message":"当前并发数过高，已触发限流"}}`,
+			want:   ClassRateLimit,
+		},
+		// 上下文超限：报文里的 maximum / limit 会被额度规则抢走，靠优先级排前守住。
+		{
+			name:   "上下文超限",
 			status: http.StatusBadRequest,
-			body:   `{"error":{"message":"This model's maximum context length is 128000 tokens","type":"context_length_exceeded"}}`,
+			body:   `{"error":{"message":"This model's maximum context length is 128000 tokens, however you requested 200000 tokens.","type":"context_length_exceeded"}}`,
 			want:   ClassContextLength,
+		},
+		{
+			name:   "上下文超限另一措辞",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"prompt is too long: 210000 tokens > 200000 maximum"}}`,
+			want:   ClassContextLength,
+		},
+		{
+			name:   "上下文超限中文",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"输入内容超过上下文长度上限"}}`,
+			want:   ClassContextLength,
+		},
+		// 模型不可用：opencode-go 的真实报文。
+		{
+			name:   "模型协议不支持",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol"}}`,
+			want:   ClassModelUnavailable,
 		},
 		{
 			name:   "模型不可用",
@@ -93,35 +136,62 @@ func TestClassifyHTTPRealBodies(t *testing.T) {
 			want:   ClassModelUnavailable,
 		},
 		{
-			name:   "认证字面量",
-			status: http.StatusBadRequest,
-			body:   `{"error":{"type":"invalid_api_key"}}`,
-			want:   ClassAuth,
+			name:   "模型不存在中文",
+			status: http.StatusNotFound,
+			body:   `{"error":{"message":"模型不存在或未开通"}}`,
+			want:   ClassModelUnavailable,
 		},
+		// 认证。
 		{
 			name:   "401 无报文",
 			status: http.StatusUnauthorized,
 			want:   ClassAuth,
 		},
 		{
-			name:   "认不出的 4xx 归请求级",
+			name:   "403 无报文",
+			status: http.StatusForbidden,
+			want:   ClassAuth,
+		},
+		{
+			name:   "400 认证字面量",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"type":"invalid_api_key"}}`,
+			want:   ClassAuth,
+		},
+		{
+			name:   "gemini 密钥无效",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"status":"INVALID_ARGUMENT","message":"API key not valid. Please pass a valid API key."}}`,
+			want:   ClassAuth,
+		},
+		// 请求级：认不出具体原因，但可以断定换渠道重试不会成功。
+		{
+			name:   "参数错误",
 			status: http.StatusBadRequest,
 			body:   `{"error":{"type":"invalid_request_error","message":"messages: field required"}}`,
 			want:   ClassRequest,
 		},
 		{
-			name:   "5xx 归上游故障",
+			name:   "opencode 缺会话头",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","error":{"type":"MissingSessionID","message":"Request is missing x-opencode-session and cannot be routed efficiently."}}`,
+			want:   ClassRequest,
+		},
+		// 上游故障：与请求级同属「认不出具体原因」，但必须换渠道重试且计入渠道健康度。
+		{
+			name:   "上游 500",
 			status: http.StatusInternalServerError,
 			body:   `{"error":{"message":"internal server error"}}`,
 			want:   ClassUpstream,
 		},
 		{
-			name:   "上游超时归上游故障",
+			name:   "上游超时",
 			status: http.StatusRequestTimeout,
 			want:   ClassUpstream,
 		},
 		{
-			// 5xx 不做凭据字面量扫描：上游自身故障的报文里偶然出现同名字面量不代表凭据有问题。
+			// 5xx 不做凭据字面量扫描：上游自身故障的报文里偶然出现同名字面量不代表凭据有问题，
+			// 据此换 key 只会把一次上游抖动放大成对整组 key 的枚举。
 			name:   "5xx 带认证字面量仍归上游故障",
 			status: http.StatusInternalServerError,
 			body:   `{"error":{"type":"authentication_error"}}`,

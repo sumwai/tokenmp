@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // 本文件实现跨请求的凭据轮换与失败切换：同组启用凭据按轮换顺序取用，凭据类失败后
@@ -171,8 +172,12 @@ func (r *Rotator) Resolve(ctx context.Context, route domain.Route) (Credential, 
 }
 
 // Advance 实现 domain.CredentialRotation：凭据类失败后推进到下一条凭据。
-func (r *Rotator) Advance(ctx context.Context, route domain.Route, failure error) (context.Context, bool) {
-	if !domain.CredentialRejected(failure) {
+//
+// 判据是分类给出的「换下一条凭据」动作。它与「停用本次凭据」是两个独立动作：
+// 厂商明确声明「这个状态码不代表凭据有问题」时，停用被摘掉而换凭据保留，
+// 不该因为不停用就放弃在同渠道内再试一条。
+func (r *Rotator) Advance(ctx context.Context, route domain.Route, cause error) (context.Context, bool) {
+	if !failure.ActionsOf(cause).Has(failure.ActionRetryNextAccount) {
 		return ctx, false
 	}
 	state, _ := ctx.Value(rotationStateKey{}).(*attemptState)
@@ -180,7 +185,7 @@ func (r *Rotator) Advance(ctx context.Context, route domain.Route, failure error
 		return ctx, false
 	}
 	if failed := state.current; failed != nil {
-		r.markCooling(state.group.Scope, failed.Name, r.cooldownFor(failure))
+		r.markCooling(state.group.Scope, failed.Name, r.cooldownFor(cause))
 		r.logSwitch(route, *failed, state.tried, len(state.order))
 	}
 	if state.tried >= len(state.order) {
@@ -351,9 +356,9 @@ func (r *Rotator) advanceCursor(key string) uint64 {
 // cooldownFor 取本次失败该把凭据停用多久：
 //
 // 失败分类方知道「这是额度用尽还是密钥失效」，两者的恢复速度差很多，所以由它给出建议；
-// 未给出建议（未声明能力或值非正）时回落到配置的默认冷却。
-func (r *Rotator) cooldownFor(failure error) time.Duration {
-	if d := domain.CredentialCooldownOf(failure); d > 0 {
+// 它没建议（类别不主张停用，或值非正）时回落到配置的默认冷却。
+func (r *Rotator) cooldownFor(cause error) time.Duration {
+	if d := failure.SuspendFor(cause); d > 0 {
 		return d
 	}
 	return r.cooldown

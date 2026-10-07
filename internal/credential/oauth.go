@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 	"github.com/sumwai/tokenmp/internal/oauth"
 )
 
@@ -198,11 +199,19 @@ func (s *renewalState) run(ctx context.Context, in OAuthRefreshInput) (OAuthRefr
 
 // oauthInvalidGrantError 报告刷新令牌已被端点拒绝。
 //
-// 它同时满足 domain.CredentialRejection，使流水线把它当作凭据类失败：
+// 它实现 failure.ActionCarrier，使流水线把它当作凭据类失败：
 // 本次渠道尝试随后换组内下一条凭据，被拒的那条进入冷却。
+//
+// 动作集写死而不走类别表：它不来自上游的 HTTP 响应，没有状态码与报文可供归类，
+// 而「端点拒绝这个刷新令牌」本身就是凭据失效的直接事实。
 type oauthInvalidGrantError struct {
 	name  string
 	cause error
+}
+
+// Actions 声明本次失败的处置：停用被拒凭据并在组内换下一条。
+func (e *oauthInvalidGrantError) Actions() failure.Action {
+	return failure.ActionSuspendAccount | failure.ActionRetryNextAccount
 }
 
 // Error 实现 error 接口；只给出凭据名，不含任何令牌。

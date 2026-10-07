@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 	"github.com/sumwai/tokenmp/internal/oauth"
 )
 
@@ -249,8 +250,8 @@ func TestRotatorInvalidGrantCoolsCredential(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid_grant 应让本次解析失败")
 	}
-	if !domain.CredentialRejected(err) {
-		t.Fatalf("invalid_grant 错误应带凭据类标记，得到 %v", err)
+	if !failure.ActionsOf(err).Has(failure.ActionRetryNextAccount) {
+		t.Fatalf("invalid_grant 错误应带换凭据动作，得到 %v", err)
 	}
 	if !errors.Is(err, oauth.ErrInvalidGrant) {
 		t.Fatalf("错误应包住 oauth.ErrInvalidGrant，得到 %v", err)

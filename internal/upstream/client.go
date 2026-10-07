@@ -6,7 +6,8 @@
 //   - 凭据与渠道级请求头经 HeaderProvider 注入，真实读取与解密由实现负责；
 //   - 上游协议差异不在本包表达：响应解码交给 route.Protocol 对应的适配器，
 //     SSE（Server-Sent Events，服务器发送事件）分帧交给 internal/transport/sse；
-//   - 上游错误统一转换为 domain.Error 并标注可重试性。
+//   - 上游失败统一转换为 internal/failure 的统一错误：分类决定处置，本包不自行判断
+//     该不该重试、该不该停用凭据。
 //
 // 跨渠道重试不属于本包：本包只把一次尝试的结果（成功、错误或截断）报告给流水线，
 // 由流水线决定是否换渠道并决定是否向客户端下发协议自身的错误帧。
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 const (
@@ -183,9 +185,17 @@ func (c *Client) Complete(ctx context.Context, route domain.Route, req *domain.R
 		// （地址写错被重定向到别处、上游用 200 回了错误信封），只报「无法解析」无从定位，
 		// 因此把适配器的判定与响应体片段一并写进排障详情。
 		// Detail 只进服务端日志，不进面向客户端的错误体。
-		return nil, domain.NewError(domain.CodeUpstreamUnavailable, "上游响应无法解析").
-			WithDetail(fmt.Sprintf("%s；上游响应前 %d 字节：%s", err.Error(), errorDetailLimit, errorSnippet(respBody))).
-			WithCause(err)
+		//
+		// 分类：适配器认出错误信封时已带上类别（见 failure.ClassifyErrorEnvelope）；
+		// 认不出时按上游故障处理——2xx 却给不出可用报文，成因在响应侧，换渠道可能拿到
+		// 正常响应，不该按「请求本身有问题」终止。
+		class := failure.ClassOf(err)
+		if class == failure.ClassOther {
+			class = failure.ClassUpstream
+		}
+		return nil, failure.NewError(domain.CodeUpstreamUnavailable, "上游响应无法解析",
+			fmt.Sprintf("%s；上游响应前 %d 字节：%s", err.Error(), errorDetailLimit, errorSnippet(respBody)),
+			class).WithCause(err)
 	}
 	return &domain.UpstreamResult{Raw: respBody, Response: decoded, CredentialRenewed: outcome.renewed}, nil
 }
@@ -210,12 +220,12 @@ func readResponseBody(body io.Reader, limit int64) (data []byte, tooLarge bool, 
 
 // responseTooLargeError 构造响应体超限的上游错误。
 //
-// 归为 upstream_unavailable（可重试）：换渠道可能拿到体量正常的上游响应。
+// 归为 upstream_unavailable 且分类为上游故障（换渠道重试、计入渠道熔断）：
+// 换渠道可能拿到体量正常的上游响应。
 // 该判定早于状态码分级：超限时无法安全读完整响应体，状态码文案的取材也不完整。
-func responseTooLargeError() *domain.Error {
-	return domain.NewError(domain.CodeUpstreamUnavailable, "上游响应体超过上限").
-		WithDetail(fmt.Sprintf("非流式响应体上限 %d 字节", maxResponseBytes)).
-		WithCause(errResponseTooLarge)
+func responseTooLargeError() error {
+	return failure.NewError(domain.CodeUpstreamUnavailable, "上游响应体超过上限",
+		fmt.Sprintf("非流式响应体上限 %d 字节", maxResponseBytes), failure.ClassUpstream).WithCause(errResponseTooLarge)
 }
 
 // newRequest 按渠道、适配器与定稿后的请求体构造上游请求。
@@ -331,69 +341,25 @@ func (c *Client) idleTimeoutFor(route domain.Route) time.Duration {
 //
 // deadline 到期记为可重试的上游超时。调用方主动取消（例如客户端断开）记为不可重试的平台错误，
 // 避免换渠道重试。其余连接类错误记为可重试的上游不可用。
-func mapTransportError(ctx context.Context, err error) *domain.Error {
+//
+// 两类上游故障都必须带 ClassUpstream：类别是熔断计数的唯一依据，漏标会让连接失败
+// 与超时静默地停止计入渠道健康度。
+func mapTransportError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return domain.NewError(domain.CodeUpstreamTimeout, "上游调用超时").WithCause(err)
+		return failure.NewError(domain.CodeUpstreamTimeout, "上游调用超时", "", failure.ClassUpstream).WithCause(err)
 	case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+		// 调用方主动取消：既不是渠道的问题，也不该换渠道重试，因此不带任何类别。
 		return domain.NewError(domain.CodeInternal, "上游调用已取消").WithCause(err)
 	default:
-		return domain.NewError(domain.CodeUpstreamUnavailable, "上游连接失败").WithCause(err)
+		return failure.NewError(domain.CodeUpstreamUnavailable, "上游连接失败", "", failure.ClassUpstream).WithCause(err)
 	}
 }
 
-// credentialFailureTokens 是上游响应体里明确表示「凭据或权限不被接受」的标记。
-//
-// 只登记认证与权限两类字面量，各线协议的报文里这些取值都只出现在凭据失败上；
-// 请求参数类错误（invalid_request_error、not_found_error）刻意不在列，
-// 否则「拿不准的 4xx」会触发换凭据，把一次参数错误放大成对整组 key 的枚举。
-var credentialFailureTokens = []string{
-	"authentication_error",
-	"invalid_api_key",
-	"invalid_authentication",
-	"permission_error",
-	"insufficient_permissions",
-	"invalid api key",
-	"incorrect api key",
-	// Gemini 的错误体用 gRPC 状态与文案表达凭据失败：状态 UNAUTHENTICATED / PERMISSION_DENIED
-	// 与下面的 API_KEY_INVALID、"API key not valid" 是它常见的两种取值。
-	"unauthenticated",
-	"permission_denied",
-	"api_key_invalid",
-	"api key not valid",
-}
-
-// isCredentialRejection 判定一次非 2xx 上游响应是否属于「凭据不被接受」。
-//
-// 401 与 403 直接命中；其余 4xx 只在响应体出现已知的认证失败字面量时命中。
-// 5xx 与 4xx 之外的错误一律不算：那些是上游侧故障或客户端参数问题，换凭据不会成功。
-func isCredentialRejection(status int, body []byte) bool {
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return true
-	}
-	return hasCredentialFailureToken(status, body)
-}
-
-// hasCredentialFailureToken 报告响应体是否出现明确的认证/权限失败字面量。
-//
-// 只在 4xx 上扫描：5xx 是上游侧故障，报文里偶然出现同名字面量不代表凭据有问题。
-func hasCredentialFailureToken(status int, body []byte) bool {
-	if status < http.StatusBadRequest || status >= http.StatusInternalServerError {
-		return false
-	}
-	lower := strings.ToLower(string(body))
-	for _, token := range credentialFailureTokens {
-		if strings.Contains(lower, token) {
-			return true
-		}
-	}
-	return false
-}
-
-// classifyHTTPStatus 把上游非 2xx 状态码分级为统一错误。
+// classifyHTTPStatus 把上游非 2xx 状态码转成统一错误。
 //
 // outcome 是凭据处置结论（见 decideCredentialOutcome），由调用方在剥除信标头之前算出：
-// rejected 附加凭据类失败能力，renewed 附加凭据续期能力。
+// 它给出本次失败的类别与处置集合，本函数只负责对外的错误码与排障文案。
 // header 用于提取 Retry-After 提示：头缺失或取值非法时返回的错误不含该提示，
 // 调用方按自身退避策略处理。body 只用于排障详情，不写进错误之外的地方。
 func classifyHTTPStatus(outcome credentialOutcome, status int, header http.Header, body []byte) error {
@@ -401,115 +367,27 @@ func classifyHTTPStatus(outcome credentialOutcome, status int, header http.Heade
 	if snippet := errorSnippet(body); snippet != "" {
 		detail += "：" + snippet
 	}
-	var err *domain.Error
+	code, message := upstreamStatusFailure(status)
+	err := failure.NewErrorWithActions(code, message, detail, outcome.class, outcome.actions)
+	return withCredentialRenewal(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status), outcome.renewed)
+}
+
+// upstreamStatusFailure 取非 2xx 状态码对应的面向客户端错误码与文案。
+//
+// 只负责「对外的错误码」，与处置无关：限流、超时、拒绝、不可用四档分别对应
+// 429 / 504 / 502 / 502。具体怎么处置由 failure 的类别策略表给出，此处不参与，
+// 也不再参与可重试性判定——那是机制与处置混淆的起点。
+func upstreamStatusFailure(status int) (domain.Code, string) {
 	switch {
 	case status == http.StatusTooManyRequests:
-		err = domain.NewError(domain.CodeUpstreamRateLimited, "上游限流").WithDetail(detail)
+		return domain.CodeUpstreamRateLimited, "上游限流"
 	case status == http.StatusRequestTimeout:
-		err = domain.NewError(domain.CodeUpstreamTimeout, "上游超时").WithDetail(detail)
+		return domain.CodeUpstreamTimeout, "上游超时"
 	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
-		err = domain.NewError(domain.CodeUpstreamRejected, "上游拒绝请求").WithDetail(detail)
+		return domain.CodeUpstreamRejected, "上游拒绝请求"
 	default:
-		err = domain.NewError(domain.CodeUpstreamUnavailable, "上游不可用").WithDetail(detail)
+		return domain.CodeUpstreamUnavailable, "上游不可用"
 	}
-	return withUpstreamFailure(withCredentialRenewal(
-		withCredentialRejection(withUpstreamStatus(withRetryAfter(err, header, time.Now()), status), outcome.rejected),
-		outcome.renewed), outcome.failure)
-}
-
-// credentialOutcome 是「本次上游响应下凭据该如何处置」的判定结论。
-type credentialOutcome struct {
-	// rejected 报告本次凭据应被判定为未被上游接受（进入冷却）。
-	rejected bool
-	// renewed 报告上游声明本次凭据登录态已续期（解除既有冷却）。
-	renewed bool
-	// failure 是本次失败的分类，供日志按类聚合与按类定冷却时长。
-	// 它只描述事实，是否停用凭据由 rejected 决定。
-	failure upstreamFailure
-}
-
-// decideCredentialOutcome 是凭据处置判定的唯一出处。
-//
-// 优先级：命中信标头 > 报文与状态码分类。信标头由渠道 config 声明，只在取值命中已声明
-// 的三种之一时生效：
-//   - expired 直接判定为拒绝，优先于分类结论，使厂商用 403/502 表达登录态失效时也能冷却；
-//   - kept 直接判定为不拒绝，即使状态码是 401，使状态码另有含义的厂商不被误冷却；
-//   - renewed 判定为不拒绝并请求解出冷却。
-//
-// 未声明信标头或取值未命中时走 classifyUpstreamFailure，再由 failureRejectsCredential
-// 决定该不该换凭据：认证、额度、余额三类换，限流、上下文超限、模型不可用不换。
-func decideCredentialOutcome(signin domain.SigninHeader, status int, header http.Header, body []byte) credentialOutcome {
-	failure := classifyUpstreamFailure(status, body)
-	switch signin.Verdict(header) {
-	case domain.SigninExpired:
-		// 信标头是渠道显式声明的登录态事实，优先于报文与状态码分类。命中时归类
-		// 也不再记录：厂商已经声明了这次失败的语义，另附一个由状态码推出的分类
-		// 只会自相矛盾（如 429 配 failure=quota 却不按额度冷却）。
-		return credentialOutcome{rejected: true}
-	case domain.SigninKept:
-		// kept 是厂商在说「这个状态码不代表凭据有问题」，同样不附分类。
-		return credentialOutcome{rejected: false}
-	case domain.SigninRenewed:
-		return credentialOutcome{renewed: true}
-	default:
-		return credentialOutcome{rejected: failureRejectsCredential(failure), failure: failure}
-	}
-}
-
-// credentialRejectionError 在已分级的错误之上标注「上游明确拒绝本次凭据」。
-//
-// 与 retryAfterError / upstreamStatusError 同一机制：用包装而不往 domain.Error 加字段，
-// domain.AsError 与 domain.Retryable 照常工作；该能力由 domain.CredentialRejected 读取。
-type credentialRejectionError struct {
-	err error
-}
-
-// Error 实现 error 接口，转发被包装错误的面向排障文案。
-func (e *credentialRejectionError) Error() string { return e.err.Error() }
-
-// CredentialRejected 报告本次失败属凭据类。
-func (e *credentialRejectionError) CredentialRejected() bool { return true }
-
-// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
-func (e *credentialRejectionError) Unwrap() error { return e.err }
-
-// withCredentialRejection 在 rejected 为真时给错误附上凭据类失败能力；否则原样返回。
-func withCredentialRejection(err error, rejected bool) error {
-	if !rejected {
-		return err
-	}
-	return &credentialRejectionError{err: err}
-}
-
-// upstreamFailureError 在已分级的错误之上标注失败分类与建议的凭据冷却时长。
-//
-// 与 retryAfterError / credentialRejectionError 同一机制：用包装而不往 domain.Error
-// 加字段，两个能力分别由 domain.FailureClassOf 与 domain.CredentialCooldownOf 读取。
-type upstreamFailureError struct {
-	err     error
-	failure upstreamFailure
-}
-
-// Error 实现 error 接口，转发被包装错误的面向排障文案。
-func (e *upstreamFailureError) Error() string { return e.err.Error() }
-
-// Unwrap 返回被包装错误，使 errors.As 能继续向下匹配统一错误。
-func (e *upstreamFailureError) Unwrap() error { return e.err }
-
-// FailureClass 声明本次失败的分类名，供尝试日志按类聚合。
-func (e *upstreamFailureError) FailureClass() string { return failurePolicyOf(e.failure).name }
-
-// CredentialCooldown 声明本次失败建议的凭据停用时长；零值表示用调用方配置的默认冷却。
-func (e *upstreamFailureError) CredentialCooldown() time.Duration {
-	return failurePolicyOf(e.failure).cooldown
-}
-
-// withUpstreamFailure 给错误附上失败分类；分类为 other 时不加包装，零值保持零开销。
-func withUpstreamFailure(err error, failure upstreamFailure) error {
-	if failure == failureOther {
-		return err
-	}
-	return &upstreamFailureError{err: err, failure: failure}
 }
 
 // credentialRenewalError 在已分级的错误之上标注「上游声明本次凭据登录态已续期」。
@@ -546,7 +424,7 @@ func withCredentialRenewal(err error, renewed bool) error {
 // 调用方按结构匹配读取该能力（声明形如 RetryAfter() (time.Duration, bool) 的接口），
 // 生产者与消费者之间不因此新增对具体类型的依赖。
 type retryAfterError struct {
-	err        *domain.Error
+	err        error
 	retryAfter time.Duration
 }
 
@@ -562,7 +440,7 @@ func (e *retryAfterError) RetryAfter() (time.Duration, bool) {
 func (e *retryAfterError) Unwrap() error { return e.err }
 
 // withRetryAfter 在上游给出合法 Retry-After 时把退避提示附加到统一错误上；否则原样返回。
-func withRetryAfter(err *domain.Error, header http.Header, now time.Time) error {
+func withRetryAfter(err error, header http.Header, now time.Time) error {
 	delay, ok := parseRetryAfter(header.Get("Retry-After"), now)
 	if !ok {
 		return err

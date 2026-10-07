@@ -9,6 +9,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/circuit"
 	"github.com/sumwai/tokenmp/internal/domain"
+	"github.com/sumwai/tokenmp/internal/failure"
 )
 
 // 本文件覆盖流水线与渠道熔断端口的接线：熔断过滤、全部打开时的探测兜底、
@@ -249,7 +250,7 @@ func TestForwardRecordsChannelOutcomeAfterCredentialRotation(t *testing.T) {
 func TestForwardBreakerNeutralToRateLimit(t *testing.T) {
 	breaker := circuit.NewBreaker(circuit.Options{FailureThreshold: 1, Cooldown: time.Minute})
 	limiter := &fakeLimiter{replies: map[uint64]limiterReply{
-		10: {err: domain.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时")},
+		10: {err: failure.NewError(domain.CodeUpstreamRateLimited, "渠道限流：等待令牌超时", "", failure.ClassRateLimit)},
 	}}
 	caller := fakeCaller{complete: func(_ context.Context, route domain.Route, _ *domain.Request, _ []byte) (*domain.UpstreamResult, error) {
 		if route.ChannelID == 10 {
@@ -316,11 +317,15 @@ func TestForwardBreakerNeutralToCredentialRejection(t *testing.T) {
 	}
 }
 
-// wrappedCredentialRejection 模拟上游客户端在统一错误之上标注「凭据不被接受」的包装错误。
+// wrappedCredentialRejection 模拟上游客户端在统一错误之上标注凭据类失败的包装错误。
+//
+// 动作集里刻意不含计入熔断：凭据类失败说明这把 key 不可用，不代表渠道自身故障。
 type wrappedCredentialRejection struct {
 	err error
 }
 
-func (e wrappedCredentialRejection) Error() string            { return e.err.Error() }
-func (e wrappedCredentialRejection) Unwrap() error            { return e.err }
-func (e wrappedCredentialRejection) CredentialRejected() bool { return true }
+func (e wrappedCredentialRejection) Error() string { return e.err.Error() }
+func (e wrappedCredentialRejection) Unwrap() error { return e.err }
+func (e wrappedCredentialRejection) Actions() failure.Action {
+	return failure.ActionSuspendAccount | failure.ActionRetryNextAccount
+}

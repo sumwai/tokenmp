@@ -116,6 +116,12 @@ func (a Action) Has(action Action) bool { return a&action != 0 }
 // 后者的可读性差，且把「下一步是哪个」与「能不能下一步」两件事混在一起。
 func (a Action) Retryable() bool { return a.Has(ActionRetryNextAccount) || a.Has(ActionRetryNextRoute) }
 
+// Without 返回去掉若干动作后的集合。
+//
+// 用于「类别没错、但某组动作被上游显式否认」这类覆盖：渠道声明的信标头说
+// 「这个状态码不代表凭据有问题」时，摘掉整组凭据动作而保留类别。
+func (a Action) Without(actions Action) Action { return a &^ actions }
+
 // NextStep 返回集合里优先尝试的重试动作；不可重试时返回 ActionSurface。
 //
 // 它回答的是「先试哪个」：集合里可能同时允许换凭据与换渠道（升级顺序），
