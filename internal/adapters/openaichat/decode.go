@@ -553,10 +553,13 @@ func (a *Adapter) DecodeStreamFrame(event string, data []byte) ([]domain.Chunk, 
 		usage := decodeUsage(wire.Usage)
 		a.stream.usage = &usage
 	}
-	if choice.FinishReason != nil {
+	// finish_reason 只在有真实取值时才算结束：部分兼容上游（如 MiniMax）在每帧都发
+	// "finish_reason": ""（空串而非 null），只看非 nil 会把每一帧都当成收尾。
+	// 那会让 finishReasonSeen 提前置位（截断流被误判为完整），也会让每帧都多出一个
+	// 收尾分片，使中间件因「帧里含非内容分片」而整帧放弃介入。
+	if choice.FinishReason != nil && *choice.FinishReason != "" {
 		a.stream.finishReason = DecodeFinishReason(*choice.FinishReason)
-		// finish_reason 非 null 即 Chat 的必有结束信号，记下它供 FinishStream 在 EOF 处判定
-		// 「完整结束」；这里只记标志，不产出分片（用量帧可能随后到达）。
+		// 记下它供 FinishStream 在 EOF 处判定「完整结束」；用量帧可能随后到达。
 		a.stream.finishReasonSeen = true
 	}
 
@@ -564,6 +567,7 @@ func (a *Adapter) DecodeStreamFrame(event string, data []byte) ([]domain.Chunk, 
 	// 推理与正文同帧时顺序不影响记账（旁路按类别分别拼接），也不影响透传字节（透传只写原始帧）。
 	// 并行工具调用会把多个 tool_calls 放进同一帧，全部产出并各带真实 Index，
 	// 后续流水线据此区分不同调用（见 internal/domain 对 ToolCall.Index 的守护）。
+	// 容量只是预分配提示，不追求精确：本帧最多再多三个可选分片。
 	chunks := make([]domain.Chunk, 0, len(choice.Delta.ToolCalls)+1)
 	if choice.Delta.ReasoningContent != "" {
 		chunks = append(chunks, domain.Chunk{Kind: domain.ChunkReasoningDelta, Model: wire.Model, TextDelta: choice.Delta.ReasoningContent})
@@ -582,6 +586,13 @@ func (a *Adapter) DecodeStreamFrame(event string, data []byte) ([]domain.Chunk, 
 			toolCall.Arguments = call.Function.Arguments
 		}
 		chunks = append(chunks, domain.Chunk{Kind: domain.ChunkToolCallDelta, Model: wire.Model, ToolCall: toolCall})
+	}
+	// finish_reason 也要产出分片：它是面向客户端的收尾信号，中间件需要在它之前完成
+	// 流末补发。部分兼容上游不发 [DONE]，只在本帧给出 finish_reason 后直接 EOF，
+	// 那类上游的结束分片要等到 EOF 才产出，届时终止帧已经写出去了。
+	// 判据同上面一处：空串不算收尾。
+	if choice.FinishReason != nil && *choice.FinishReason != "" {
+		chunks = append(chunks, domain.Chunk{Kind: domain.ChunkFinish, Model: wire.Model})
 	}
 	// 无载荷时返回 nil，与「不产生分片」的约定保持同一种形状（见 domain.Adapter 的说明）。
 	if len(chunks) == 0 {

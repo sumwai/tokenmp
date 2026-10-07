@@ -48,13 +48,18 @@ func (a *Adapter) EncodeResponse(resp *domain.Response) ([]byte, error) {
 }
 
 // encodeMessage 把内部消息编码为响应 message：文本片段拼接为 content，工具调用片段转为 tool_calls。
-// 响应不允许出现图片、工具结果等片段；推理片段（PartReasoning）在编码方向不下发，显式跳过。
+// 响应不允许出现图片、工具结果等片段；推理片段（PartReasoning）编到 reasoning_content。
+//
+// reasoning_content 不属于 OpenAI 官方规范，但已是兼容渠道的既成事实（DeepSeek、MiniMax 等
+// 都在用），且本包解码方向本来就认它（见 wire.go 的 responseMessage）。编码方向不下发会让
+// 「同协议透传拿到、跨协议重建丢失」成为同一份上游数据与两种结果。
 func encodeMessage(message domain.Message) (responseMessage, error) {
 	role := string(message.Role)
 	if role == "" {
 		role = string(domain.RoleAssistant)
 	}
 	var text strings.Builder
+	var reasoning strings.Builder
 	var toolCalls []toolCallWire
 	for i, part := range message.Parts {
 		switch part.Kind {
@@ -73,12 +78,12 @@ func encodeMessage(message domain.Message) (responseMessage, error) {
 				},
 			})
 		case domain.PartReasoning:
-			// 推理内容不下发，跳过。
+			reasoning.WriteString(part.Text)
 		default:
 			return responseMessage{}, domain.NewError(domain.CodeInternal, fmt.Sprintf("响应片段类型 %q 无法编码", string(part.Kind)))
 		}
 	}
-	out := responseMessage{Role: role, ToolCalls: toolCalls}
+	out := responseMessage{Role: role, ReasoningContent: reasoning.String(), ToolCalls: toolCalls}
 	// 仅含工具调用时 content 为 null；否则给出文本（允许为空串）。
 	if text.Len() > 0 || len(toolCalls) == 0 {
 		content := text.String()
@@ -89,7 +94,7 @@ func encodeMessage(message domain.Message) (responseMessage, error) {
 
 // EncodeChunk 把一个内部统一分片编码为 OpenAI SSE 帧（含 "data: " 前缀与结尾空行）。
 //
-// 只处理文本增量与工具调用增量：用量、结束原因与流结束统一经 EncodeStreamEnd 下发，
+// 只处理文本增量、推理增量与工具调用增量：用量、结束原因与流结束统一经 EncodeStreamEnd 下发，
 // 遇到 ChunkUsage、ChunkFinish、ChunkStreamEnd 一律报错，避免同一语义出现两条下发路径
 // （见 internal/domain/ports.go 对 EncodeChunk 的约定）。
 func (a *Adapter) EncodeChunk(chunk domain.Chunk) ([]byte, error) {
@@ -127,8 +132,18 @@ func (a *Adapter) EncodeChunk(chunk domain.Chunk) ([]byte, error) {
 			}},
 		})
 	case domain.ChunkReasoningDelta:
-		// 推理增量在编码方向不下发，显式跳过而不报错。
-		return nil, nil
+		// 推理增量编到 delta.reasoning_content：与解码方向同形，也让「同协议透传拿到、
+		// 跨协议重建丢失」不再发生。空文本仍然不发帧，避免产出无载荷的空帧。
+		if chunk.TextDelta == "" {
+			return nil, nil
+		}
+		return a.encodeWireChunk(chunkWire{
+			ID:      a.id(),
+			Object:  objectChatCompletionChunk,
+			Created: a.timestamp(),
+			Model:   chunk.Model,
+			Choices: []chunkChoice{{Index: 0, Delta: chunkDelta{ReasoningContent: chunk.TextDelta}}},
+		})
 	case domain.ChunkUsage, domain.ChunkFinish, domain.ChunkStreamEnd:
 		return nil, domain.NewError(domain.CodeInternal, fmt.Sprintf("分片类型 %q 必须经 EncodeStreamEnd 下发", string(chunk.Kind)))
 	default:

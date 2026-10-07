@@ -64,9 +64,15 @@ var (
 // 上游帧、没有原始字节可交付，上游调用方经本方法交付它。透传路径不得因收尾分片向客户端
 // 多写一个字节，故这里只记录其用量，既不写出任何字节，也不据此把「已向客户端写出字节」
 // 置位。其余分片类型走 SendFrame，经本方法到达属调用方错误，仍按内部错误拒绝。
-func (s *passthroughSink) Send(_ context.Context, chunk domain.Chunk) error {
+//
+// 流末补发也必须在这里做：openai_chat 的结束分片有两条来源（终止帧与 EOF 补齐），
+// 后者只经本方法到达。只在 SendFrame 里补发会让这条路上的缓冲尾巴静默丢失。
+func (s *passthroughSink) Send(ctx context.Context, chunk domain.Chunk) error {
 	if chunk.Kind != domain.ChunkStreamEnd {
 		return domain.NewError(domain.CodeInternal, "透传下沉目标不得接收结束分片以外的逐分片调用")
+	}
+	if s.events != nil {
+		s.flushStreamEnd(ctx)
 	}
 	s.recordUsage(chunk)
 	return nil
@@ -86,6 +92,11 @@ func (s *passthroughSink) SendFrame(ctx context.Context, raw []byte, chunks []do
 		s.recordUsage(chunk)
 	}
 	if s.events != nil {
+		// 终止帧之前先让中间件冲刷尾巴：逐事件钩子拿不到流结束分片，
+		// 跨分片缓冲的改写没有这个时机就只能丢弃缓冲。
+		if carriesTerminal(chunks) {
+			s.flushStreamEnd(ctx)
+		}
 		handled, err := s.applyEvents(ctx, chunks)
 		if err != nil {
 			return err
@@ -103,6 +114,44 @@ func (s *passthroughSink) SendFrame(ctx context.Context, raw []byte, chunks []do
 		return clientWriteError(err)
 	}
 	return nil
+}
+
+// carriesTerminal 报告该帧里的分片是否含面向客户端的收尾信号。
+//
+// 两种都算：ChunkFinish 是协议自身的结束原因（如 Chat 的 finish_reason），
+// ChunkStreamEnd 是整条流的结束（带用量）。部分上游只给前者再直接 EOF，
+// 只认后者会让补发排到终止帧之后。
+// 一帧可能同时带内容与收尾，不能假定收尾分片独占一帧。
+func carriesTerminal(chunks []domain.Chunk) bool {
+	for _, chunk := range chunks {
+		if chunk.Kind == domain.ChunkStreamEnd || chunk.Kind == domain.ChunkFinish {
+			return true
+		}
+	}
+	return false
+}
+
+// flushStreamEnd 在终止帧之前向中间件取一次补发分片并写出。
+//
+// 中间件未实现 domain.StreamEndMiddleware 这一可选端口时零开销 —— 多数中间件不跨分片缓冲。
+// 编码不出来或得到空帧的分片跳过而不报错，与逐事件路径同一口径：中间件改写失败只让
+// 这次补发落空，不把转发变成失败。
+func (s *passthroughSink) flushStreamEnd(ctx context.Context) {
+	ender, ok := s.events.(domain.StreamEndMiddleware)
+	if !ok {
+		return
+	}
+	for _, chunk := range ender.OnStreamEnd(ctx, s.req) {
+		frame, err := s.client.EncodeChunk(chunk)
+		if err != nil || len(frame) == 0 {
+			continue
+		}
+		s.wrote = true
+		if _, err := s.out.Write(frame); err != nil {
+			s.failed = true
+			return
+		}
+	}
 }
 
 // applyEvents 在整帧都是内容分片时交给中间件层处置，并返回是否已写完全帧。
@@ -263,6 +312,10 @@ func newRebuildSink(out io.Writer, client domain.Adapter, model string, events d
 //
 // ChunkUsage 只出现在解码方向，必须在此跳过；结束分片按上游给出的用量原样交适配器编码。
 func (s *rebuildSink) Send(ctx context.Context, chunk domain.Chunk) error {
+	// 终止帧之前先让中间件冲刷尾巴，理由同透传路径。
+	if chunk.Kind == domain.ChunkStreamEnd || chunk.Kind == domain.ChunkFinish {
+		s.flushStreamEnd(ctx)
+	}
 	if chunk.Usage != nil {
 		s.usage = *chunk.Usage
 	}
@@ -276,7 +329,9 @@ func (s *rebuildSink) Send(ctx context.Context, chunk domain.Chunk) error {
 			chunk = result.Chunk
 		}
 	}
-	if chunk.Kind == domain.ChunkUsage {
+	// 用量与结束原因都不产生客户端字节：用量只用于记账，结束原因由下游的
+	// EncodeStreamEnd 按整条流的状态统一给出，各自单独成帧会让客户端收到两次结束。
+	if chunk.Kind == domain.ChunkUsage || chunk.Kind == domain.ChunkFinish {
 		return nil
 	}
 	var (
@@ -284,12 +339,11 @@ func (s *rebuildSink) Send(ctx context.Context, chunk domain.Chunk) error {
 		err   error
 	)
 	switch chunk.Kind {
-	case domain.ChunkTextDelta, domain.ChunkToolCallDelta:
+	// 推理分片与文本、工具调用分片走同一条编码路径：三者都是要写给客户端的内容，
+	// 区别只在客户端方言里的字段名。曾经在这里直接丢弃，导致「插件把正文改成推理」
+	// 在重建路径上让内容静默消失，而透传路径上只是回退原帧 —— 两条路结果不一致。
+	case domain.ChunkTextDelta, domain.ChunkToolCallDelta, domain.ChunkReasoningDelta:
 		frame, err = s.client.EncodeChunk(chunk)
-	case domain.ChunkReasoningDelta:
-		// 推理分片不产生客户端字节：编码方向不下发推理内容，
-		// 因此不置位 wrote，不得因它关闭换渠道重试。
-		return nil
 	case domain.ChunkStreamEnd:
 		frame, err = s.client.EncodeStreamEnd(chunk)
 	default:
@@ -300,6 +354,26 @@ func (s *rebuildSink) Send(ctx context.Context, chunk domain.Chunk) error {
 		return err
 	}
 	return s.write(frame)
+}
+
+// flushStreamEnd 在终止帧之前向中间件取一次补发分片并写出。
+//
+// 与透传路径同一语义，但走 s.write 而不是直接写 out：重建路径的首个字节前要先补发流开始帧，
+// 绕开它会让补发帧成为客户端收到的第一帧，序列不完整。
+func (s *rebuildSink) flushStreamEnd(ctx context.Context) {
+	ender, ok := s.events.(domain.StreamEndMiddleware)
+	if !ok {
+		return
+	}
+	for _, chunk := range ender.OnStreamEnd(ctx, s.req) {
+		frame, err := s.client.EncodeChunk(chunk)
+		if err != nil || len(frame) == 0 {
+			continue
+		}
+		if err := s.write(frame); err != nil {
+			return
+		}
+	}
 }
 
 // write 在首次写出字节前补发流开始帧，避免客户端收到缺少开头的事件序列。
