@@ -133,16 +133,22 @@ type Set struct {
 // Load 加载配置里的全部中间件；空列表返回一个空 Set。
 //
 // 任一项不可用（路径不存在、后缀不符、包入口缺失、编译失败或钩子导出不是函数）
-// 都返回错误：非法配置在启动期报出，不推迟到第一个请求。
+// 都返回错误：非法配置在启动期报出，不推迟到第一个请求。加载不因单项失败而中止，
+// 一次报出全部不可用的项：多个插件同时写坏时，逐个修复逐次重启没有意义。
 func Load(paths []string, opts Options) (*Set, error) {
 	opts = opts.withDefaults()
 	set := &Set{opts: opts}
+	var failures []error
 	for _, path := range paths {
 		middleware, err := loadMiddleware(path, opts)
 		if err != nil {
-			return nil, err
+			failures = append(failures, err)
+			continue
 		}
 		set.items = append(set.items, middleware)
+	}
+	if len(failures) > 0 {
+		return nil, errors.Join(failures...)
 	}
 	return set, nil
 }
@@ -208,17 +214,24 @@ type Middleware struct {
 	pool     chan *pooledRuntime
 	stats    stats
 	console  rateLimiter
-	hookLog  rateLimiter
-	// hookSuppressed 累计被限频压掉的钩子失败日志条数；下一条放行的日志把它报出并归零。
-	hookSuppressed atomic.Int64
+	hookLog  throttledLog
+	// skipLog 限频「取不到运行时而跳过该插件」的日志。
+	skipLog throttledLog
+	// skipped 是因取不到运行时而被跳过的请求数。
+	skipped atomic.Int64
 	// reloading 是重编译的单飞闸：同一时刻只允许一个 goroutine 编译。
 	// 抢不到闸的请求不排队等结果，直接用当前产物继续服务。
 	reloading atomic.Bool
+	// runtimeDeps 是动态 import() 触及的文件与登记时的指纹。
+	// 用 sync.Map：读在每次取用的指纹检查上，写在 JS 运行期的解析上，两者并发且互不阻塞。
+	runtimeDeps sync.Map
 
 	mu  sync.Mutex
 	cur *compiled
 	// reload 是重编译的状态位，与 cur 共锁。
 	reload reloadState
+	// skipError 是最近一次取用失败的原因。
+	skipError string
 }
 
 // reloadState 是一个中间件的重编译状态。
@@ -239,24 +252,26 @@ func loadMiddleware(path string, opts Options) (*Middleware, error) {
 	if err != nil {
 		return nil, err
 	}
-	comp, err := newCompiler(root)
-	if err != nil {
-		return nil, err
-	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	middleware := &Middleware{
-		name:     name,
-		entry:    entry,
-		opts:     opts,
-		logger:   logger,
-		compiler: comp,
-		pool:     make(chan *pooledRuntime, opts.PoolSize),
-		console:  newRateLimiter(consolePerSecond),
-		hookLog:  newRateLimiter(hookFailurePerSecond),
+		name:    name,
+		entry:   entry,
+		opts:    opts,
+		logger:  logger,
+		pool:    make(chan *pooledRuntime, opts.PoolSize),
+		console: newRateLimiter(consolePerSecond),
+		hookLog: newThrottledLog(failureLogPerSecond),
+		skipLog: newThrottledLog(failureLogPerSecond),
 	}
+	// 编译器要能回传运行期解析触及的文件，回调因此挂在 middleware 上，装配在它之后进行。
+	comp, err := newCompiler(root, middleware.noteRuntimeDep)
+	if err != nil {
+		return nil, err
+	}
+	middleware.compiler = comp
 	assembled, err := middleware.assemble()
 	if err != nil {
 		return nil, fmt.Errorf("插件 %s 装配失败：%w", path, err)
@@ -474,12 +489,36 @@ func (m *Middleware) current() *compiled {
 	if cur != nil && !due {
 		return cur
 	}
+	// 需要重编译：只有抢到单飞闸的 goroutine 编译，其余不排队。
+	m.recompile(reloadLazy)
+	return m.snapshot()
+}
+
+// reloadMode 区分惰性重载与强制重载。
+type reloadMode bool
+
+const (
+	// reloadLazy 按指纹判断，缓存命中即复用已编译模块。
+	reloadLazy reloadMode = false
+	// reloadForced 忽略指纹并丢掉编译缓存，重新读文件。
+	// 指纹是「修改时间 + 大小」，cp -p、同尺寸覆盖、网络文件系统丢精度都会漏检；
+	// 强制重载是不依赖指纹的兜底，因此连缓存一起丢，否则缓存会把旧模块还回来。
+	reloadForced reloadMode = true
+)
+
+// recompile 在锁外编译一次并换代；抢不到单飞闸时直接返回。
+//
+// 返回值不给调用方，因为它取决于另一把锁上的进度：抢不到闸的调用方取快照即可，
+// 拿到的是此刻真正的当前产物。
+func (m *Middleware) recompile(mode reloadMode) {
 	if !m.reloading.CompareAndSwap(false, true) {
-		// 已有一个请求在编译：不等它的结果，本次直接用当前产物。
-		return cur
+		return
 	}
 	defer m.reloading.Store(false)
 
+	if mode == reloadForced {
+		m.compiler.reset()
+	}
 	// 编译在锁外进行：持锁编译会把所有请求一起挡在门外。
 	next, err := m.assemble()
 
@@ -487,12 +526,11 @@ func (m *Middleware) current() *compiled {
 	defer m.mu.Unlock()
 	if err != nil {
 		m.reloadFailureLocked(err, time.Now())
-		return m.cur
+		return
 	}
 	m.cur = next
 	m.drainPoolLocked()
 	m.reloadSuccessLocked(time.Now())
-	return m.cur
 }
 
 // reloadDueLocked 报告是否该尝试重编译。调用方必须已持有 m.mu。
@@ -525,11 +563,11 @@ func (m *Middleware) reloadSuccessLocked(now time.Time) {
 	m.reload.consecutiveFailures = 0
 	m.reload.lastError = ""
 	m.reload.backoffUntil = time.Time{}
+	m.refreshRuntimeDeps()
 	m.logger.Info("中间件已热重载", "plugin", m.name, "entry", m.entry)
 }
 
-// snapshot 返回当前产物的只读快照，不触发重编译。
-//
+// snapshot 返回当前产物的只读快照，不触发重编译。//
 // 状态读取不该有副作用：调用方只想知道此刻在跑什么，不该顺带把一次重编译拉进自己的路径。
 func (m *Middleware) snapshot() *compiled {
 	m.mu.Lock()
@@ -537,7 +575,23 @@ func (m *Middleware) snapshot() *compiled {
 	return m.cur
 }
 
+// Reload 立刻重编译全部中间件，忽略文件指纹与退避窗口。
+//
+// 指纹是「修改时间 + 大小」，cp -p、网络文件系统丢精度、同尺寸覆盖一类操作会让它漏检；
+// 该方法是不依赖指纹的兜底手段。触发源（信号、管理接口）不在本包内，由装配层决定。
+func (s *Set) Reload() {
+	if s == nil {
+		return
+	}
+	for _, middleware := range s.items {
+		middleware.recompile(reloadForced)
+	}
+}
+
 // staleLocked 报告当前产物的任一依赖文件指纹是否已变化。
+//
+// 静态导入来自产物快照，动态 import() 的文件来自运行期登记：两类都要看，
+// 否则改了插件按需加载的子模块不会触发换代，池里那批运行时一直用旧模块。
 func (m *Middleware) staleLocked() bool {
 	for _, dep := range m.cur.deps {
 		stamp, err := statFile(dep)
@@ -545,7 +599,46 @@ func (m *Middleware) staleLocked() bool {
 			return true
 		}
 	}
-	return false
+	stale := false
+	m.runtimeDeps.Range(func(key, value any) bool {
+		path, ok := key.(string)
+		want, ok2 := value.(fileStamp)
+		if !ok || !ok2 {
+			return true
+		}
+		stamp, err := statFile(path)
+		if err != nil || stamp != want {
+			stale = true
+			return false
+		}
+		return true
+	})
+	return stale
+}
+
+// noteRuntimeDep 记录一次动态 import() 触及的文件与当时的指纹。
+//
+// 登记发生在 JS 运行期：这类文件不在启动期的静态模块图里，不补这一笔，
+// 改动它既不会触发重载，也不会清掉已经装载旧模块的池中运行时。
+func (m *Middleware) noteRuntimeDep(path string, stamp fileStamp) {
+	m.runtimeDeps.Store(path, stamp)
+}
+
+// refreshRuntimeDeps 把运行期依赖的基线指纹刷成当前值。
+//
+// 重载成功后旧的一批基线已经过时：新产物按当前内容编译，基线不刷新会让同一个文件
+// 被反复判成「又变了」。读不到的文件不刷新，保持「不匹配即过期」。
+func (m *Middleware) refreshRuntimeDeps() {
+	m.runtimeDeps.Range(func(key, _ any) bool {
+		path, ok := key.(string)
+		if !ok {
+			return true
+		}
+		if stamp, err := statFile(path); err == nil {
+			m.runtimeDeps.Store(path, stamp)
+		}
+		return true
+	})
 }
 
 // drainPoolLocked 丢弃池中全部运行时；旧模块的运行时不能用于新产物。
@@ -577,6 +670,11 @@ type Info struct {
 	ReloadError string `json:"reload_error,omitempty"`
 	// Stale 表示文件指纹已变化但重编译尚未成功，即当前在跑旧版本。
 	Stale bool `json:"stale,omitempty"`
+	// Skipped 是因取不到运行时而被跳过的请求数；非零表示插件此刻并不在处理请求，
+	// 而转发仍然成功——只看失败计数会以为一切正常。
+	Skipped int64 `json:"skipped,omitempty"`
+	// SkipError 是最近一次取用失败的原因。
+	SkipError string `json:"skip_error,omitempty"`
 }
 
 // Stats 返回全部中间件的统计快照，顺序与配置一致。
@@ -601,6 +699,7 @@ func (m *Middleware) info() Info {
 	m.mu.Lock()
 	comp := m.cur
 	reload := m.reload
+	skipError := m.skipError
 	stale := comp != nil && m.staleLocked()
 	m.mu.Unlock()
 
@@ -627,6 +726,8 @@ func (m *Middleware) info() Info {
 	info.ReloadFailures = reload.consecutiveFailures
 	info.ReloadError = reload.lastError
 	info.Stale = stale
+	info.Skipped = m.skipped.Load()
+	info.SkipError = skipError
 	return info
 }
 
@@ -744,15 +845,13 @@ func (s *Set) BeginRequest(ctx context.Context, req *domain.Request) (context.Co
 	for _, middleware := range s.items {
 		runtime, comp, err := middleware.acquire()
 		if err != nil {
-			middleware.logger.Warn("中间件运行时不可用，本次请求跳过该插件",
-				"plugin", middleware.name, logKeyError, err.Error())
+			middleware.noteSkip(err)
 			continue
 		}
 		stateValue, err := runtime.FromGo(map[string]any{})
 		if err != nil {
 			middleware.release(runtime, comp)
-			middleware.logger.Warn("中间件状态对象创建失败，本次请求跳过该插件",
-				"plugin", middleware.name, logKeyError, err.Error())
+			middleware.noteSkip(err)
 			continue
 		}
 		state.runtimes = append(state.runtimes, &requestRuntime{
@@ -930,18 +1029,22 @@ func (s *Set) OnResponse(ctx context.Context, req *domain.Request, body []byte) 
 // 日志按中间件限频：一次写坏的文件会让每个请求各失败一次，不限频时同一句话把日志刷满，
 // 排障现场看不到别的东西。被压掉的条数在下一条放行的日志里报出，症状消失前不丢计数。
 func (m *Middleware) logHookFailure(rt *moejs.Runtime, requestID, hook string, err error) {
-	if !m.hookLog.allow() {
-		m.hookSuppressed.Add(1)
-		return
-	}
-	attrs := []any{
+	m.hookLog.log(m.logger, "中间件钩子失败，按原样放行",
 		"plugin", m.name, "hook", hook, "kind", hookErrorKind(err),
-		"request_id", requestID, logKeyError, withJSStack(rt, err).Error(),
-	}
-	if suppressed := m.hookSuppressed.Swap(0); suppressed > 0 {
-		attrs = append(attrs, "suppressed", suppressed)
-	}
-	m.logger.Warn("中间件钩子失败，按原样放行", attrs...)
+		"request_id", requestID, logKeyError, withJSStack(rt, err).Error())
+}
+
+// noteSkip 记一次「取不到运行时而跳过该插件」。
+//
+// 转发放行不等于插件在工作：计数让人能回答「插件此刻到底有没有介入」这个问题，
+// 日志则限频，否则一个不可用的插件会让每条请求各写一条。
+func (m *Middleware) noteSkip(err error) {
+	m.skipped.Add(1)
+	m.mu.Lock()
+	m.skipError = err.Error()
+	m.mu.Unlock()
+	m.skipLog.log(m.logger, "中间件取用失败，本次请求跳过该插件",
+		"plugin", m.name, logKeyError, err.Error())
 }
 
 // hookErrorKind 把钩子错误归成便于聚合的类别。

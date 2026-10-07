@@ -130,6 +130,24 @@ func loadErr(t *testing.T, path string) error {
 	return err
 }
 
+// TestLoadReportsAllFailures 守护装配期一次报出全部不可用的插件。
+//
+// 多个插件同时写坏时，「遇到第一个就返回」会让人逐个修复、逐次重启。
+func TestLoadReportsAllFailures(t *testing.T) {
+	dir := t.TempDir()
+	broken := writeSource(t, dir, "broken.mw.js", `export function onRequest(body) { this is not javascript`)
+	notFn := writeSource(t, dir, "notfn.mw.js", `export const onRequest = 42;`)
+	_, err := Load([]string{broken, notFn}, Options{})
+	if err == nil {
+		t.Fatal("全部不可用时应当报错")
+	}
+	for _, want := range []string{"broken.mw.js", "notfn.mw.js"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误应点名 %s，实际：%v", want, err)
+		}
+	}
+}
+
 func TestOnRequestRewritesModel(t *testing.T) {
 	set, _ := loadOne(t, t.TempDir(), "alias.mw.js",
 		`export function onRequest(body) { body.model = "rewritten"; return body; }`, Options{})

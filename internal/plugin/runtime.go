@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -23,10 +24,10 @@ const (
 	consoleMaxRunes = 512
 	// consolePerSecond 是每个中间件每秒放行的控制台日志条数上限。
 	consolePerSecond = 20
-	// hookFailurePerSecond 是每个中间件每秒放行的钩子失败日志条数上限。
-	// 取值低于控制台输出：失败日志每请求一条，热路径上会盖住其它记录，
-	// 而它要说明的只是「仍在失败」与失败原因，5 条足以看到。
-	hookFailurePerSecond = 5
+	// failureLogPerSecond 是每个中间件每秒放行的失败日志条数上限，
+	// 钩子失败与取用失败各自计数。取值低于控制台输出：失败日志每请求一条，
+	// 热路径上会盖住其它记录，而它要说明的只是「仍在失败」与失败原因，5 条足以看到。
+	failureLogPerSecond = 5
 	// maxDeclaredEvents 是单个中间件声明的最大事件数，超过时只留痕提示，不拒绝加载。
 	maxDeclaredEvents = 12
 )
@@ -539,6 +540,32 @@ func (l *rateLimiter) allow() bool {
 	}
 	l.count++
 	return true
+}
+
+// throttledLog 是「限频 + 报出被压条数」的日志出口。
+type throttledLog struct {
+	limiter    rateLimiter
+	suppressed atomic.Int64
+}
+
+// newThrottledLog 构造一个每秒放行 limit 条的日志出口。
+func newThrottledLog(limit int) throttledLog {
+	return throttledLog{limiter: newRateLimiter(limit)}
+}
+
+// log 在配额内写一条 Warn；超配额时只计数。
+//
+// 被压掉的条数在下一条放行的日志里以 suppressed 报出：完全静默会让人以为插件没出问题，
+// 而逐条记录又会在故障时把日志刷满。
+func (t *throttledLog) log(logger *slog.Logger, msg string, attrs ...any) {
+	if !t.limiter.allow() {
+		t.suppressed.Add(1)
+		return
+	}
+	if suppressed := t.suppressed.Swap(0); suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	logger.Warn(msg, attrs...)
 }
 
 // Agent 是可知时注入钩子上下文的调用方归属。
