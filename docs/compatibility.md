@@ -69,7 +69,10 @@
   | `kind` | string | 分片类型，取值 `text_delta` / `tool_call_delta` / `reasoning_delta`。返回值里出现其它取值按失败处理 |
   | `model` | string | 对外模型别名；上游帧带了这个字段才有 |
   | `text_delta` | string | 文本增量。`text_delta` 与 `reasoning_delta` 两种分片都用它承载文本 |
-  | `tool_call` | object | 工具调用增量：`index`（number）、`id`、`name`、`arguments`（均为 string，`arguments` 是 JSON 片段） |
+  | `tool_call` | object | 工具调用增量：`index`（number，必须是整数）、`id`、`name`、`arguments`（均为 string，`arguments` 是 JSON 片段） |
+
+  `index` 写非整数（`0.5` 一类）按非法返回处理，与其它形状错误同一口径：钩子失败、本次改写
+  作废、原样放行并记日志。静默归零会让并行工具调用串位，而这是最难从响应里看出来的一类错。
 
   `onStreamEnd` 返回待补发的分片数组，元素是同一形状的对象；其余返回值形状（非对象、
   非数组、数组含非对象）按失败处理，与逐事件路径同一口径。
