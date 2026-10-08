@@ -57,8 +57,9 @@ func BenchmarkAcquireSingleFile(b *testing.B) {
 
 // BenchmarkAcquireManyFiles 记录入口加若干静态导入时每次取用的开销。
 //
-// 与单文件版的差值即「每个依赖文件一次 stat」的单价：模块数越多，取用成本越高，
-// 且这段成本在中间件的锁内完成。
+// 与单文件版的差值即「每个依赖文件一次 stat」的单价：模块数越多，取用成本越高。
+// 这笔 stat 在中间件的锁外做（见 plugin.go 的 current），因此模块数增的是每请求的
+// 系统调用次数，不是锁的持有时长。
 func BenchmarkAcquireManyFiles(b *testing.B) {
 	dir := b.TempDir()
 	const modules = 8
@@ -84,7 +85,8 @@ func BenchmarkAcquireManyFiles(b *testing.B) {
 //
 // 上面两条都是顺序跑的，量不出「取用路径是否随核数扩展」，而这段成本每个请求都要付一次。
 // 它是这段成本的常驻基线：若把指纹比对移回锁内、或在取用路径上引入别的串行点，
-// ns/op 会随 -cpu 升高而劣化。跑法：-cpu 1,8 对比同一行。
+// ns/op 会随 -cpu 升高而劣化。跑法：-cpu 1,N 对比同一行，N 取本机可用核数 ——
+// 超过可用核数时提高 -cpu 只是让 GOMAXPROCS 超订，量不出扩展性。
 func BenchmarkAcquireParallel(b *testing.B) {
 	set, err := Load([]string{writeBenchPlugin(b, b.TempDir(), "parallel.mw.js",
 		`export function onRequest(body) { return undefined; }`)}, Options{})
