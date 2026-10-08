@@ -726,6 +726,38 @@ func (s *Store) Account(ctx context.Context, id uint64) (*Account, error) {
 	return &a, nil
 }
 
+const accountByOwnerSQL = `SELECT id, code, name, owner_user_id, default_merchant_id, price_multiplier, status
+FROM account WHERE owner_user_id = ?`
+
+// AccountByOwner 按登录主体查所属账户；无归属时错误可用 errors.Is(err, sql.ErrNoRows) 判断。
+//
+// 归属一对一由 uk_account_owner 唯一键保证，因此最多命中一行。用户级端点用它把
+// 会话推导为作用域：归属取自带令牌的登录主体，不从请求参数读。
+func (s *Store) AccountByOwner(ctx context.Context, userID uint64) (*Account, error) {
+	if userID == 0 {
+		return nil, errors.New("store: account.owner_user_id 不能为 0")
+	}
+	var (
+		a        Account
+		owner    sql.NullInt64
+		merchant sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, accountByOwnerSQL, userID).Scan(
+		&a.ID, &a.Code, &a.Name, &owner, &merchant, &a.PriceMultiplier, &a.Status)
+	if err != nil {
+		return nil, fmt.Errorf("store: 按归属查询 account 失败: %w", err)
+	}
+	if owner.Valid && owner.Int64 > 0 {
+		v := uint64(owner.Int64)
+		a.OwnerUserID = &v
+	}
+	if merchant.Valid && merchant.Int64 > 0 {
+		v := uint64(merchant.Int64)
+		a.DefaultMerchantID = &v
+	}
+	return &a, nil
+}
+
 const setAccountStatusSQL = "UPDATE account SET status = ? WHERE id = ?"
 const setAccountMultiplierSQL = "UPDATE account SET price_multiplier = ? WHERE id = ?"
 const setAccountMerchantSQL = "UPDATE account SET default_merchant_id = ? WHERE id = ?"

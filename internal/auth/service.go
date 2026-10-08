@@ -168,6 +168,19 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 	})
 }
 
+// SessionUserID 解析页面会话令牌并返回登录主体 id；令牌无效、会话已撤销或过期
+// 一律返回 ErrUnauthorized。
+//
+// 供同属页面面的业务包按会话推导作用域：页面端点不接受账户 id 参数，归属只能
+// 来自令牌。它只回 id，不回身份细节——业务包不需要、也不该拿到会话全貌。
+func (s *Service) SessionUserID(ctx context.Context, accessToken string) (uint64, error) {
+	row, err := s.store.WebSessionByAccess(ctx, hashToken(accessToken))
+	if err != nil || !sessionUsable(row, s.opts.Now()) {
+		return 0, ErrUnauthorized
+	}
+	return row.User.ID, nil
+}
+
 // SessionByAccess 按访问令牌读当前身份；未登录、已撤销或已过期一律 ErrUnauthorized。
 func (s *Service) SessionByAccess(ctx context.Context, accessToken string) (*sessionUser, error) {
 	row, err := s.store.WebSessionByAccess(ctx, hashToken(accessToken))
