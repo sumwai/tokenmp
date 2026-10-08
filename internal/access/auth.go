@@ -10,9 +10,7 @@ package access
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -22,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/apikey"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/quota"
@@ -76,12 +75,11 @@ func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	return id, ok
 }
 
-// HashAPIKey 计算客户端密钥的存储键：SHA-256 的十六进制小写串。
+// HashAPIKey 计算客户端密钥的存储键，实现见 internal/apikey。
 //
 // 库中只存该哈希（uk_api_key_hash），明文不落库，因此鉴权路径只做哈希比对。
 func HashAPIKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
+	return apikey.Hash(key)
 }
 
 // bearerToken 从 Authorization 头里取出密钥，并报告格式是否合法。

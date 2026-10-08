@@ -77,3 +77,20 @@ func (f *fakeGatewayStore) WebIdentityByProvider(context.Context, string, string
 }
 
 func (f *fakeGatewayStore) WebInsertIdentity(context.Context, store.WebIdentity) error { return nil }
+
+// 以下四个方法补齐用户级端点的密钥自助管理依赖：装配测试不触达密钥业务路径，
+// 一律返回空结果，真实行为由 internal/user 的单测覆盖。
+
+func (f *fakeGatewayStore) InsertAPIKey(context.Context, store.APIKey) (uint64, error) {
+	return 1, nil
+}
+
+func (f *fakeGatewayStore) ListAPIKeysByAccount(context.Context, uint64, *bool, int, int) ([]store.APIKey, int, error) {
+	return nil, 0, nil
+}
+
+func (f *fakeGatewayStore) APIKeyByID(context.Context, uint64) (*store.APIKey, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeGatewayStore) SetAPIKeyEnabled(context.Context, uint64, bool) error { return nil }

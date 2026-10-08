@@ -8,12 +8,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/apikey"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/store"
 )
@@ -611,5 +613,116 @@ func TestWebInsertUserWithAccountIntegration(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("写入无主账户 %s 失败：%v", code, err)
 		}
+	}
+}
+
+// TestListAPIKeysByAccountIntegration 在真实 MySQL 上验证按账户分页与过滤：
+// WHERE / LIMIT / OFFSET 与 COUNT 的组合只在真实驱动下才能验证。
+func TestListAPIKeysByAccountIntegration(t *testing.T) {
+	dsn := os.Getenv(envTestDSN)
+	if dsn == "" {
+		t.Skipf("未设置 %s，跳过密钥分页验证", envTestDSN)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	s, err := store.Open(ctx, store.Config{DSN: dsn})
+	if err != nil {
+		t.Fatalf("打开数据库失败：%v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("关闭连接失败：%v", err)
+		}
+	})
+
+	dropKnownTables(ctx, t, s.DB())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cleanupCancel()
+		dropKnownTables(cleanupCtx, t, s.DB())
+	})
+
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+
+	accountID, err := s.InsertAccount(ctx, store.Account{
+		Code: "acc_keys", Name: "keys", PriceMultiplier: "1", Status: store.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("写入账户失败：%v", err)
+	}
+
+	// 三把密钥，最后一把握为停用。
+	for i, enabled := range []bool{true, true, false} {
+		plaintext := fmt.Sprintf("sk-test-%d", i)
+		id, insertErr := s.InsertAPIKey(ctx, store.APIKey{
+			AccountID: accountID,
+			Name:      fmt.Sprintf("k%d", i),
+			KeyHash:   apikey.Hash(plaintext),
+			KeyPrefix: apikey.Prefix(plaintext),
+		})
+		if insertErr != nil {
+			t.Fatalf("写入密钥 %d 失败：%v", i, insertErr)
+		}
+		if !enabled {
+			if err := s.SetAPIKeyEnabled(ctx, id, false); err != nil {
+				t.Fatalf("停用密钥 %d 失败：%v", i, err)
+			}
+		}
+	}
+
+	// 不带过滤：三条，按主键倒序。
+	keys, total, err := s.ListAPIKeysByAccount(ctx, accountID, nil, 10, 0)
+	if err != nil {
+		t.Fatalf("列出密钥失败：%v", err)
+	}
+	if total != 3 || len(keys) != 3 {
+		t.Fatalf("total=%d len=%d，期望 3/3", total, len(keys))
+	}
+	if keys[0].Name != "k2" {
+		t.Errorf("首行 = %q，期望主键倒序下的 k2", keys[0].Name)
+	}
+
+	// 过滤启用：两条。
+	on := true
+	keys, total, err = s.ListAPIKeysByAccount(ctx, accountID, &on, 10, 0)
+	if err != nil {
+		t.Fatalf("按启用状态列出失败：%v", err)
+	}
+	if total != 2 || len(keys) != 2 {
+		t.Errorf("启用过滤 total=%d len=%d，期望 2/2", total, len(keys))
+	}
+
+	// 分页：limit 1 offset 1 取第二新的那条，total 仍是不带分页的总数。
+	keys, total, err = s.ListAPIKeysByAccount(ctx, accountID, nil, 1, 1)
+	if err != nil {
+		t.Fatalf("分页查询失败：%v", err)
+	}
+	if len(keys) != 1 || keys[0].Name != "k1" || total != 3 {
+		t.Errorf("分页结果 = (%v, total %d)，期望 k1 与 3", keys, total)
+	}
+
+	// 单条读取：命中与不存在。
+	got, err := s.APIKeyByID(ctx, keys[0].ID)
+	if err != nil {
+		t.Fatalf("按 id 查询失败：%v", err)
+	}
+	if got.AccountID != accountID || got.KeyPrefix != apikey.Prefix("sk-test-1") {
+		t.Errorf("按 id 查询结果不符：%+v", got)
+	}
+	if _, err := s.APIKeyByID(ctx, 999999); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("不存在的密钥应回 sql.ErrNoRows，得到 %v", err)
+	}
+
+	// 别的账户看不到这个账户的密钥。
+	keys, total, err = s.ListAPIKeysByAccount(ctx, accountID+999, nil, 10, 0)
+	if err != nil {
+		t.Fatalf("跨账户查询失败：%v", err)
+	}
+	if total != 0 || len(keys) != 0 {
+		t.Errorf("跨账户查询 total=%d len=%d，期望 0/0", total, len(keys))
 	}
 }

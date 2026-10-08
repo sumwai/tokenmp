@@ -21,6 +21,8 @@ const (
 	PathPrefix = "/api/v1/user/"
 	// AccountPath 是账户概览的固定路径。
 	AccountPath = "/api/v1/user/account"
+	// KeysPath 是密钥集合的固定路径。
+	KeysPath = "/api/v1/user/keys"
 )
 
 // Sessions 解析页面会话令牌，由 internal/auth 的会话实现满足。
@@ -33,6 +35,14 @@ type Sessions interface {
 type Store interface {
 	// AccountByOwner 按登录主体查所属账户；无归属时返回 sql.ErrNoRows。
 	AccountByOwner(ctx context.Context, userID uint64) (*store.Account, error)
+	// InsertAPIKey 写入一条客户端密钥；只接受哈希与前缀，明文不落库。
+	InsertAPIKey(ctx context.Context, k store.APIKey) (uint64, error)
+	// ListAPIKeysByAccount 按账户分页列出密钥，返回当页行与满足条件的总数。
+	ListAPIKeysByAccount(ctx context.Context, accountID uint64, enabled *bool, limit, offset int) ([]store.APIKey, int, error)
+	// APIKeyByID 按主键查密钥；无匹配时返回 sql.ErrNoRows。
+	APIKeyByID(ctx context.Context, id uint64) (*store.APIKey, error)
+	// SetAPIKeyEnabled 置位密钥启用标志；吊销即置 false。
+	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
 }
 
 // SummaryReader 是账户摘要的读取入口，由 internal/me 的实现满足。

@@ -874,7 +874,11 @@ func listAPIKeys(ctx context.Context, q querier) ([]APIKey, error) {
 		return nil, fmt.Errorf("store: 查询 account_api_key 失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	return scanAPIKeys(rows)
+}
 
+// scanAPIKeys 归一密钥行的扫描；空集合返回 nil。
+func scanAPIKeys(rows rowIter) ([]APIKey, error) {
 	var keys []APIKey
 	for rows.Next() {
 		var (
@@ -908,6 +912,65 @@ func listAPIKeys(ctx context.Context, q querier) ([]APIKey, error) {
 // ListAPIKeys 列出全部客户端密钥，只含前缀不含哈希。
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	return listAPIKeys(ctx, dbQuerier{db: s.db})
+}
+
+// ListAPIKeysByAccount 按账户分页列出密钥，返回当页行与满足条件的总数。
+//
+// enabled 为 nil 表示不过滤。按主键倒序：新签发的密钥在前，与「最近创建」的
+// 直觉一致，也不依赖 created_at 的时区处理。
+func (s *Store) ListAPIKeysByAccount(ctx context.Context, accountID uint64, enabled *bool, limit, offset int) ([]APIKey, int, error) {
+	if accountID == 0 {
+		return nil, 0, errors.New("store: account_api_key.account_id 不能为 0")
+	}
+	where := " WHERE account_id = ?"
+	args := []any{accountID}
+	if enabled != nil {
+		where += " AND enabled = ?"
+		args = append(args, *enabled)
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM account_api_key"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("store: 统计 account_api_key 失败: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, account_id, merchant_id, name, key_prefix, enabled, expires_at, last_used_at FROM account_api_key"+
+			where+" ORDER BY id DESC LIMIT ? OFFSET ?",
+		append(append([]any{}, args...), limit, offset)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: 查询 account_api_key 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	keys, err := scanAPIKeys(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, total, nil
+}
+
+// APIKeyByID 按主键查密钥；无匹配时错误可用 errors.Is(err, sql.ErrNoRows) 判断。
+//
+// 用户级端点在吊销前用它校验归属：只凭 id 改状态会让任意账户改掉别人的密钥。
+func (s *Store) APIKeyByID(ctx context.Context, id uint64) (*APIKey, error) {
+	if id == 0 {
+		return nil, errors.New("store: account_api_key.id 不能为 0")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, account_id, merchant_id, name, key_prefix, enabled, expires_at, last_used_at
+FROM account_api_key WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 account_api_key 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	keys, err := scanAPIKeys(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &keys[0], nil
 }
 
 const setAPIKeyEnabledSQL = "UPDATE account_api_key SET enabled = ? WHERE id = ?"

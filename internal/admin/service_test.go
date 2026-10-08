@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"github.com/sumwai/tokenmp/internal/apikey"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/quota"
@@ -675,19 +676,16 @@ func TestIssueKeyHashesAndMasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("签发失败：%v", err)
 	}
-	if !strings.HasPrefix(issued.Plaintext, apiKeyPrefix) {
+	if !strings.HasPrefix(issued.Plaintext, "sk-") {
 		t.Errorf("明文前缀不符：%q", issued.Plaintext)
 	}
-	if len(issued.Plaintext) != len(apiKeyPrefix)+apiKeyRandomBytes*2 {
-		t.Errorf("明文长度 = %d，期望 %d", len(issued.Plaintext), len(apiKeyPrefix)+apiKeyRandomBytes*2)
-	}
-	if got.KeyHash != hashAPIKey(issued.Plaintext) || len(got.KeyHash) != 64 {
+	if got.KeyHash != apikey.Hash(issued.Plaintext) || len(got.KeyHash) != 64 {
 		t.Errorf("存储的哈希与明文不对应：%q", got.KeyHash)
 	}
-	if got.KeyPrefix != plaintextPrefix(issued.Plaintext) || got.KeyPrefix != issued.Plaintext[:visiblePrefixLen] {
+	if got.KeyPrefix != apikey.Prefix(issued.Plaintext) {
 		t.Errorf("前缀不符：%q", got.KeyPrefix)
 	}
-	if strings.Contains(got.KeyPrefix, strings.TrimPrefix(issued.Plaintext, apiKeyPrefix)) {
+	if strings.Contains(got.KeyPrefix, strings.TrimPrefix(issued.Plaintext, "sk-")) {
 		t.Errorf("前缀泄露了随机部分：%q", got.KeyPrefix)
 	}
 

@@ -27,9 +27,18 @@ var errInvalidRecent = errors.New("recent 必须是 0 到 100 之间的整数")
 
 // ServeHTTP 按路径分发到各动作；子树内未声明的路径回页面信封 404。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case AccountPath:
+	switch {
+	case r.URL.Path == AccountPath:
 		h.handleAccount(w, r)
+	case r.URL.Path == KeysPath:
+		h.handleKeys(w, r)
+	case strings.HasPrefix(r.URL.Path, KeysPath+"/"):
+		id, ok := parseRevokePath(r.URL.Path)
+		if !ok {
+			webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
+			return
+		}
+		h.handleRevokeKey(w, r, id)
 	default:
 		webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
 	}
