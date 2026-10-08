@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/domain"
 )
@@ -52,6 +56,8 @@ type passthroughSink struct {
 	failed bool
 	// renewed 记录上游是否声明本次凭据登录态已续期。
 	renewed bool
+	// mixedFrames 是「本帧混有非内容分片、中间件未介入」的限频留痕出口；nil 时不记录。
+	mixedFrames *mixedFrameLog
 }
 
 var (
@@ -171,10 +177,23 @@ func (s *passthroughSink) applyEvents(ctx context.Context, chunks []domain.Chunk
 // filter 逐分片询问中间件层；返回改写后的分片、是否发生改动、是否整帧丢弃。
 //
 // 只要帧里出现非内容分片就直接放弃介入（changed 与 drop 都为 false），
-// 由调用方按原始帧透传。
+// 由调用方按原始帧透传。帧里确实含内容分片时另留一条限频告警：那些内容这一帧没有经过
+// onEvent，而转发成功、计数不增长，表现与「没导出钩子」一样，只能靠日志看出来。
 func (s *passthroughSink) filter(ctx context.Context, chunks []domain.Chunk) (kept []domain.Chunk, changed, drop bool) {
+	content := false
+	for _, chunk := range chunks {
+		if isContentChunk(chunk.Kind) {
+			content = true
+			break
+		}
+	}
+	// 只承载用量或结束分片的帧：本来就没有内容要处置，不算缺口，也不留痕。
+	if !content {
+		return nil, false, false
+	}
 	for _, chunk := range chunks {
 		if !isContentChunk(chunk.Kind) {
+			s.noteMixedFrame(chunks)
 			return nil, false, false
 		}
 	}
@@ -223,6 +242,23 @@ func (s *passthroughSink) writeFiltered(chunks []domain.Chunk) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// noteMixedFrame 留痕「本帧的内容分片没有经过中间件」。
+//
+// 调用点只在「帧里确实含内容分片、同时又有非内容分片」时命中：整帧透传是有意的取舍，
+// 但取舍的代价必须能从日志里看见 —— 否则这一帧与「没导出钩子」在生产上无从区分。
+func (s *passthroughSink) noteMixedFrame(chunks []domain.Chunk) {
+	if s.mixedFrames == nil {
+		return
+	}
+	skipped := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		if !isContentChunk(chunk.Kind) {
+			skipped = append(skipped, string(chunk.Kind))
+		}
+	}
+	s.mixedFrames.warn(s.req, skipped)
 }
 
 // isContentChunk 报告分片是否是逐事件中间件可处置的内容分片。
@@ -422,4 +458,70 @@ func (s *rebuildSink) credentialRenewed() bool { return s.renewed }
 // clientWriteError 把面向客户端的写出失败包装为不可重试的平台内部错误。
 func clientWriteError(err error) error {
 	return domain.NewError(domain.CodeInternal, "写出客户端响应失败").WithCause(err)
+}
+
+// mixedFrameLogPerSecond 是「中间件未介入该帧」这条告警每秒放行的条数。
+//
+// 命中该形态的渠道每个请求都会撞上它：不限频时同一句话把日志刷满，完全静默又会让人以为
+// 插件在正常工作。
+const mixedFrameLogPerSecond = 5
+
+// mixedFrameLog 是「一帧混有非内容分片、中间件未介入该帧」的限频留痕出口。
+//
+// 配额按流水线实例共享：这是进程级的事实，一条流一个限频器等于没限。被压下的条数在
+// 下一条放出的记录里报出，与插件层同类日志同一口径。
+type mixedFrameLog struct {
+	logger *slog.Logger
+	mu     sync.Mutex
+	// window 是本秒窗口的起点；count 是窗口内已放行的条数。
+	window time.Time
+	count  int
+	// suppressed 是已被压下的条数，下一条放出的记录里报出后清零。
+	suppressed atomic.Int64
+}
+
+// newMixedFrameLog 构造留痕出口；logger 为 nil 时返回 nil，调用方按「不记录」处理。
+func newMixedFrameLog(logger *slog.Logger) *mixedFrameLog {
+	if logger == nil {
+		return nil
+	}
+	return &mixedFrameLog{logger: logger}
+}
+
+// warn 记一次「该帧未经中间件」；接收者为 nil（未注入日志）时空操作。
+func (l *mixedFrameLog) warn(req *domain.Request, skipped []string) {
+	if l == nil {
+		return
+	}
+	if !l.allow() {
+		l.suppressed.Add(1)
+		return
+	}
+	// 键名刻意不带模型：共享转发层不得出现 "model" 这类协议字段字面量
+	//（见 internal/arch_test.go 的协议字面量红线），模型按 request_id 从请求记录里取。
+	attrs := []any{
+		"request_id", req.RequestID,
+		"protocol", string(req.Protocol),
+		"skipped_kinds", skipped,
+	}
+	if suppressed := l.suppressed.Swap(0); suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	l.logger.Warn("同协议透传的一帧混有非内容分片，中间件未介入该帧", attrs...)
+}
+
+// allow 报告本秒窗口是否还在配额内。
+func (l *mixedFrameLog) allow() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if now.Sub(l.window) >= time.Second {
+		l.window = now
+		l.count = 0
+	}
+	if l.count >= mixedFrameLogPerSecond {
+		return false
+	}
+	l.count++
+	return true
 }
