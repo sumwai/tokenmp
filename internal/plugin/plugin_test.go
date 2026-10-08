@@ -240,6 +240,65 @@ export function onEvent(event) { event.text_delta = "changed"; return event; }`,
 	}
 }
 
+// TestToolCallIndexMustBeInteger 守护工具调用下标不静默归零。
+//
+// moejs 的 ToGo 对整数给 int64、对非整数给 float64。旧口径只认 int64，于是插件写 0.5
+// 会被静默当成 0 —— 并行工具调用因此串位，而这是最难从响应里看出来的一类错。
+// 现在的口径：整数值正常往返，非整数与非法类型按「钩子失败、原样放行」处理并留痕。
+func TestToolCallIndexMustBeInteger(t *testing.T) {
+	toolCallChunk := domain.Chunk{
+		Kind:     domain.ChunkToolCallDelta,
+		ToolCall: &domain.ToolCall{Index: 3, ID: "call_1", Name: "orig", Arguments: `{"a":`},
+	}
+
+	t.Run("整数值原样往返", func(t *testing.T) {
+		set, _ := loadOne(t, t.TempDir(), "roundtrip.mw.js", `
+export const events = ["tool_call_delta"];
+export function onEvent(event) { event.tool_call.name = "renamed"; return event; }
+`, Options{})
+		req := chatRequest(chatBody)
+		pluginCtx, release := set.BeginRequest(context.Background(), req)
+		defer release()
+
+		result := set.OnEvent(pluginCtx, req, toolCallChunk)
+		if result.Unchanged {
+			t.Fatalf("改写应当生效，实际 %+v", result)
+		}
+		call := result.Chunk.ToolCall
+		if call == nil || call.Index != 3 || call.ID != "call_1" {
+			t.Fatalf("改写后的工具调用 = %+v，期望下标 3、id call_1", call)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		index string
+	}{
+		{name: "非整数", index: "0.5"},
+		{name: "浮点越界", index: "1e30"},
+		{name: "非法类型", index: `"0"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			set, _ := loadOne(t, t.TempDir(), "bad-index.mw.js", `
+export const events = ["tool_call_delta"];
+export function onEvent(event) { event.tool_call.index = `+tc.index+`; return event; }
+`, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+			req := chatRequest(chatBody)
+			pluginCtx, release := set.BeginRequest(context.Background(), req)
+			defer release()
+
+			result := set.OnEvent(pluginCtx, req, toolCallChunk)
+			if !result.Unchanged || result.Chunk.ToolCall.Index == 0 {
+				t.Fatalf("非法下标应按失败处理并原样放行，实际 %+v", result.Chunk.ToolCall)
+			}
+			if logged := logs.String(); !strings.Contains(logged, "必须是整数") {
+				t.Fatalf("日志应说出原因，实际：%s", logged)
+			}
+		})
+	}
+}
+
 func TestOnResponseRewrite(t *testing.T) {
 	set, _ := loadOne(t, t.TempDir(), "response.mw.js",
 		`export function onResponse(body) { body.marker = "mw"; return body; }`, Options{})

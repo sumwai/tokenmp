@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,10 @@ func (m *Middleware) newBaseRuntime() (*moejs.Runtime, error) {
 }
 
 // release 让运行时放掉本次请求的数据与可能残留的中断，再还回池；池满时交给 GC。
+//
+// 这里清中断是第二道防线：withTimeout 已经闭合了「定时器窗口内留下残留中断」这条路径
+// （见它的注释），而池中的运行时还可能带着别处留下的中断。删掉这两行就会让下一次取用
+// 以「timeout」的名义失败，且现场没有任何超时 —— 因此它不是可有可无的清理。
 func (m *Middleware) release(runtime *moejs.Runtime, comp *compiled) {
 	runtime.ReleaseCallData()
 	runtime.ClearInterrupt()
@@ -113,18 +118,31 @@ func (m *Middleware) loadModule(runtime *moejs.Runtime, module *moejs.Module) er
 
 // withTimeout 在预算内执行 fn；到期时从另一 goroutine 中断运行时，fn 以中断错误返回。
 //
-// 无论 fn 是否正常返回都停表并清中断：定时器可能恰好在 fn 返回后触发，
-// 残留的中断会打断下一次调用。
+// 定时器回调与调用方共用一把锁，使窗口闭合：回调拿到锁时若 fn 已返回就什么都不做；
+// 调用方则一定在回调临界区之后才清中断。否则存在这样一段窗口 —— timer.Stop() 已返回
+// false、回调尚未执行，此刻清中断先跑，回调再把中断置上，运行时就带着残留中断回池，
+// 下一次取用以「timeout」的名义失败，而现场没有任何超时。
 func withTimeout(budget time.Duration, runtime *moejs.Runtime, fn func() error) error {
 	if budget <= 0 {
 		return fn()
 	}
-	timer := time.AfterFunc(budget, func() { runtime.Interrupt("timeout") })
-	defer func() {
-		timer.Stop()
-		runtime.ClearInterrupt()
-	}()
-	return fn()
+	var mu sync.Mutex
+	done := false
+	timer := time.AfterFunc(budget, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if done {
+			return
+		}
+		runtime.Interrupt("timeout")
+	})
+	err := fn()
+	mu.Lock()
+	done = true
+	mu.Unlock()
+	timer.Stop()
+	runtime.ClearInterrupt()
+	return err
 }
 
 // buildContext 构造传给钩子的 ctx 对象。
@@ -296,9 +314,9 @@ func (m *Middleware) callEvent(state *requestState, runtime *requestRuntime, req
 	if !ok {
 		return nil, false, fmt.Errorf("%s 返回值不是对象", hookOnEvent)
 	}
-	rewritten, ok := chunkFromMap(fields)
-	if !ok {
-		return nil, false, fmt.Errorf("%s 返回的分片缺少合法的 kind", hookOnEvent)
+	rewritten, err := chunkFromMap(fields)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s %w", hookOnEvent, err)
 	}
 	return &rewritten, false, nil
 }
@@ -342,9 +360,9 @@ func (m *Middleware) callStreamEnd(state *requestState, runtime *requestRuntime,
 		if !isObject {
 			return nil, fmt.Errorf("%s 的第 %d 项不是对象", hookOnStreamEnd, index)
 		}
-		chunk, isChunk := chunkFromMap(fields)
-		if !isChunk {
-			return nil, fmt.Errorf("%s 的第 %d 项缺少合法的 kind", hookOnStreamEnd, index)
+		chunk, chunkErr := chunkFromMap(fields)
+		if chunkErr != nil {
+			return nil, fmt.Errorf("%s 的第 %d 项：%w", hookOnStreamEnd, index, chunkErr)
 		}
 		chunks = append(chunks, chunk)
 	}
@@ -380,13 +398,19 @@ var contentKinds = map[string]bool{
 	string(domain.ChunkReasoningDelta): true,
 }
 
+// 分片形状非法时的原因。调用方补上钩子名与项下标后向上返回，由「钩子失败、按原样放行」路径处理。
+var (
+	errChunkKind  = errors.New("返回值不是合法的分片：kind 必须是 text_delta / tool_call_delta / reasoning_delta")
+	errChunkIndex = errors.New("tool_call.index 必须是整数")
+)
+
 // chunkFromMap 把插件返回的 Go map 还原成内部流式分片。
 //
 // 只接受内容分片类型：用量、结束原因与流结束不得经逐事件钩子改写。
-func chunkFromMap(fields map[string]any) (domain.Chunk, bool) {
+func chunkFromMap(fields map[string]any) (domain.Chunk, error) {
 	kind, ok := fields["kind"].(string)
 	if !ok || !contentKinds[kind] {
-		return domain.Chunk{}, false
+		return domain.Chunk{}, errChunkKind
 	}
 	chunk := domain.Chunk{Kind: domain.ChunkKind(kind)}
 	if value, ok := fields["model"].(string); ok {
@@ -396,22 +420,59 @@ func chunkFromMap(fields map[string]any) (domain.Chunk, bool) {
 		chunk.TextDelta = value
 	}
 	if raw, ok := fields["tool_call"].(map[string]any); ok {
-		call := &domain.ToolCall{}
-		if value, ok := raw["index"].(int64); ok {
-			call.Index = int(value)
-		}
-		if value, ok := raw["id"].(string); ok {
-			call.ID = value
-		}
-		if value, ok := raw["name"].(string); ok {
-			call.Name = value
-		}
-		if value, ok := raw["arguments"].(string); ok {
-			call.Arguments = value
+		call, callErr := toolCallFromMap(raw)
+		if callErr != nil {
+			return domain.Chunk{}, callErr
 		}
 		chunk.ToolCall = call
 	}
-	return chunk, true
+	return chunk, nil
+}
+
+// toolCallFromMap 把插件返回的 tool_call 对象还原成内部结构。
+//
+// 字段缺失按零值处理；`index` 存在则必须是整数（见 chunkIndex）。
+func toolCallFromMap(raw map[string]any) (*domain.ToolCall, error) {
+	call := &domain.ToolCall{}
+	if value, ok := raw["index"]; ok {
+		index, valid := chunkIndex(value)
+		if !valid {
+			return nil, errChunkIndex
+		}
+		call.Index = index
+	}
+	if value, ok := raw["id"].(string); ok {
+		call.ID = value
+	}
+	if value, ok := raw["name"].(string); ok {
+		call.Name = value
+	}
+	if value, ok := raw["arguments"].(string); ok {
+		call.Arguments = value
+	}
+	return call, nil
+}
+
+// chunkIndex 把插件给出的 index 转成整数。
+//
+// moejs 的 ToGo 对整数给 int64，对整值浮点（3.0）给 float64，两者都接受。
+// 非整数（0.5）与超出 int 范围的取值同属非法返回：静默归 0 会让并行工具调用串位，
+// 而这是最难从响应里看出来的一类错。
+func chunkIndex(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int64:
+		return int(value), true
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) {
+			return 0, false
+		}
+		if value > math.MaxInt || value < math.MinInt {
+			return 0, false
+		}
+		return int(value), true
+	default:
+		return 0, false
+	}
 }
 
 // isJSONObject 报告字节是否是 JSON 对象的最外层形态。
