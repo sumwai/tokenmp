@@ -229,3 +229,48 @@ func TestScopeDeclarationsSkipUnscopedMiddleware(t *testing.T) {
 		t.Fatalf("未声明作用域时不该有声明，实际 %v", declarations)
 	}
 }
+
+// TestScopeModelAxisFollowsRewrite 守护作用域判的是「此刻的请求」，而不是本次调用开始时的请求。
+//
+// 同一个请求、同一份 scope.models，在 onRequest 与其余钩子上必须得出同一结论：前置插件
+// 改写出的模型名对后续插件可见。事实只在循环外算一次会让 onRequest 按改写前的名字判定、
+// 其余钩子按改写后的名字判定 —— 同一份声明两个相反结果，而两边都不报错。
+func TestScopeModelAxisFollowsRewrite(t *testing.T) {
+	dir := t.TempDir()
+	set, err := Load([]string{
+		writeSource(t, dir, "renamer.mw.js",
+			`export function onRequest(body) { body.model = "renamed"; return body; }`),
+		writeSource(t, dir, "scoped.mw.js", `export const scope = { models: ["renamed"] };
+export const events = ["text_delta"];
+export function onRequest(body) { return undefined; }
+export function onEvent(event) { return undefined; }`),
+	}, Options{})
+	if err != nil {
+		t.Fatalf("加载失败：%v", err)
+	}
+
+	// 裸 BeginRequest：生产里 onRequest 跑在选路之前，ctx 上没有选路事实。
+	req := chatRequest(chatBody)
+	pluginCtx, release := set.BeginRequest(context.Background(), req)
+	defer release()
+	if err := set.OnRequest(pluginCtx, openaichat.New(), req); err != nil {
+		t.Fatalf("OnRequest 失败：%v", err)
+	}
+	if req.Model != "renamed" {
+		t.Fatalf("前置插件未改写模型名：%q", req.Model)
+	}
+	set.OnEvent(pluginCtx, req, domain.Chunk{Kind: domain.ChunkTextDelta, TextDelta: "x"})
+
+	stats := set.Stats()
+	if len(stats) != 2 {
+		t.Fatalf("中间件数 = %d，期望 2", len(stats))
+	}
+	if stats[0].Calls != 1 {
+		t.Fatalf("改写者调用数 = %d，期望 1", stats[0].Calls)
+	}
+	// 作用域声明的是改写后的名字，两个钩子都应当参与。
+	if stats[1].Calls != 2 {
+		t.Fatalf("作用域中间件调用数 = %d，期望 2（onRequest 与 onEvent 都应参与）：作用域在 onRequest 上按改写前的名字判定",
+			stats[1].Calls)
+	}
+}
