@@ -494,7 +494,9 @@ func sortedKeys(set map[string]bool) []string {
 // current 返回当前生效的编译产物；文件指纹变化时惰性重编译。
 //
 // 重编译失败时保留上一份产物并留痕：一次写坏的插件不该让正在服务的网关整体失效。
-// 三条可用性约束：
+// 四条可用性约束：
+//   - 锁外比对：指纹检查是每次取用一次 stat，留在锁内就是一条全局串行段。
+//     锁内只读「当前产物」与退避窗口两个字段（见 bench_test 的并行基准）。
 //   - 单飞：同一时刻只有一个 goroutine 编译，其余请求不排队，直接用当前产物；
 //     否则 N 个并发请求会各编译一遍，并在锁上互相排队。
 //   - 退避：失败后一个退避窗口内不再检查指纹、不再重试。写坏的文件会被一连串
@@ -504,11 +506,20 @@ func (m *Middleware) current() *compiled {
 	now := time.Now()
 	m.mu.Lock()
 	cur := m.cur
-	due := m.reloadDueLocked(now)
+	// 退避窗口内不查指纹：失败已经记过，再查一遍只会让每个请求都去 stat。
+	backoff := now.Before(m.reload.backoffUntil)
 	m.mu.Unlock()
 
-	if cur != nil && !due {
+	if cur != nil && backoff {
 		return cur
+	}
+	// 指纹比对在锁外做：产物只读，运行期依赖是 sync.Map，都不需要中间件的锁。
+	if cur != nil && !m.stale(cur) {
+		return cur
+	}
+	// 比对期间别的 goroutine 可能已经换代：那时不必再编译一次。
+	if latest := m.snapshot(); cur != nil && latest != cur {
+		return latest
 	}
 	// 需要重编译：只有抢到单飞闸的 goroutine 编译，其余不排队。
 	m.recompile()
@@ -544,19 +555,6 @@ func (m *Middleware) recompile() {
 	if reloaded && m.onReload != nil {
 		m.onReload()
 	}
-}
-
-// reloadDueLocked 报告是否该尝试重编译。调用方必须已持有 m.mu。
-//
-// 退避窗口内不做指纹检查：失败已经记过，再查一遍只会让每个请求都去 stat。
-func (m *Middleware) reloadDueLocked(now time.Time) bool {
-	if m.cur == nil {
-		return true
-	}
-	if now.Before(m.reload.backoffUntil) {
-		return false
-	}
-	return m.staleLocked()
 }
 
 // reloadFailureLocked 记一次重编译失败并开启退避窗口。调用方必须已持有 m.mu。
@@ -602,14 +600,15 @@ func (s *Set) OnReload(fn func()) {
 	}
 }
 
-// staleLocked 报告当前产物的任一依赖文件指纹是否已变化。
+// stale 报告给定产物的任一依赖文件指纹是否已变化。
 //
+// 在锁外调用：产物编译完成后只读，运行期依赖是 sync.Map，两者都不需要中间件的锁。
 // 静态导入来自产物快照，动态 import() 的文件来自运行期登记：两类都要看，
 // 否则改了插件按需加载的子模块不会触发换代，池里那批运行时一直用旧模块。
-func (m *Middleware) staleLocked() bool {
-	for _, dep := range m.cur.deps {
+func (m *Middleware) stale(comp *compiled) bool {
+	for _, dep := range comp.deps {
 		stamp, err := statFile(dep)
-		if err != nil || stamp != m.cur.stamps[dep] {
+		if err != nil || stamp != comp.stamps[dep] {
 			return true
 		}
 	}
@@ -716,7 +715,7 @@ func (m *Middleware) info() Info {
 	comp := m.cur
 	reload := m.reload
 	skipError := m.skipError
-	stale := comp != nil && m.staleLocked()
+	stale := comp != nil && m.stale(comp)
 	m.mu.Unlock()
 
 	info := Info{Name: m.name, Path: m.entry}

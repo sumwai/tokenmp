@@ -79,3 +79,31 @@ func BenchmarkAcquireManyFiles(b *testing.B) {
 	}
 	benchAcquire(b, set)
 }
+
+// BenchmarkAcquireParallel 记录多 goroutine 同时取用的开销。
+//
+// 上面两条都是顺序跑的，量不出「取用路径是否随核数扩展」，而这段成本每个请求都要付一次。
+// 它是这段成本的常驻基线：若把指纹比对移回锁内、或在取用路径上引入别的串行点，
+// ns/op 会随 -cpu 升高而劣化。跑法：-cpu 1,8 对比同一行。
+func BenchmarkAcquireParallel(b *testing.B) {
+	set, err := Load([]string{writeBenchPlugin(b, b.TempDir(), "parallel.mw.js",
+		`export function onRequest(body) { return undefined; }`)}, Options{})
+	if err != nil {
+		b.Fatalf("加载插件失败：%v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx := context.Background()
+		req := &domain.Request{
+			RequestID: "bench",
+			Protocol:  domain.ProtocolOpenAIChat,
+			Model:     "alias",
+			RawBody:   []byte(benchBody),
+		}
+		for pb.Next() {
+			_, release := set.BeginRequest(ctx, req)
+			release()
+		}
+	})
+}
