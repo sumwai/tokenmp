@@ -43,6 +43,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/transport"
 	"github.com/sumwai/tokenmp/internal/upstream"
 	"github.com/sumwai/tokenmp/internal/usage"
+	"github.com/sumwai/tokenmp/internal/user"
 )
 
 const (
@@ -97,6 +98,8 @@ type gatewayStore interface {
 	// Account 与 RecentUsage 供自助查询端点回账户编码与最近流水。
 	Account(ctx context.Context, id uint64) (*store.Account, error)
 	RecentUsage(ctx context.Context, accountID uint64, limit int) ([]store.UsageListRow, error)
+	// AccountByOwner 供用户级端点把会话推导为作用域。
+	AccountByOwner(ctx context.Context, userID uint64) (*store.Account, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
@@ -383,16 +386,25 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	}
 	// 自助查询共用数据面同一鉴权中间件：头格式、密钥失效与账户停用三类失败
 	// 与转发端点回同一种 401，不另写一套鉴权口径。
-	mux.Handle(me.AccountPath, auth.Middleware(me.NewHandler(me.New(st, opts.Now))))
+	meService := me.New(st, opts.Now)
+	mux.Handle(me.AccountPath, auth.Middleware(me.NewHandler(meService)))
 	// 页面认证挂在自己的子树：与数据面共用一个 mux，但走独立信封、独立错误码
 	// 与独立凭据，子树内未声明的路径也回页面信封 404 而不是数据面错误体。
-	mux.Handle(webauth.PathPrefix, webauth.NewHandler(webauth.New(st, webauth.Options{
+	webAuth := webauth.New(st, webauth.Options{
 		SignupDisabled: !opts.WebSignupEnabled,
 		TrustProxy:     opts.WebTrustProxy,
 		Logger:         opts.WebAuthLogger,
 		Mailer:         opts.WebMailer,
 		OAuthProviders: opts.WebOAuthProviders,
-	})))
+	})
+	mux.Handle(webauth.PathPrefix, webauth.NewHandler(webAuth))
+	// 用户级业务数据挂在页面会话之上：作用域由会话推导，账户摘要复用自助查询的
+	// 同一份实现，展示与判定不会各算一套。
+	mux.Handle(user.PathPrefix, user.NewHandler(user.Options{
+		Sessions: webAuth,
+		Store:    st,
+		Summary:  meService,
+	}))
 	mux.HandleFunc("/", notFoundJSON)
 
 	gw := &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector, plugins: middleware}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sumwai/tokenmp/internal/store"
+	"github.com/sumwai/tokenmp/internal/webapi"
 )
 
 // 本文件是页面认证的 HTTP 层：按路径分发、解码请求、把业务哨兵映射成信封。
@@ -378,17 +379,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// bearerToken 从 Authorization 头取令牌；方案名不区分大小写，令牌非空。
-//
-// 与 internal/access 的同名函数刻意各写一份：两套凭据的演化方向不同，
-// 共用一个解析器会让「哪边改了语义」变成跨包排查。
+// bearerToken 从 Authorization 头取令牌；解析实现与用户业务面共用。
 func bearerToken(header string) (string, bool) {
-	const prefix = "Bearer "
-	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
-		return "", false
-	}
-	token := strings.TrimSpace(header[len(prefix):])
-	return token, token != ""
+	return webapi.BearerToken(header)
 }
 
 // writeServiceErr 把业务哨兵映射为信封；未识别的错误按 500 处理并保留内部语义日志点。

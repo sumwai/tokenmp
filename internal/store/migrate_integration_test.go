@@ -582,6 +582,19 @@ func TestWebInsertUserWithAccountIntegration(t *testing.T) {
 		t.Errorf("未知角色不应留下账号，web_user 行数 = %d", got)
 	}
 
+	// 按归属查询：用户级端点用它把会话推导为作用域。
+	owned, err := s.AccountByOwner(ctx, userID)
+	if err != nil {
+		t.Fatalf("按归属查询账户失败：%v", err)
+	}
+	if owned.ID != accountID {
+		t.Errorf("按归属查到的账户 = %d，期望 %d", owned.ID, accountID)
+	}
+	// 无归属的登录主体查不到账户，端点据此回 403。
+	if _, err := s.AccountByOwner(ctx, userID+999); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("无归属应回 sql.ErrNoRows，得到 %v", err)
+	}
+
 	// 归属一对一：同一 owner 的第二个账户被唯一键拒绝。
 	owner := userID
 	if _, err := s.InsertAccount(ctx, store.Account{

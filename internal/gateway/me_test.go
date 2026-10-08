@@ -30,6 +30,11 @@ func (f *fakeGatewayStore) RecentUsage(_ context.Context, _ uint64, limit int) (
 	return nil, nil
 }
 
+// AccountByOwner 返回会话归属的账户，供用户级端点推导作用域。
+func (f *fakeGatewayStore) AccountByOwner(_ context.Context, userID uint64) (*store.Account, error) {
+	return &store.Account{ID: userID, Code: "acct"}, nil
+}
+
 // doGet 向网关发一次 GET，返回结果快照。
 func doGet(t *testing.T, url, authorization string) httpResult {
 	t.Helper()
