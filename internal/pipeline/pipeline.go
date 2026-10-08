@@ -723,6 +723,8 @@ func (p *Pipeline) recordUsage(ctx context.Context, req *domain.Request, route d
 		Model: domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel}),
 		// 请求模型用于查渠道倍率：upstream_model_map 以客户端模型名为主键。
 		RequestedModel: req.Model,
+		Protocol:       req.Protocol,
+		CrossProtocol:  route.Protocol != req.Protocol,
 		Usage:          usage,
 	})
 }

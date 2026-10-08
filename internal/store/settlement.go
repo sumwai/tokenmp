@@ -302,8 +302,8 @@ func (t *Tx) UpdateBucketRemaining(ctx context.Context, bucketID uint64, remaini
 }
 
 const insertSettledUsageSQL = "INSERT INTO billing_usage " +
-	"(merchant_id, account_id, channel_id, api_key_id, model, `usage`, pricing_id, pricing_snapshot, gross_amount, multiplier, settlement) " +
-	"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	"(merchant_id, account_id, channel_id, api_key_id, model, requested_model, protocol, cross_protocol, `usage`, pricing_id, pricing_snapshot, gross_amount, multiplier, settlement) " +
+	"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 // InsertUsage 写一条带结算字段的用量流水。
 //
@@ -318,7 +318,8 @@ func (t *Tx) InsertUsage(ctx context.Context, row settlement.Usage) (uint64, err
 		return 0, err
 	}
 	res, err := t.tx.ExecContext(ctx, insertSettledUsageSQL,
-		row.MerchantID, row.AccountID, row.ChannelID, row.APIKeyID, row.Model, payload,
+		row.MerchantID, row.AccountID, row.ChannelID, row.APIKeyID, row.Model,
+		nullableString(row.RequestedModel), nullableString(row.Protocol), row.CrossProtocol, payload,
 		row.PricingID, nullableJSON(row.PricingSnapshot), row.GrossAmount.String(),
 		row.Multiplier.String(), nullableJSON(row.Settlement))
 	return insertID(res, err, "billing_usage")

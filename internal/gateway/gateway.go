@@ -37,6 +37,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/plugin"
 	"github.com/sumwai/tokenmp/internal/quota"
 	"github.com/sumwai/tokenmp/internal/ratelimit"
+	"github.com/sumwai/tokenmp/internal/requestlog"
 	"github.com/sumwai/tokenmp/internal/route"
 	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
@@ -106,6 +107,14 @@ type gatewayStore interface {
 	ListAPIKeysByAccount(ctx context.Context, accountID uint64, enabled *bool, limit, offset int) ([]store.APIKey, int, error)
 	APIKeyByID(ctx context.Context, id uint64) (*store.APIKey, error)
 	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
+	// ListAccountUsage 与 ListAccountModels 供用户级端点的用量流水与模型目录使用。
+	ListAccountUsage(ctx context.Context, f store.AccountUsageFilter) ([]store.AccountUsageRow, int, error)
+	ListAccountModels(ctx context.Context, accountID uint64) ([]store.AccountModel, error)
+	// 请求记录相关方法供用户级端点的请求记录列表、详情与聚合使用。
+	ListRequestLogs(ctx context.Context, f store.RequestLogFilter) ([]store.RequestLogRow, int, error)
+	RequestLogByRequestID(ctx context.Context, accountID uint64, requestID string) (*store.RequestLogRow, error)
+	RequestAttempts(ctx context.Context, requestID string) ([]store.RequestAttempt, error)
+	RequestStats(ctx context.Context, q store.RequestStatsQuery) ([]store.RequestStatsItem, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
@@ -177,6 +186,8 @@ type Options struct {
 	UsageWriteTimeout time.Duration
 	// Logger 是结构化请求日志实现；nil 时不记录。
 	Logger transport.AccessLogger
+	// RequestLogLogger 记录请求记录落库失败；nil 时用默认 logger。
+	RequestLogLogger *slog.Logger
 	// Observer 记录每次上游尝试；nil 时不记录尝试级日志。
 	Observer domain.Observer
 	// PluginStateFile 是本机插件清单的位置（见 internal/plugin 的注册表）；
@@ -327,12 +338,37 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		probeInterval = defaultProbeInterval
 	}
 
+	// 请求记录：把尝试、用量与访问三条事实落成可回溯的记录（见 internal/requestlog）。
+	//
+	// 存储能力就地断言成一个小接口，不加进 gatewayStore：缺失时只是不落请求记录，
+	// 转发与计费照常，因此不把它变成装配期的硬依赖（与 pluginscope 同一取法）。
+	// 三条出口用 tee 与另两条观测出口配对，任一出口换成别的实现都不影响对方。
+	observer := opts.Observer
+	var usageRecorder domain.UsageRecorder = usage.NewRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil)
+	accessLogger := opts.Logger
+	if logStore, ok := st.(requestlog.Store); ok {
+		// 未配置 logger 时留空：requestlog 自带默认出口，且 logger 的取值方法在
+		// nil 接收者上会踩空，不能直接取 opts.RequestLogLogger.Warn。
+		var logf func(msg string, args ...any)
+		if opts.RequestLogLogger != nil {
+			logf = opts.RequestLogLogger.Warn
+		}
+		requestLog := requestlog.New(requestlog.Options{
+			Store: logStore,
+			Now:   opts.Now,
+			Logf:  logf,
+		})
+		observer = requestlog.ObserverTee{Primary: observer, Secondary: requestLog}
+		usageRecorder = requestlog.UsageTee{Primary: usageRecorder, Secondary: requestLog}
+		accessLogger = requestlog.AccessTee{Primary: accessLogger, Secondary: requestLog}
+	}
+
 	forwarder, err := pipeline.New(pipeline.Options{
 		Adapters:    lookupAdapter,
 		Upstream:    upstreamClient,
 		Routes:      storeRouteResolver{store: st, now: opts.Now, probeInterval: probeInterval},
-		Observer:    opts.Observer,
-		Usage:       usage.NewRecorder(st, settlement.New(st, slog.Warn), opts.UsageWriteTimeout, nil),
+		Observer:    observer,
+		Usage:       usageRecorder,
 		Credentials: rotation,
 		// 限流器按渠道 id 缓存：同一渠道的所有请求共享一个令牌桶与一个并发信号量。
 		Limiter: ratelimit.NewManager(ratelimit.Options{MaxWait: opts.RateLimitWait}),
@@ -362,7 +398,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		Forwarder:       forward,
 		Adapters:        resolveAdapter,
 		CompleteTimeout: completeTimeout,
-		Logger:          opts.Logger,
+		Logger:          accessLogger,
 	})
 	if err != nil {
 		return nil, err

@@ -23,7 +23,19 @@ const (
 	AccountPath = "/api/v1/user/account"
 	// KeysPath 是密钥集合的固定路径。
 	KeysPath = "/api/v1/user/keys"
+	// UsagePath 是用量流水的固定路径。
+	UsagePath = "/api/v1/user/usage"
+	// ModelsPath 是模型目录的固定路径。
+	ModelsPath = "/api/v1/user/models"
+	// RequestsPath 是请求记录集合的固定路径。
+	RequestsPath = "/api/v1/user/requests"
 )
+
+// itemsKey 是列表数据的字段名。
+//
+// 契约把每个列表端点的 data 声明为 {items: [...]}，取值写成一个常量，
+// 六个列表端点不会各自拼一个字面量后慢慢漂开。
+const itemsKey = "items"
 
 // Sessions 解析页面会话令牌，由 internal/auth 的会话实现满足。
 type Sessions interface {
@@ -43,6 +55,18 @@ type Store interface {
 	APIKeyByID(ctx context.Context, id uint64) (*store.APIKey, error)
 	// SetAPIKeyEnabled 置位密钥启用标志；吊销即置 false。
 	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
+	// ListAccountUsage 按账户分页列出用量流水，返回当页行与满足条件的总数。
+	ListAccountUsage(ctx context.Context, f store.AccountUsageFilter) ([]store.AccountUsageRow, int, error)
+	// ListAccountModels 列出账户可调用的模型及其协议方言。
+	ListAccountModels(ctx context.Context, accountID uint64) ([]store.AccountModel, error)
+	// ListRequestLogs 按账户分页列出请求记录，返回当页行与满足条件的总数。
+	ListRequestLogs(ctx context.Context, f store.RequestLogFilter) ([]store.RequestLogRow, int, error)
+	// RequestLogByRequestID 读一条属于某账户的请求记录；无匹配时返回 sql.ErrNoRows。
+	RequestLogByRequestID(ctx context.Context, accountID uint64, requestID string) (*store.RequestLogRow, error)
+	// RequestAttempts 按尝试序号读一条请求的全部尝试。
+	RequestAttempts(ctx context.Context, requestID string) ([]store.RequestAttempt, error)
+	// RequestStats 按维度聚合账户的请求计数。
+	RequestStats(ctx context.Context, q store.RequestStatsQuery) ([]store.RequestStatsItem, error)
 }
 
 // SummaryReader 是账户摘要的读取入口，由 internal/me 的实现满足。

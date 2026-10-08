@@ -150,6 +150,9 @@ func (s *Service) settle(ctx context.Context, tx Tx, in Input, asOf time.Time) e
 		ChannelID:       in.ChannelID,
 		APIKeyID:        in.APIKeyID,
 		Model:           in.Model,
+		RequestedModel:  in.RequestedModel,
+		Protocol:        in.Protocol,
+		CrossProtocol:   in.CrossProtocol,
 		Metrics:         in.Usage,
 		PricingID:       pricing.ID,
 		PricingSnapshot: snapshot,
@@ -178,13 +181,16 @@ func (s *Service) insertUnpriced(ctx context.Context, tx Tx, in Input) error {
 	s.logf("没有生效定价，按占位口径落流水",
 		"request_id", in.RequestID, "merchant_id", in.MerchantID, "model", in.Model)
 	_, err := tx.InsertUsage(ctx, Usage{
-		MerchantID: in.MerchantID,
-		AccountID:  in.AccountID,
-		ChannelID:  in.ChannelID,
-		APIKeyID:   in.APIKeyID,
-		Model:      in.Model,
-		Metrics:    in.Usage,
-		Multiplier: decimal.NewFromInt(1),
+		MerchantID:     in.MerchantID,
+		AccountID:      in.AccountID,
+		ChannelID:      in.ChannelID,
+		APIKeyID:       in.APIKeyID,
+		Model:          in.Model,
+		RequestedModel: in.RequestedModel,
+		Protocol:       in.Protocol,
+		CrossProtocol:  in.CrossProtocol,
+		Metrics:        in.Usage,
+		Multiplier:     decimal.NewFromInt(1),
 	})
 	return err
 }

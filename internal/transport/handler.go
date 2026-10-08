@@ -95,8 +95,11 @@ type AccessRecord struct {
 }
 
 // AccessLogger 写一条访问日志；实现由装配层注入，nil 表示不记录。
+//
+// 带上请求上下文：客户端的断开会反映在 ctx 上，落库的访问记录据此区分「客户端主动
+// 结束」与「网关返回了错误」两种终态，而这是响应体里看不出来的事实。
 type AccessLogger interface {
-	LogAccess(record AccessRecord)
+	LogAccess(ctx context.Context, record AccessRecord)
 }
 
 // AdapterResolver 按请求路径返回客户端适配器。装配层把路径到适配器的映射注入这里，
@@ -170,9 +173,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	rec := newResponseRecorder(w)
 	state := accessState{remoteAddr: r.RemoteAddr, userAgent: truncateUserAgent(r.UserAgent())}
-	defer func() {
-		h.observeRequest(rec, start, state)
-	}()
+	defer func(ctx context.Context) {
+		h.observeRequest(ctx, rec, start, state)
+	}(r.Context())
 
 	adapter, ok := h.adapters(r.URL.Path)
 	if !ok || adapter == nil {
@@ -268,11 +271,11 @@ type accessState struct {
 }
 
 // observeRequest 在请求结束时写一条访问日志；未注入记录器时跳过。
-func (h *Handler) observeRequest(rec *responseRecorder, start time.Time, state accessState) {
+func (h *Handler) observeRequest(ctx context.Context, rec *responseRecorder, start time.Time, state accessState) {
 	if h.logger == nil {
 		return
 	}
-	h.logger.LogAccess(AccessRecord{
+	h.logger.LogAccess(ctx, AccessRecord{
 		RequestID:      state.requestID,
 		Protocol:       state.protocol,
 		Model:          state.model,

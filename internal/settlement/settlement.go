@@ -105,6 +105,9 @@ type Usage struct {
 	ChannelID       uint64
 	APIKeyID        uint64
 	Model           string
+	RequestedModel  string
+	Protocol        string
+	CrossProtocol   bool
 	Metrics         map[billing.Metric]int
 	PricingID       uint64
 	PricingSnapshot []byte
@@ -125,6 +128,8 @@ type Input struct {
 	APIKeyID       uint64
 	Model          string
 	RequestedModel string
+	Protocol       string
+	CrossProtocol  bool
 	Usage          map[billing.Metric]int
 	// AsOf 是定价与规则的判定时刻；零值取结算器时钟。
 	AsOf time.Time

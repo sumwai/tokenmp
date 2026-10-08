@@ -237,6 +237,63 @@ func TestAPIKeyMigrationShape(t *testing.T) {
 	}
 }
 
+func TestBillingUsageRequestInfoMigrationShape(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0008_billing_usage_request_info.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	script := strings.Join(statements, "\n")
+
+	if len(statements) != 12 {
+		t.Errorf("0008 应拆成 12 条语句（3 列各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
+			len(statements), statements)
+	}
+	for _, want := range []string{
+		"ALTER TABLE billing_usage ADD COLUMN requested_model",
+		"ALTER TABLE billing_usage ADD COLUMN protocol",
+		"ALTER TABLE billing_usage ADD COLUMN cross_protocol",
+		"information_schema.COLUMNS",
+		"PREPARE",
+		"EXECUTE",
+		"DEALLOCATE PREPARE",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("0008 缺少可重跑所需的 %q", want)
+		}
+	}
+}
+
+// TestRequestLogMigrationShape 断言 0009 建立三张表与各自的关键索引：
+// 请求记录主表按请求标识唯一，尝试表按 (请求, 序号) 唯一，计数表按四维组合唯一。
+func TestRequestLogMigrationShape(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0009_request_log.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	if len(statements) != 3 {
+		t.Errorf("0009 应拆成 3 条语句（请求记录 / 尝试 / 计数缓存各一条建表），得到 %d：%#v",
+			len(statements), statements)
+	}
+	script := strings.Join(statements, "\n")
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS request_log",
+		"CREATE TABLE IF NOT EXISTS request_attempt",
+		"CREATE TABLE IF NOT EXISTS request_stats_daily",
+		"UNIQUE KEY uk_request_log_request (request_id)",
+		"UNIQUE KEY uk_request_attempt (request_id, attempt)",
+		"UNIQUE KEY uk_request_stats_daily (account_id, `day`, model, api_key_id, status)",
+		"payload_available",
+		"request_shape",
+		"error_response_shape",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("0009 缺少 %q", want)
+		}
+	}
+}
+
 func TestParseMigrationName(t *testing.T) {
 	tests := []struct {
 		name        string

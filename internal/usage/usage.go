@@ -110,6 +110,8 @@ func (r *Recorder) RecordUsage(ctx context.Context, rec domain.UsageRecord) erro
 			APIKeyID:       id.APIKeyID,
 			Model:          rec.Model,
 			RequestedModel: rec.RequestedModel,
+			Protocol:       string(rec.Protocol),
+			CrossProtocol:  rec.CrossProtocol,
 			Usage:          metrics,
 		})
 		if err == nil {
@@ -119,12 +121,15 @@ func (r *Recorder) RecordUsage(ctx context.Context, rec domain.UsageRecord) erro
 	}
 
 	if _, err := r.store.InsertUsage(writeCtx, store.UsageRow{
-		MerchantID: id.MerchantID,
-		AccountID:  id.AccountID,
-		ChannelID:  rec.ChannelID,
-		APIKeyID:   id.APIKeyID,
-		Model:      rec.Model,
-		Usage:      metrics,
+		MerchantID:     id.MerchantID,
+		AccountID:      id.AccountID,
+		ChannelID:      rec.ChannelID,
+		APIKeyID:       id.APIKeyID,
+		Model:          rec.Model,
+		RequestedModel: rec.RequestedModel,
+		Protocol:       string(rec.Protocol),
+		CrossProtocol:  rec.CrossProtocol,
+		Usage:          metrics,
 	}); err != nil {
 		r.logf("写入 billing_usage 失败", "request_id", rec.RequestID, "error", err)
 		return err

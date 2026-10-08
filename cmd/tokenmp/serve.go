@@ -67,6 +67,7 @@ func cmdServe(stderr io.Writer) int {
 		BreakerLogger:               observability.NewJSONLogger(os.Stdout),
 		ProbeLogger:                 observability.NewJSONLogger(os.Stdout),
 		Logger:                      observability.NewAccessLogger(os.Stdout),
+		RequestLogLogger:            observability.NewJSONLogger(os.Stdout),
 		Observer:                    observability.NewAttemptObserver(observability.NewJSONLogger(os.Stdout)),
 		PluginStateFile:             cfg.PluginStateFile,
 		PluginLogger:                observability.NewJSONLogger(os.Stdout),

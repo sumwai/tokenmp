@@ -7,6 +7,7 @@
 package observability
 
 import (
+	"context"
 	"io"
 	"log/slog"
 
@@ -35,7 +36,9 @@ func NewAccessLogger(w io.Writer) *accessLogger {
 
 // LogAccess 写一条请求日志。字段取访问记录里与协议无关的那些，
 // 不拼接请求头或请求体，避免凭据从这条路径泄露。
-func (l *accessLogger) LogAccess(record transport.AccessRecord) {
+//
+// 上下文不进日志：取消信号只对落库的请求记录有意义，日志出口不区分终态。
+func (l *accessLogger) LogAccess(_ context.Context, record transport.AccessRecord) {
 	if l == nil || l.logger == nil {
 		return
 	}
