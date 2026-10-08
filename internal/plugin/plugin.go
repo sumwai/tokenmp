@@ -922,6 +922,10 @@ func (s *Set) OnRequest(ctx context.Context, client domain.Adapter, req *domain.
 //
 // 协议、请求 id 与流式形态取自端点事实，不因请求体改写而变；模型名在改写后的
 // 请求体未给出时保留原值（路径携带模型名的协议即属这种情形）。
+//
+// 入口层事实（客户端请求头）必须显式搬过来：DecodeRequest 只拿到字节，Headers 全仓库
+// 只有 transport 入口那一处赋值，整体替换会把它连根拔掉。RawBody 则相反 —— 解码产物里
+// 的它是**改写后的字节**，而同协议透传路径的上游报文正是由它生成的，不能换回原件。
 func applyRequestRewrite(client domain.Adapter, req *domain.Request, body []byte) error {
 	decoded, err := client.DecodeRequest(body)
 	if err != nil {
@@ -936,6 +940,10 @@ func applyRequestRewrite(client domain.Adapter, req *domain.Request, body []byte
 	decoded.RequestID = req.RequestID
 	decoded.Protocol = req.Protocol
 	decoded.Stream = req.Stream
+	// 客户端请求头的唯一入口是 transport 层，解码路径不产出它；不搬过来就等于让
+	// 改写顺带关掉「客户端取值覆盖渠道静态头」（route.WithClientHeaderOverrides）——
+	// 不报错、不计数、日志里也没有痕迹。
+	decoded.Headers = req.Headers
 	*req = *decoded
 	return nil
 }

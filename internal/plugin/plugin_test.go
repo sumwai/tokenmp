@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -473,5 +474,36 @@ func TestTopLevelConsoleLoads(t *testing.T) {
 	}
 	if got := rawField(t, req, "loaded"); got != "yes" {
 		t.Fatalf("插件未生效，得到 %q", got)
+	}
+}
+
+// TestRequestRewriteKeepsEntryLayerFields 守护改写不吞掉入口层事实。
+//
+// 客户端请求头的唯一入口是 transport 层，解码路径不产出它（Headers 是 json:"-"）。
+// 改写成功走的是一次整体替换，漏搬一个字段就会让「客户端取值覆盖渠道静态头」
+// （route.WithClientHeaderOverrides）静默失效：不报错、不计数、日志里也没有痕迹。
+//
+// RawBody 的要求相反：它必须变成改写后的字节 —— 同协议透传路径的上游报文正是由它生成的，
+// 保留原件等于让改写被丢弃。
+func TestRequestRewriteKeepsEntryLayerFields(t *testing.T) {
+	set, _ := loadOne(t, t.TempDir(), "keep-entry.mw.js",
+		`export function onRequest(body) { body.model = "rewritten"; return body; }`, Options{})
+	req := chatRequest(chatBody)
+	req.Headers = http.Header{"X-Trace": {"abc"}}
+
+	if err := runRequest(t, set, context.Background(), req); err != nil {
+		t.Fatalf("改写应当成功：%v", err)
+	}
+	if got := req.Headers.Get("X-Trace"); got != "abc" {
+		t.Fatalf("改写后客户端请求头 = %q，期望 abc：整体替换把 Headers 吞掉了", got)
+	}
+	if got := rawField(t, req, "model"); got != "rewritten" {
+		t.Fatalf("改写后模型名 = %q，期望 rewritten", got)
+	}
+	if string(req.RawBody) == chatBody {
+		t.Fatal("RawBody 应等于改写后的字节：同协议透传的上游报文由它生成")
+	}
+	if got := rawField(t, req, "model"); got != "rewritten" {
+		t.Fatalf("RawBody 里的模型名 = %q，期望 rewritten", got)
 	}
 }
