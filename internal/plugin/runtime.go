@@ -130,15 +130,17 @@ func withTimeout(budget time.Duration, runtime *moejs.Runtime, fn func() error) 
 // buildContext 构造传给钩子的 ctx 对象。
 //
 // 字段固定为协议、模型、路径、插件配置、单请求共享状态与（可知时的）调用方归属；
-// reject 是宿主函数，插件经它表达拒绝。
-func (m *Middleware) buildContext(state *requestState, runtime *requestRuntime, req *domain.Request) (moejs.Value, error) {
+// allowReject 为真时才注入 reject —— 见 rejectFunc。
+func (m *Middleware) buildContext(state *requestState, runtime *requestRuntime, req *domain.Request, allowReject bool) (moejs.Value, error) {
 	ctxValue := map[string]any{
 		"protocol": string(req.Protocol),
 		"model":    req.Model,
 		"path":     state.path,
 		"options":  runtime.comp.options,
 		"state":    runtime.state,
-		"reject":   m.rejectFunc(runtime),
+	}
+	if allowReject {
+		ctxValue["reject"] = m.rejectFunc(runtime)
 	}
 	if state.agent != nil {
 		ctxValue["agent"] = state.agent.toMap()
@@ -147,6 +149,10 @@ func (m *Middleware) buildContext(state *requestState, runtime *requestRuntime, 
 }
 
 // rejectFunc 构造插件的 ctx.reject(status, message) 宿主函数。
+//
+// 只注入到 onRequest 的 ctx 上。其余三个钩子跑在流水线内部，响应可能已经开始写出，
+// 用状态码终止请求已不可能；注入了却没人读，插件作者会以为拒绝生效，而实际既没有
+// 状态码也没有日志。因此那里的 ctx.reject 是 undefined，误用会当场抛错并留下记录。
 func (m *Middleware) rejectFunc(runtime *requestRuntime) moejs.NativeFunc {
 	return moejs.NativeFunc(func(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 		status := 0
@@ -173,7 +179,8 @@ func (m *Middleware) callRequest(state *requestState, runtime *requestRuntime, r
 	if err != nil {
 		return nil, fmt.Errorf("请求体无法解析为 JSON：%w", err)
 	}
-	ctxValue, err := m.buildContext(state, runtime, req)
+	// 只有请求改写可以拒绝：这是唯一一个「响应尚未开始写出、还能改用状态码终止」的钩子。
+	ctxValue, err := m.buildContext(state, runtime, req, true)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +202,7 @@ func (m *Middleware) callResponse(state *requestState, runtime *requestRuntime, 
 	if err != nil {
 		return nil, fmt.Errorf("响应体无法解析为 JSON：%w", err)
 	}
-	ctxValue, err := m.buildContext(state, runtime, req)
+	ctxValue, err := m.buildContext(state, runtime, req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +266,7 @@ func (m *Middleware) callEvent(state *requestState, runtime *requestRuntime, req
 	if err != nil {
 		return nil, false, err
 	}
-	ctxValue, err := m.buildContext(state, runtime, req)
+	ctxValue, err := m.buildContext(state, runtime, req, false)
 	if err != nil {
 		return nil, false, err
 	}
@@ -302,7 +309,7 @@ func (m *Middleware) callEvent(state *requestState, runtime *requestRuntime, req
 // kind 非法都按失败处理，由调用方跳过该中间件（不补发，也不向客户端报错）。
 // 超时预算与逐事件钩子相同：它同样处在流式热路径上，只是每请求只跑一次。
 func (m *Middleware) callStreamEnd(state *requestState, runtime *requestRuntime, req *domain.Request) ([]domain.Chunk, error) {
-	ctxValue, err := m.buildContext(state, runtime, req)
+	ctxValue, err := m.buildContext(state, runtime, req, false)
 	if err != nil {
 		return nil, err
 	}

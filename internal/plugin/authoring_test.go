@@ -236,3 +236,52 @@ func TestHookFailureLogsAreRateLimited(t *testing.T) {
 		t.Fatalf("限频后应报出被压掉的条数，实际：%s", logs.String())
 	}
 }
+
+// TestRejectIsOnlyAvailableInOnRequest 守护「拒绝」只在请求改写上可用。
+//
+// reject 只注入 onRequest 的 ctx：其余三个钩子跑在流水线内部，响应可能已经开始写出，
+// 用状态码终止请求已不可能。此前它在四个钩子上都注入、却只有 onRequest 读结果，
+// 于是在 onEvent / onResponse 里调用既没有状态码也没有日志 —— 作者会以为拒绝生效了。
+// 现在的口径是「不在那里注入」：误用当场抛错，走「钩子失败、原样放行」并留下结构化日志。
+func TestRejectIsOnlyAvailableInOnRequest(t *testing.T) {
+	var logs bytes.Buffer
+	set, _ := loadOne(t, t.TempDir(), "reject-late.mw.js", `
+export const events = ["text_delta"];
+export function onEvent(event, ctx) { ctx.reject(429, "nope"); return event; }
+export function onResponse(body, ctx) { ctx.reject(429, "nope"); return body; }
+`, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	req := chatRequest(chatBody)
+	pluginCtx, release := scopeCtx(t, set, req, "minimax")
+	defer release()
+
+	const original = `{"ok":true}`
+	if got := string(set.OnResponse(pluginCtx, req, []byte(original))); got != original {
+		t.Fatalf("响应体不得被替换，实际 %q", got)
+	}
+	set.OnEvent(pluginCtx, req, domain.Chunk{Kind: domain.ChunkTextDelta, TextDelta: "x"})
+
+	// 两个钩子各失败一次：误用不再静默，也只是让这一次钩子作废，转发照常。
+	if failures := set.Stats()[0].Failures; failures != 2 {
+		t.Fatalf("失败数 = %d，期望 2（两个钩子里的 ctx.reject 都应报错）", failures)
+	}
+	if logged := logs.String(); !strings.Contains(logged, "中间件钩子失败") {
+		t.Fatalf("误用应留下结构化日志，实际：%s", logged)
+	}
+}
+
+// TestRejectStillWorksInOnRequest 守护上一条没有削弱请求改写上的拒绝。
+func TestRejectStillWorksInOnRequest(t *testing.T) {
+	set, _ := loadOne(t, t.TempDir(), "reject-early.mw.js",
+		`export function onRequest(body, ctx) { ctx.reject(429, "quota"); return body; }`, Options{})
+	req := chatRequest(chatBody)
+	pluginCtx, release := scopeCtx(t, set, req, "minimax")
+	defer release()
+
+	err := set.OnRequest(pluginCtx, openaichat.New(), req)
+	if err == nil {
+		t.Fatal("onRequest 里的 ctx.reject 应当终止请求")
+	}
+	if !strings.Contains(err.Error(), "quota") {
+		t.Fatalf("拒绝原因应出现在错误里，实际：%v", err)
+	}
+}
