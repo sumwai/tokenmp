@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.0](https://github.com/sumwai/tokenmp/compare/v0.1.9...v0.2.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **plugin:** TOKENMP_PLUGIN_FILES 被移除。迁移方式：用 `tokenmp admin plugin add <路径>` 逐个注册（默认启用），原变量的顺序即注册顺序； 清单文件位置用 TOKENMP_PLUGIN_STATE_FILE 指定。
+
+### Features
+
+* **plugin:** 插件改由本机清单与 admin plugin 命令管理 ([#111](https://github.com/sumwai/tokenmp/issues/111)) ([5754895](https://github.com/sumwai/tokenmp/commit/575489554f10c42894a8698c523a9861213a1f15))
+* **plugin:** 清单改动运行期生效，装不上的插件只跳过自己 ([#113](https://github.com/sumwai/tokenmp/issues/113)) ([a0cfe8a](https://github.com/sumwai/tokenmp/commit/a0cfe8ac63631982f1348cffbe0c164eae2ac528))
+* **plugin:** 离线校验命令与可运行示例，补全流式事件对象字段表 ([#107](https://github.com/sumwai/tokenmp/issues/107)) ([f8cd130](https://github.com/sumwai/tokenmp/commit/f8cd13019c3c7752bd988ada7065f30d3ea7e946))
+* 注册事务内开户，角色取值增加 partner ([#108](https://github.com/sumwai/tokenmp/issues/108)) ([f37a816](https://github.com/sumwai/tokenmp/commit/f37a8160c729b2d2738e37bc201b43f5faafce11))
+* 用户侧端点契约与商家概念的收敛 ([#112](https://github.com/sumwai/tokenmp/issues/112)) ([617b3a5](https://github.com/sumwai/tokenmp/commit/617b3a58ecea7ad6a128c05829beb1d381bea614))
+* 页面账号体系——注册登录、密码生命周期与第三方登录 ([#99](https://github.com/sumwai/tokenmp/issues/99)) ([4c3192e](https://github.com/sumwai/tokenmp/commit/4c3192e84f6d7d61040fc02edc69e19b935b9882))
+
+
+### Bug Fixes
+
+* **plugin:** SIGHUP 强制重载中间件，换代后重跑作用域漂移检查 ([#106](https://github.com/sumwai/tokenmp/issues/106)) ([65e1bac](https://github.com/sumwai/tokenmp/commit/65e1bac9b4722445ba3d618f72d3ab319d94ab6b))
+* **plugin:** 失败日志补 JS 栈与请求标识，装配期拦下非函数钩子 ([#100](https://github.com/sumwai/tokenmp/issues/100)) ([d65f5db](https://github.com/sumwai/tokenmp/commit/d65f5dbaeb76ec8c212d88230ff459c4db821868))
+* **plugin:** 热重载单飞与退避，状态读取不再触发重编译 ([#103](https://github.com/sumwai/tokenmp/issues/103)) ([36b272d](https://github.com/sumwai/tokenmp/commit/36b272d3a8ec8475a4c4cfcd73f7cce12048f913))
+* **plugin:** 热重载覆盖运行期依赖，补齐强制重载与不可用计数 ([#105](https://github.com/sumwai/tokenmp/issues/105)) ([ed09dfd](https://github.com/sumwai/tokenmp/commit/ed09dfd4dab2bd4209abb78915c4a1d871add1c5))
+
+
+### Documentation
+
+* **plugin:** 写明混合帧边界，纠正 stale 的可读范围，补取用开销基准 ([#110](https://github.com/sumwai/tokenmp/issues/110)) ([39db7d5](https://github.com/sumwai/tokenmp/commit/39db7d51973cb2195d2f427d4b998fae44912062))
+
 ## [0.1.9](https://github.com/sumwai/tokenmp/compare/v0.1.8...v0.1.9) (2026-10-07)
 
 
