@@ -385,6 +385,8 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		// 空的判断在 Live 里是一次原子读。
 		Stream:   middleware,
 		Response: middleware,
+		// 中间件未介入某个透传帧是插件层的缺口，日志与插件层同一路：运维看一处。
+		MiddlewareLogger: opts.PluginLogger,
 	})
 	if err != nil {
 		return nil, err

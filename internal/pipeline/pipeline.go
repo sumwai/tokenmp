@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -81,6 +82,9 @@ type Options struct {
 	Stream domain.StreamMiddleware
 	// Response 在非流式响应体写回客户端之前介入；可为 nil（不介入）。
 	Response domain.ResponseMiddleware
+	// MiddlewareLogger 记录透传路径上中间件层的缺口（当前只有「一帧混有非内容分片、
+	// 中间件层因此未介入该帧」一条）；可为 nil（不记录）。
+	MiddlewareLogger *slog.Logger
 }
 
 // Pipeline 是唯一的核心转发流水线。
@@ -97,6 +101,8 @@ type Pipeline struct {
 	backoff     backoff
 	stream      domain.StreamMiddleware
 	response    domain.ResponseMiddleware
+	// middlewareLog 是透传路径上「中间件未介入该帧」的限频留痕出口；未注入日志时为 nil。
+	middlewareLog *mixedFrameLog
 }
 
 // attemptBudget 是一次请求的按段尝试预算。
@@ -198,6 +204,8 @@ func New(opts Options) (*Pipeline, error) {
 		backoff:  newBackoff(opts.Backoff),
 		stream:   opts.Stream,
 		response: opts.Response,
+		// 留痕出口按流水线实例共享：配额是进程级的，一条流一个限频器等于没限。
+		middlewareLog: newMixedFrameLog(opts.MiddlewareLogger),
 	}, nil
 }
 
@@ -344,6 +352,7 @@ func (p *Pipeline) newSink(req *domain.Request, route domain.Route, out io.Write
 			events:              p.stream,
 			req:                 req,
 			client:              streamClient,
+			mixedFrames:         p.middlewareLog,
 		}, nil
 	}
 	model := domain.UpstreamModelName(req.Model, domain.RewriteOptions{UpstreamModel: route.UpstreamModel})

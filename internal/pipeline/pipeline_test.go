@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -136,6 +138,45 @@ func crossProtocolRouteWithID(id uint64) domain.Route {
 	route := chatRouteWithID(id)
 	route.Protocol = domain.ProtocolAnthropicMessages
 	return route
+}
+
+// TestNewSinkCarriesMiddlewareLogger 守护中间件留痕出口注入到透传下沉目标。
+//
+// 检测点只在流水线（混帧那里的中间件未介入只在透传下沉目标内可见），注入链断在装配处
+// 整条就失效；未注入时不留痕，透传行为与既有实现逐字节相同。
+func TestNewSinkCarriesMiddlewareLogger(t *testing.T) {
+	newPipeline := func(opts Options) *Pipeline {
+		t.Helper()
+		opts.Adapters = chatAdapterLookup(openaichat.New())
+		opts.Upstream = fakeCaller{}
+		opts.Routes = fakeRouteResolver{}
+		pipeline, err := New(opts)
+		if err != nil {
+			t.Fatalf("构造流水线失败：%v", err)
+		}
+		return pipeline
+	}
+	passthroughOf := func(p *Pipeline) *passthroughSink {
+		t.Helper()
+		sink, err := p.newSink(newChatRequest(true), chatRoute(), io.Discard, openaichat.New())
+		if err != nil {
+			t.Fatalf("构造下沉目标失败：%v", err)
+		}
+		passthrough, ok := sink.(*passthroughSink)
+		if !ok {
+			t.Fatalf("同协议候选应走透传下沉目标，实际 %T", sink)
+		}
+		return passthrough
+	}
+
+	if sink := passthroughOf(newPipeline(Options{
+		MiddlewareLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})); sink.mixedFrames == nil {
+		t.Fatal("注入中间件日志后，透传下沉目标应带留痕出口")
+	}
+	if sink := passthroughOf(newPipeline(Options{})); sink.mixedFrames != nil {
+		t.Fatal("未注入中间件日志时不应带留痕出口")
+	}
 }
 
 // TestForwardRecordsUsageBeforeClientWrite 断言非流式路径「先落 billing_usage、再回写客户端」。

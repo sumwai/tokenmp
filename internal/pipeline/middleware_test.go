@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/domain"
@@ -126,6 +128,107 @@ func TestPassthroughSinkSkipsMixedFrame(t *testing.T) {
 	}
 	if events.calls != 0 {
 		t.Fatalf("混有非内容分片时不应调用中间件，实际调用 %d 次", events.calls)
+	}
+}
+
+// TestPassthroughSinkWarnsWhenMixedFrameSkipsContent 守护混帧时留一条可见告警。
+//
+// 整帧透传是有意的取舍，但代价原先完全静默：转发成功、计数不增长，与「没导出钩子」无从
+// 区分。告警至少要指出请求、协议与被跳过的分片类型。
+func TestPassthroughSinkWarnsWhenMixedFrameSkipsContent(t *testing.T) {
+	var out, logs bytes.Buffer
+	events := &fakeStreamMiddleware{drop: map[string]bool{string(domain.ChunkTextDelta): true}}
+	sink := &passthroughSink{
+		out:    &out,
+		events: events,
+		req: &domain.Request{
+			RequestID: "req-9",
+			Protocol:  domain.ProtocolOpenAIChat,
+		},
+		client:      openaichat.New(),
+		mixedFrames: newMixedFrameLog(slog.New(slog.NewTextHandler(&logs, nil))),
+	}
+	raw := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n")
+	chunks := []domain.Chunk{
+		{Kind: domain.ChunkTextDelta, TextDelta: "hi"},
+		{Kind: domain.ChunkFinish},
+	}
+	if err := sink.SendFrame(context.Background(), raw, chunks); err != nil {
+		t.Fatalf("SendFrame 失败：%v", err)
+	}
+	if !bytes.Equal(out.Bytes(), raw) {
+		t.Fatalf("混帧仍应整帧原样透传：\n实际 %q\n期望 %q", out.String(), string(raw))
+	}
+	if events.calls != 0 {
+		t.Fatalf("混帧不应调用中间件，实际调用 %d 次", events.calls)
+	}
+	line := logs.String()
+	for _, want := range []string{"中间件未介入该帧", "req-9", string(domain.ProtocolOpenAIChat), string(domain.ChunkFinish)} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("告警缺少 %q：%q", want, line)
+		}
+	}
+}
+
+// TestPassthroughSinkDoesNotWarnWithoutContentChunks 守护没有内容被跳过的帧不留痕。
+//
+// 只承载用量或结束分片的帧本来就没有内容要处置，把正常帧记成缺口会淹掉真正的信号。
+func TestPassthroughSinkDoesNotWarnWithoutContentChunks(t *testing.T) {
+	cases := map[string][]domain.Chunk{
+		"只有结束分片": {{Kind: domain.ChunkFinish}},
+		"只有用量分片": {{Kind: domain.ChunkUsage}},
+	}
+	for name, chunks := range cases {
+		t.Run(name, func(t *testing.T) {
+			var out, logs bytes.Buffer
+			events := &fakeStreamMiddleware{drop: map[string]bool{string(domain.ChunkTextDelta): true}}
+			sink := &passthroughSink{
+				out:         &out,
+				events:      events,
+				req:         &domain.Request{RequestID: "req-1", Protocol: domain.ProtocolOpenAIChat},
+				client:      openaichat.New(),
+				mixedFrames: newMixedFrameLog(slog.New(slog.NewTextHandler(&logs, nil))),
+			}
+			raw := []byte("data: {\"choices\":[]}\n\n")
+			if err := sink.SendFrame(context.Background(), raw, chunks); err != nil {
+				t.Fatalf("SendFrame 失败：%v", err)
+			}
+			if !bytes.Equal(out.Bytes(), raw) {
+				t.Fatalf("原样透传：\n实际 %q\n期望 %q", out.String(), string(raw))
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("没有内容被跳过时不应留痕，实际 %q", logs.String())
+			}
+		})
+	}
+}
+
+// TestMixedFrameLogThrottlesAndReportsSuppressed 守护限频与被压条数的报出。
+func TestMixedFrameLogThrottlesAndReportsSuppressed(t *testing.T) {
+	var logs bytes.Buffer
+	log := newMixedFrameLog(slog.New(slog.NewTextHandler(&logs, nil)))
+	req := &domain.Request{RequestID: "req-1", Protocol: domain.ProtocolOpenAIChat}
+	for i := 0; i < mixedFrameLogPerSecond+2; i++ {
+		log.warn(req, []string{string(domain.ChunkFinish)})
+	}
+	if got := strings.Count(logs.String(), "中间件未介入该帧"); got != mixedFrameLogPerSecond {
+		t.Fatalf("一个窗口内应放行 %d 条，实际 %d 条：%q", mixedFrameLogPerSecond, got, logs.String())
+	}
+	// 下一个窗口放出的那条记录里报出被压下的两条。
+	log.mu.Lock()
+	log.window = time.Now().Add(-2 * time.Second)
+	log.mu.Unlock()
+	log.warn(req, []string{string(domain.ChunkFinish)})
+	if !strings.Contains(logs.String(), "suppressed=2") {
+		t.Fatalf("下一条放出的记录应报出被压条数：%q", logs.String())
+	}
+
+	// 未注入日志时（nil 接收者）不留痕，也不 panic。
+	var off *mixedFrameLog
+	logs.Reset()
+	off.warn(req, nil)
+	if logs.Len() != 0 {
+		t.Fatalf("未注入日志时不应写出任何记录，实际 %q", logs.String())
 	}
 }
 
