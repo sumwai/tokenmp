@@ -248,12 +248,15 @@ type Adjustment struct {
 // 由 SQL 固定为 0 / 0 / 1 / NULL，不经调用方传入。带真实结算字段的写入见
 // settlement.go 的 Tx.InsertUsage。
 type UsageRow struct {
-	MerchantID uint64
-	AccountID  uint64
-	ChannelID  uint64
-	APIKeyID   uint64
-	Model      string
-	Usage      map[billing.Metric]int
+	MerchantID     uint64
+	AccountID      uint64
+	ChannelID      uint64
+	APIKeyID       uint64
+	Model          string
+	RequestedModel string
+	Protocol       string
+	CrossProtocol  bool
+	Usage          map[billing.Metric]int
 }
 
 // insertUsageSQL 把结算列写死为「未结算」形态。
@@ -261,8 +264,8 @@ type UsageRow struct {
 // 不把 pricing_id 等做成占位符：本条路径的口径是「只落用量、不结算」，允许调用方
 // 传值会给出「这里能结算」的假象。真实结算走 settlement.go 的显式参数语句。
 const insertUsageSQL = "INSERT INTO billing_usage " +
-	"(merchant_id, account_id, channel_id, api_key_id, model, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
-	"VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1, NULL)"
+	"(merchant_id, account_id, channel_id, api_key_id, model, requested_model, protocol, cross_protocol, `usage`, pricing_id, gross_amount, multiplier, settlement) " +
+	"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, NULL)"
 
 // validateUsageInput 校验一条用量流水的最小事实，占位与结算两条写入路径共用。
 func validateUsageInput(merchantID, accountID, channelID uint64, model string, usage map[billing.Metric]int) error {
@@ -314,8 +317,17 @@ func insertUsage(ctx context.Context, ex executor, row UsageRow) (uint64, error)
 		return 0, err
 	}
 	res, err := ex.ExecContext(ctx, insertUsageSQL,
-		row.MerchantID, row.AccountID, row.ChannelID, row.APIKeyID, row.Model, payload)
+		row.MerchantID, row.AccountID, row.ChannelID, row.APIKeyID, row.Model,
+		nullableString(row.RequestedModel), nullableString(row.Protocol), row.CrossProtocol, payload)
 	return insertID(res, err, "billing_usage")
+}
+
+// nullableString 把空串转成 SQL NULL。
+func nullableString(s string) any {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
 }
 
 // InsertUsage 写一条用量流水，返回新行 id。
@@ -878,4 +890,140 @@ func insertAdjustment(ctx context.Context, ex executor, a Adjustment) (uint64, e
 // InsertAdjustment 追加一条调账流水。
 func (s *Store) InsertAdjustment(ctx context.Context, a Adjustment) (uint64, error) {
 	return insertAdjustment(ctx, s.db, a)
+}
+
+// AccountUsageFilter 是账户面用量列表的过滤条件。
+//
+// 与管理面的 ListUsage 分开：管理面按账户与起始时刻粗筛，随后原样展示 JSON；
+// 账户面要按模型、密钥与闭区间精确筛选，还要总数做偏移分页。两者合并会让任一侧
+// 为了另一侧的需要带上不用的分支，故各留一份。
+type AccountUsageFilter struct {
+	// AccountID 是流水的归属账户，必填：作用域只能来自会话。
+	AccountID uint64
+	// Since / Until 是写入时刻的闭区间；零值表示该侧不限。
+	Since time.Time
+	Until time.Time
+	// RequestedModel 按客户端请求的模型名精确匹配；空串表示不过滤。
+	//
+	// 匹配的是 requested_model 而不是 model：页面上露出的模型名是客户端写的那个，
+	// 按履约模型过滤会让用户按自己看到的名字筛不出自己的流水。
+	RequestedModel string
+	// APIKeyID 按签发本次调用的密钥过滤；0 表示不过滤。
+	APIKeyID uint64
+	// Limit / Offset 是偏移分页参数；Limit 必须为正。
+	Limit  int
+	Offset int
+}
+
+// AccountUsageRow 是账户面用量列表的一行。
+//
+// 不含渠道与商家标识：它们是运营口径，账户面不暴露。
+type AccountUsageRow struct {
+	ID uint64
+	// Model 是实际履约的上游模型名，RequestedModel 是客户端请求的模型名。
+	// 两者不同表示网关改写过模型名。
+	Model          string
+	RequestedModel string
+	// Protocol 是客户端使用的线协议；历史行没有该列取值，读回空串。
+	Protocol      string
+	CrossProtocol bool
+	// Usage 是原始的 metric -> 数量 JSON，由调用方映射为对外字段。
+	Usage json.RawMessage
+	// GrossAmount 是基础价 × 用量，Multiplier 是解析后的最终倍率；
+	// 两者保持数据库文本，扣减量由调用方折算。
+	GrossAmount string
+	Multiplier  string
+	CreatedAt   time.Time
+}
+
+// accountIDCondition 是账户维度的过滤谓词：账户面的流水、模型与请求记录读路径
+// 都按它收敛作用域，写成一个常量让「作用域必须带账户」这条规则只有一处出处。
+const accountIDCondition = "account_id = ?"
+
+// accountUsageColumns 是账户面列表的列清单，计数与取页共用同一份谓词。
+const accountUsageColumns = `SELECT id, model, requested_model, protocol, cross_protocol, ` + "`usage`" +
+	`, gross_amount, multiplier, created_at
+FROM billing_usage`
+
+// accountUsageWhere 组装账户面列表的 WHERE 子句与参数。
+//
+// 单独抽出来是为了让计数与取页必然同源：两处各拼一次谓词，任一处漏条件都会让
+// total 与当页对不上，而那种偏差只在特定过滤组合下出现。
+func accountUsageWhere(f AccountUsageFilter) (string, []any) {
+	conditions := []string{accountIDCondition}
+	args := []any{f.AccountID}
+	if !f.Since.IsZero() {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, f.Since)
+	}
+	if !f.Until.IsZero() {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, f.Until)
+	}
+	if f.RequestedModel != "" {
+		conditions = append(conditions, "requested_model = ?")
+		args = append(args, f.RequestedModel)
+	}
+	if f.APIKeyID != 0 {
+		conditions = append(conditions, "api_key_id = ?")
+		args = append(args, f.APIKeyID)
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+// ListAccountUsage 按账户分页列出用量流水，返回当页行与满足条件的总数。
+//
+// 排序按主键倒序：写入时刻相同的两行（同一秒内落库）也有确定顺序，
+// 翻页不会因排序不稳定而重复或漏行。主键与写入顺序一致，故与契约的
+// 「按写入时刻倒序」等价。
+func (s *Store) ListAccountUsage(ctx context.Context, f AccountUsageFilter) ([]AccountUsageRow, int, error) {
+	if f.AccountID == 0 {
+		return nil, 0, errors.New("store: billing_usage.account_id 不能为 0")
+	}
+	if f.Limit <= 0 {
+		return nil, 0, errors.New("store: 分页条数必须为正")
+	}
+	if f.Offset < 0 {
+		return nil, 0, errors.New("store: 分页偏移不能为负")
+	}
+	where, args := accountUsageWhere(f)
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM billing_usage"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("store: 统计 billing_usage 失败: %w", err)
+	}
+
+	//nolint:gosec // G202：拼进去的是列清单与由常量组成的谓词，取值一律走问号占位符。
+	query := accountUsageColumns + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	rows, err := s.db.QueryContext(ctx, query, append(args, f.Limit, f.Offset)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: 查询 billing_usage 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var records []AccountUsageRow
+	for rows.Next() {
+		var (
+			r              AccountUsageRow
+			requestedModel sql.NullString
+			protocol       sql.NullString
+			usageRaw       []byte
+			createdAt      scanTime
+		)
+		if err := rows.Scan(&r.ID, &r.Model, &requestedModel, &protocol, &r.CrossProtocol,
+			&usageRaw, &r.GrossAmount, &r.Multiplier, &createdAt); err != nil {
+			return nil, 0, fmt.Errorf("store: 解析 billing_usage 行失败: %w", err)
+		}
+		// requested_model 与 protocol 是 0008 迁移新增的可空列：历史行为 NULL，
+		// 读回空串表示「那一列没有取值」，不是「模型名为空」这种业务事实。
+		r.RequestedModel = requestedModel.String
+		r.Protocol = protocol.String
+		r.Usage = json.RawMessage(usageRaw)
+		r.CreatedAt = createdAt.Time
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("store: 遍历 billing_usage 行失败: %w", err)
+	}
+	return records, total, nil
 }

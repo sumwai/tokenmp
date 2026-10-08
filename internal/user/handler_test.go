@@ -48,6 +48,30 @@ type fakeStore struct {
 		enabled bool
 	}
 	enableErr error
+
+	// 用量流水与模型目录：字段承载替身返回值与最后一次调用的入参。
+	usageRows       []store.AccountUsageRow
+	usageTotal      int
+	usageErr        error
+	usageFilter     store.AccountUsageFilter
+	models          []store.AccountModel
+	modelsErr       error
+	modelsAccountID uint64
+
+	// 请求记录：字段承载替身返回值与最后一次调用的入参。
+	requestRows   []store.RequestLogRow
+	requestTotal  int
+	requestErr    error
+	requestFilter store.RequestLogFilter
+	detailRow     *store.RequestLogRow
+	detailErr     error
+	detailAccount uint64
+	detailID      string
+	attempts      []store.RequestAttempt
+	attemptsErr   error
+	stats         []store.RequestStatsItem
+	statsErr      error
+	statsQuery    store.RequestStatsQuery
 }
 
 func (f *fakeStore) AccountByOwner(_ context.Context, _ uint64) (*store.Account, error) {
@@ -86,6 +110,53 @@ func (f *fakeStore) SetAPIKeyEnabled(_ context.Context, id uint64, enabled bool)
 	}
 	f.lastEnable.id, f.lastEnable.enabled = id, enabled
 	return nil
+}
+
+func (f *fakeStore) ListAccountUsage(_ context.Context, filter store.AccountUsageFilter) ([]store.AccountUsageRow, int, error) {
+	f.usageFilter = filter
+	if f.usageErr != nil {
+		return nil, 0, f.usageErr
+	}
+	return f.usageRows, f.usageTotal, nil
+}
+
+func (f *fakeStore) ListAccountModels(_ context.Context, accountID uint64) ([]store.AccountModel, error) {
+	f.modelsAccountID = accountID
+	if f.modelsErr != nil {
+		return nil, f.modelsErr
+	}
+	return f.models, nil
+}
+
+func (f *fakeStore) ListRequestLogs(_ context.Context, filter store.RequestLogFilter) ([]store.RequestLogRow, int, error) {
+	f.requestFilter = filter
+	if f.requestErr != nil {
+		return nil, 0, f.requestErr
+	}
+	return f.requestRows, f.requestTotal, nil
+}
+
+func (f *fakeStore) RequestLogByRequestID(_ context.Context, accountID uint64, requestID string) (*store.RequestLogRow, error) {
+	f.detailAccount, f.detailID = accountID, requestID
+	if f.detailErr != nil {
+		return nil, f.detailErr
+	}
+	return f.detailRow, nil
+}
+
+func (f *fakeStore) RequestAttempts(_ context.Context, _ string) ([]store.RequestAttempt, error) {
+	if f.attemptsErr != nil {
+		return nil, f.attemptsErr
+	}
+	return f.attempts, nil
+}
+
+func (f *fakeStore) RequestStats(_ context.Context, q store.RequestStatsQuery) ([]store.RequestStatsItem, error) {
+	f.statsQuery = q
+	if f.statsErr != nil {
+		return nil, f.statsErr
+	}
+	return f.stats, nil
 }
 
 type fakeSummary struct {

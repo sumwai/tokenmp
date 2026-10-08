@@ -116,7 +116,7 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request, account *stor
 	for i := range keys {
 		items = append(items, newAPIKeyView(&keys[i]))
 	}
-	webapi.WritePage(w, map[string]any{"items": items}, page, size, total)
+	webapi.WritePage(w, map[string]any{itemsKey: items}, page, size, total)
 }
 
 // createKey 为当前账户签发一把密钥，明文只在本次响应出现。

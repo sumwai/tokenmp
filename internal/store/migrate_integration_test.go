@@ -26,6 +26,9 @@ const envTestDSN = "TOKENMP_TEST_MYSQL_DSN"
 // knownTables 与 migrations/ 下各迁移文件对应，删除顺序无关紧要（全库无外键）；
 // 新增迁移时必须同步补上它的表，否则测试间的清库会残留旧表。
 var knownTables = []string{
+	"request_stats_daily",
+	"request_attempt",
+	"request_log",
 	"web_otp",
 	"web_identity",
 	"web_session",

@@ -23,7 +23,9 @@ func (stubForwarder) Forward(context.Context, domain.Adapter, *domain.Request, i
 // capturingLogger 收集入口层交出的访问记录。
 type capturingLogger struct{ records []AccessRecord }
 
-func (c *capturingLogger) LogAccess(record AccessRecord) { c.records = append(c.records, record) }
+func (c *capturingLogger) LogAccess(_ context.Context, record AccessRecord) {
+	c.records = append(c.records, record)
+}
 
 // TestServeHTTPRecordsClientFacts 守护访问记录里的客户端侧事实：
 // User-Agent 取自请求并按上限截断，协议与模型名分别取自路径与请求体。

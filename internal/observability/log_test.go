@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ var allowedLogKeys = map[string]struct{}{
 func TestAccessLoggerWritesOneJSONLineWithExpectedFields(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewAccessLogger(&buf)
-	logger.LogAccess(transport.AccessRecord{
+	logger.LogAccess(context.Background(), transport.AccessRecord{
 		RequestID:      "req-123",
 		Protocol:       domain.ProtocolOpenAIChat,
 		Model:          "glm-5",
@@ -74,7 +75,7 @@ func TestAccessLoggerWritesOneJSONLineWithExpectedFields(t *testing.T) {
 func TestAccessLoggerOmitsSensitiveValues(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewAccessLogger(&buf)
-	logger.LogAccess(transport.AccessRecord{
+	logger.LogAccess(context.Background(), transport.AccessRecord{
 		RequestID:      "req-1",
 		Protocol:       domain.ProtocolAnthropicMessages,
 		Model:          "claude",

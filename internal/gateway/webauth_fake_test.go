@@ -94,3 +94,32 @@ func (f *fakeGatewayStore) APIKeyByID(context.Context, uint64) (*store.APIKey, e
 }
 
 func (f *fakeGatewayStore) SetAPIKeyEnabled(context.Context, uint64, bool) error { return nil }
+
+// 以下两个方法补齐用户级端点的用量流水与模型目录依赖，同样返回空结果：
+// 装配测试只验证路径挂载与会话鉴权，业务口径由 internal/user 的单测覆盖。
+
+func (f *fakeGatewayStore) ListAccountUsage(context.Context, store.AccountUsageFilter) ([]store.AccountUsageRow, int, error) {
+	return nil, 0, nil
+}
+
+func (f *fakeGatewayStore) ListAccountModels(context.Context, uint64) ([]store.AccountModel, error) {
+	return nil, nil
+}
+
+// 以下四个方法补齐用户级端点的请求记录依赖，同样返回空结果。
+
+func (f *fakeGatewayStore) ListRequestLogs(context.Context, store.RequestLogFilter) ([]store.RequestLogRow, int, error) {
+	return nil, 0, nil
+}
+
+func (f *fakeGatewayStore) RequestLogByRequestID(context.Context, uint64, string) (*store.RequestLogRow, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeGatewayStore) RequestAttempts(context.Context, string) ([]store.RequestAttempt, error) {
+	return nil, nil
+}
+
+func (f *fakeGatewayStore) RequestStats(context.Context, store.RequestStatsQuery) ([]store.RequestStatsItem, error) {
+	return nil, nil
+}

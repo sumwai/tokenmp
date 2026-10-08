@@ -1383,7 +1383,7 @@ func listUsage(ctx context.Context, q querier, accountID uint64, since time.Time
 		args       []any
 	)
 	if accountID != 0 {
-		conditions = append(conditions, "account_id = ?")
+		conditions = append(conditions, accountIDCondition)
 		args = append(args, accountID)
 	}
 	if !since.IsZero() {

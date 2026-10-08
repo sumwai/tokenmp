@@ -298,3 +298,69 @@ func credentialsByGroup(ctx context.Context, q querier, credGroup string, mercha
 func (s *Store) CredentialsByGroup(ctx context.Context, credGroup string, merchantID uint64) ([]Credential, error) {
 	return credentialsByGroup(ctx, dbQuerier{db: s.db}, credGroup, merchantID)
 }
+
+// AccountModel 是一个账户可调用的模型与它可用的上游协议方言。
+//
+// 只给客户端可用的模型名与协议方言：上游模型名与渠道标识属运营口径，
+// 页面面不暴露。
+type AccountModel struct {
+	// Name 是客户端请求里的模型名，可直接用于请求体。
+	Name string
+	// Protocols 是服务该模型的上游协议方言，按字典序排列、已去重。
+	Protocols []string
+}
+
+const accountModelsSQL = `SELECT m.model, c.type
+FROM upstream_model_map m
+JOIN upstream_channel c ON c.id = m.channel_id
+WHERE m.enabled = 1 AND c.enabled = 1 AND c.merchant_id = ?
+ORDER BY m.model, c.type`
+
+const accountMerchantSQL = `SELECT default_merchant_id FROM account WHERE id = ?`
+
+// ListAccountModels 列出某账户可调用的模型。
+//
+// 可用性 = 启用中的渠道 与 启用中的模型映射 同时命中，按账户的生效商家过滤。
+// 商家的解析沿用鉴权链的口径（账户默认商家，缺省归平台自营）：控制台没有密钥上下文，
+// 账户默认商家是这一层能取到的唯一商家取值；按密钥绑定商家过滤属于数据面的口径。
+//
+// 模型目录不分页：候选是运营配置出来的有限集合，一次读完比分页更少一次往返。
+func (s *Store) ListAccountModels(ctx context.Context, accountID uint64) ([]AccountModel, error) {
+	if accountID == 0 {
+		return nil, errors.New("store: account.id 不能为 0")
+	}
+	var accountMerchant sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, accountMerchantSQL, accountID).Scan(&accountMerchant); err != nil {
+		return nil, fmt.Errorf("store: 查询 account 失败: %w", err)
+	}
+	merchantID := resolveMerchantID(sql.NullInt64{}, accountMerchant)
+
+	rows, err := s.db.QueryContext(ctx, accountModelsSQL, merchantID)
+	if err != nil {
+		return nil, fmt.Errorf("store: 查询 upstream_model_map 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var models []AccountModel
+	for rows.Next() {
+		var name, protocol string
+		if err := rows.Scan(&name, &protocol); err != nil {
+			return nil, fmt.Errorf("store: 解析模型行失败: %w", err)
+		}
+		// SQL 已按 (模型, 协议) 排序：同一模型的多行相邻且协议有序，
+		// 因此只需与上一条比较即可完成归拢与去重。
+		// 同一渠道对同一模型只有一行（uk_model_map），重复协议只来自多个渠道，
+		// 去重在这里做而不是写 DISTINCT：后者会把「哪个渠道服务该模型」一起丢掉。
+		if n := len(models); n > 0 && models[n-1].Name == name {
+			if last := models[n-1].Protocols; len(last) == 0 || last[len(last)-1] != protocol {
+				models[n-1].Protocols = append(last, protocol)
+			}
+			continue
+		}
+		models = append(models, AccountModel{Name: name, Protocols: []string{protocol}})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: 遍历模型行失败: %w", err)
+	}
+	return models, nil
+}

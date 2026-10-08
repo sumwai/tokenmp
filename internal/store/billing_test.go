@@ -490,12 +490,15 @@ func TestScanTimeAcceptsDriverForms(t *testing.T) {
 func TestInsertUsageArgs(t *testing.T) {
 	fake := &recordedExec{id: 9}
 	id, err := insertUsage(context.Background(), fake, UsageRow{
-		MerchantID: 3,
-		AccountID:  4,
-		ChannelID:  5,
-		APIKeyID:   6,
-		Model:      "up-model",
-		Usage:      map[billing.Metric]int{billing.MetricInputToken: 7, billing.MetricReasoningToken: 2},
+		MerchantID:     3,
+		AccountID:      4,
+		ChannelID:      5,
+		APIKeyID:       6,
+		Model:          "up-model",
+		RequestedModel: "client-model",
+		Protocol:       "openai_chat",
+		CrossProtocol:  true,
+		Usage:          map[billing.Metric]int{billing.MetricInputToken: 7, billing.MetricReasoningToken: 2},
 	})
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
@@ -506,10 +509,11 @@ func TestInsertUsageArgs(t *testing.T) {
 	if fake.query != insertUsageSQL {
 		t.Errorf("SQL = %q，期望 %q", fake.query, insertUsageSQL)
 	}
-	if len(fake.args) != 6 {
-		t.Fatalf("参数个数 = %d，期望 6", len(fake.args))
+	if len(fake.args) != 9 {
+		t.Fatalf("参数个数 = %d，期望 9", len(fake.args))
 	}
-	want := []any{uint64(3), uint64(4), uint64(5), uint64(6), "up-model", []byte(`{"input_token":7,"reasoning_token":2}`)}
+	want := []any{uint64(3), uint64(4), uint64(5), uint64(6), "up-model", "client-model", "openai_chat", true,
+		[]byte(`{"input_token":7,"reasoning_token":2}`)}
 	if !reflect.DeepEqual(fake.args, want) {
 		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
 	}
@@ -517,6 +521,10 @@ func TestInsertUsageArgs(t *testing.T) {
 
 // TestInsertUsageEmptyMetrics 验证未取得用量时写入 {} 而不是 null：
 // 空用量仍是一次请求的流水（次数即行数），usage 列是 NOT NULL 的 JSON，null 会被拒绝。
+//
+// 同时验证未取得请求级信息的两列写 NULL：requested_model 与 protocol 是 0008 迁移
+// 新增的可空列，空串意味着「这次没有该事实」，写成空串会把「没记录」与
+// 「记了一个空模型名」混成一种取值。
 func TestInsertUsageEmptyMetrics(t *testing.T) {
 	fake := &recordedExec{}
 	if _, err := insertUsage(context.Background(), fake, UsageRow{
@@ -524,9 +532,12 @@ func TestInsertUsageEmptyMetrics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("意外错误：%v", err)
 	}
-	got, ok := fake.args[5].([]byte)
+	if fake.args[5] != nil || fake.args[6] != nil {
+		t.Errorf("空请求级信息应写 NULL，得到 requested_model=%#v protocol=%#v", fake.args[5], fake.args[6])
+	}
+	got, ok := fake.args[8].([]byte)
 	if !ok {
-		t.Fatalf("usage 参数类型 = %T，期望 []byte", fake.args[5])
+		t.Fatalf("usage 参数类型 = %T，期望 []byte", fake.args[8])
 	}
 	if string(got) != "{}" {
 		t.Errorf("空用量应序列化为 {}，得到 %s", got)

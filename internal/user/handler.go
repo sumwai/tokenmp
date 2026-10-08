@@ -32,6 +32,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAccount(w, r)
 	case r.URL.Path == KeysPath:
 		h.handleKeys(w, r)
+	case r.URL.Path == UsagePath:
+		h.handleUsage(w, r)
+	case r.URL.Path == ModelsPath:
+		h.handleModels(w, r)
+	case r.URL.Path == RequestsPath:
+		h.handleRequests(w, r)
+	case r.URL.Path == RequestsPath+requestStatsSuffix:
+		h.handleRequestStats(w, r)
+	case strings.HasPrefix(r.URL.Path, RequestsPath+"/"):
+		requestID, ok := parseRequestIDPath(r.URL.Path)
+		if !ok {
+			webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
+			return
+		}
+		h.handleRequestDetail(w, r, requestID)
 	case strings.HasPrefix(r.URL.Path, KeysPath+"/"):
 		id, ok := parseRevokePath(r.URL.Path)
 		if !ok {
