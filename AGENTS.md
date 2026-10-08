@@ -9,7 +9,8 @@ TokenMP 是大模型 API 转发网关与计费平台，Go 单模块 `github.com/
 ```
 cmd/tokenmp/        单一入口二进制，子命令按文件拆分
 internal/           仓库内部包，不对外暴露
-pkg/                可被外部导入的包
+web/                浏览器控制台前端，产物 web/dist 由部署侧取用
+docs/               数据面、页面通信、兼容性与计费口径、部署、运营五份规范
 .github/workflows/  CI 与发布链路
 ```
 

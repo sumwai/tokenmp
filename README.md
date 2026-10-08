@@ -5,24 +5,17 @@ Go 单模块（`github.com/sumwai/tokenmp`），发布产物是一个二进制�
 
 ## 能力概览
 
-以下每行只是索引，行为口径与字段在「文档」一节的规范文件里展开。
+下表只是索引，行为口径与字段见「文档」一节的规范文件。
 
-- **数据面**：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 与 Gemini 的
-  `POST /v1beta/models/{model}:generateContent`（含 `:streamGenerateContent`）四个转发端点，
-  另有账户自助查询 `GET /v1/me/account` 与探活 `GET /healthz`，见 [docs/openapi.yaml](docs/openapi.yaml)。
-- **协议互转**：同一份内部请求/响应格式在四种方言之间转换，一条渠道因此可以承接任一方言的请求；
-  参数处理、模型名替换、跨协议降级与流式用量帧见 [docs/compatibility.md](docs/compatibility.md)。
-- **鉴权与限额**：Bearer 鉴权、账户额度预检与账户／API key 两个维度的窗口限额处置，
-  状态码与错误码口径见 [docs/compatibility.md](docs/compatibility.md) 的错误码表。
-- **上游调度**：候选链选路、同渠道换凭据重试与按类冷却、渠道级限流与熔断、上游套餐配额探针，
-  各变量的运行语义见 [docs/deploy.md](docs/deploy.md)。
-- **网关中间件**：本机可配置插件在四个时机改写请求体、流式内容事件与响应体，
-  注册与启停用 `tokenmp admin plugin`；可改写范围与沙箱边界见
-  [docs/compatibility.md](docs/compatibility.md)，可运行示例见 [examples/](examples/)。
-- **页面通信**：`/api/v1/*` 供浏览器控制台调用，前端的响应类型与客户端由
-  [docs/openapi-web.yaml](docs/openapi-web.yaml) 生成，前端工程规则见 [web/AGENTS.md](web/AGENTS.md)。
-- **日志**：每次请求与每次上游尝试各写一条 JSON 日志到标准输出，凭据与密钥不进入日志，
-  见 [docs/deploy.md](docs/deploy.md)。
+| 能力 | 说明 | 规范 |
+|---|---|---|
+| 数据面 | 四个转发端点：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 与 `POST /v1beta/models/{model}:generateContent`（含 `:streamGenerateContent`）；另有账户自助查询 `GET /v1/me/account` 与探活 `GET /healthz` | [docs/openapi.yaml](docs/openapi.yaml) |
+| 协议互转 | 同一份内部请求/响应格式在四种方言之间转换，一条渠道因此可以承接任一方言的请求；含参数处理、模型名替换、跨协议降级与流式用量帧 | [docs/compatibility.md](docs/compatibility.md) |
+| 鉴权与限额 | Bearer 鉴权、账户额度预检，以及账户与 API key 两个维度的窗口限额处置 | [docs/compatibility.md](docs/compatibility.md) 的错误码表 |
+| 上游调度 | 候选链选路、同渠道换凭据重试与按类冷却、渠道级限流与熔断、上游套餐配额探针 | [docs/deploy.md](docs/deploy.md) |
+| 网关中间件 | 本机可配置插件在四个时机改写请求体、流式内容事件与响应体，注册与启停用 `tokenmp admin plugin` | [docs/compatibility.md](docs/compatibility.md)、[examples/](examples/) |
+| 页面通信 | `/api/v1/*` 供浏览器控制台调用，前端的响应类型与客户端由契约生成 | [docs/openapi-web.yaml](docs/openapi-web.yaml)、[web/AGENTS.md](web/AGENTS.md) |
+| 日志 | 每次请求与每次上游尝试各写一条 JSON 日志到标准输出，凭据与密钥不进入日志 | [docs/deploy.md](docs/deploy.md) |
 
 ## 快速开始
 
