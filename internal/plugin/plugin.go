@@ -889,14 +889,17 @@ func (s *Set) OnRequest(ctx context.Context, client domain.Adapter, req *domain.
 	if state == nil || client == nil || req == nil {
 		return nil
 	}
-	// 本次调用的事实只算一次：循环里逐中间件重复求值没有任何好处。
-	model, protocol, vendor, known := scopeFacts(ctx, req)
+	// 本次调用的事实默认只算一次：循环里逐中间件重复求值没有任何好处。
+	// 但改写请求体就是换模型名，而作用域判的是「此刻的请求」—— 改写成功后就地重算，
+	// 使后续中间件按改写后的事实判定。不重算会让同一份 scope.models 在 onRequest 与
+	// 其余钩子上得出相反结论（其余钩子都在改写之后取值）。
+	model, protocol, vendor, vendorKnown := scopeFacts(ctx, req)
 	for _, runtime := range state.runtimes {
 		if !runtime.comp.hasOnRequest {
 			continue
 		}
 		// 选路之前厂商未知，作用域里的厂商轴不参与判定（见 scopeSpec.allows）。
-		if !runtime.comp.scope.allows(model, protocol, vendor, known) {
+		if !runtime.comp.scope.allows(model, protocol, vendor, vendorKnown) {
 			continue
 		}
 		started := time.Now()
@@ -904,7 +907,10 @@ func (s *Set) OnRequest(ctx context.Context, client domain.Adapter, req *domain.
 		if err == nil && rewritten != nil && !runtime.rejected {
 			// 宿主侧解码失败属于这一次钩子调用的失败，并进同一条记录：
 			// 另记一次会让 Calls 多算一拍，失败也落到第二次调用上。
-			err = applyRequestRewrite(client, req, rewritten)
+			if err = applyRequestRewrite(client, req, rewritten); err == nil {
+				// 请求体已换代：后面的中间件按改写后的模型名判作用域。
+				model, protocol, vendor, vendorKnown = scopeFacts(ctx, req)
+			}
 		}
 		runtime.middleware.stats.record(time.Since(started), err)
 		if err != nil {
