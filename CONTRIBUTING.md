@@ -29,6 +29,11 @@ CI 另外在真实 MySQL 上执行 `make check-integration` 与 `make e2e`，两
 
 `type` 取 `feat` / `fix` / `refactor` / `test` / `perf` / `docs` / `build` / `chore`。
 `type` 前缀必须是 ASCII 英文（release-please 靠它归类与定版号），描述不限语言。
+
+预 1.0 阶段不写 `BREAKING CHANGE:` 脚注，也不在 type 后加 `!`：release-please 会因此把版本
+升到下一个 minor，而这一阶段的破坏性变更面向的不是用户 —— 它们改的是本机部署配置或内部
+契约。行为变更的升级注意写进 PR 描述与对应文档。
+
 合并 release PR 后，条目会进入 [CHANGELOG.md](CHANGELOG.md) 的对应分区。
 
 ## 行为变更与规范同步

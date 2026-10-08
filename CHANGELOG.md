@@ -1,11 +1,7 @@
 # Changelog
 
-## [0.2.0](https://github.com/sumwai/tokenmp/compare/v0.1.9...v0.2.0) (2026-10-08)
+## [0.1.10](https://github.com/sumwai/tokenmp/compare/v0.1.9...v0.1.10) (2026-10-08)
 
-
-### ⚠ BREAKING CHANGES
-
-* **plugin:** TOKENMP_PLUGIN_FILES 被移除。迁移方式：用 `tokenmp admin plugin add <路径>` 逐个注册（默认启用），原变量的顺序即注册顺序； 清单文件位置用 TOKENMP_PLUGIN_STATE_FILE 指定。
 
 ### Features
 
