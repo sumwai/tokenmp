@@ -32,6 +32,22 @@ func (f *fakeSessions) SessionUserID(_ context.Context, _ string) (uint64, error
 type fakeStore struct {
 	account *store.Account
 	err     error
+
+	keys       []store.APIKey
+	total      int
+	listErr    error
+	listLimit  int
+	listOffset int
+	listOn     *bool
+	inserted   store.APIKey
+	insertErr  error
+	byIDKey    *store.APIKey
+	byIDErr    error
+	lastEnable struct {
+		id      uint64
+		enabled bool
+	}
+	enableErr error
 }
 
 func (f *fakeStore) AccountByOwner(_ context.Context, _ uint64) (*store.Account, error) {
@@ -39,6 +55,37 @@ func (f *fakeStore) AccountByOwner(_ context.Context, _ uint64) (*store.Account,
 		return nil, f.err
 	}
 	return f.account, nil
+}
+
+func (f *fakeStore) InsertAPIKey(_ context.Context, k store.APIKey) (uint64, error) {
+	if f.insertErr != nil {
+		return 0, f.insertErr
+	}
+	f.inserted = k
+	return 99, nil
+}
+
+func (f *fakeStore) ListAPIKeysByAccount(_ context.Context, _ uint64, enabled *bool, limit, offset int) ([]store.APIKey, int, error) {
+	if f.listErr != nil {
+		return nil, 0, f.listErr
+	}
+	f.listOn, f.listLimit, f.listOffset = enabled, limit, offset
+	return f.keys, f.total, nil
+}
+
+func (f *fakeStore) APIKeyByID(_ context.Context, _ uint64) (*store.APIKey, error) {
+	if f.byIDErr != nil {
+		return nil, f.byIDErr
+	}
+	return f.byIDKey, nil
+}
+
+func (f *fakeStore) SetAPIKeyEnabled(_ context.Context, id uint64, enabled bool) error {
+	if f.enableErr != nil {
+		return f.enableErr
+	}
+	f.lastEnable.id, f.lastEnable.enabled = id, enabled
+	return nil
 }
 
 type fakeSummary struct {

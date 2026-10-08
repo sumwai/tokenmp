@@ -100,6 +100,12 @@ type gatewayStore interface {
 	RecentUsage(ctx context.Context, accountID uint64, limit int) ([]store.UsageListRow, error)
 	// AccountByOwner 供用户级端点把会话推导为作用域。
 	AccountByOwner(ctx context.Context, userID uint64) (*store.Account, error)
+	// InsertAPIKey、ListAPIKeysByAccount、APIKeyByID 与 SetAPIKeyEnabled
+	// 供用户级端点的密钥自助管理使用。
+	InsertAPIKey(ctx context.Context, k store.APIKey) (uint64, error)
+	ListAPIKeysByAccount(ctx context.Context, accountID uint64, enabled *bool, limit, offset int) ([]store.APIKey, int, error)
+	APIKeyByID(ctx context.Context, id uint64) (*store.APIKey, error)
+	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。

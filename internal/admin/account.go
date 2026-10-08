@@ -2,12 +2,10 @@ package admin
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/apikey"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -85,14 +83,6 @@ func (s *Service) SetAccountMerchant(ctx context.Context, id, merchantID uint64)
 	return s.store.SetAccountMerchant(ctx, id, merchantID)
 }
 
-// 客户端密钥的生成参数。
-const (
-	// apiKeyPrefix 是明文密钥的固定前缀，用于肉眼区分网关密钥与上游密钥。
-	apiKeyPrefix = "sk-"
-	// apiKeyRandomBytes 是明文密钥的随机字节数；48 个十六进制字符的熵远高于暴力破解门槛。
-	apiKeyRandomBytes = 24
-)
-
 // IssueKeyInput 是签发客户端密钥的输入。
 type IssueKeyInput struct {
 	AccountID  uint64
@@ -113,9 +103,8 @@ type IssuedKey struct {
 
 // IssueKey 生成并写入一条客户端密钥，返回只在本次可见的明文。
 //
-// 明文 = "sk-" + 24 字节 crypto/rand 的十六进制；库中存 SHA-256 十六进制哈希
-// 与前缀。哈希格式与 cmd/tokenmp 的鉴权路径一致（SHA-256 hex 小写），
-// 签发的密钥因此能直接用于转发鉴权。
+// 生成、前缀与哈希规则见 internal/apikey：与用户自助签发共用一份实现，
+// 两处签出的密钥因此都能直接被转发鉴权路径识别。
 func (s *Service) IssueKey(ctx context.Context, in IssueKeyInput) (*IssuedKey, error) {
 	if err := requireID("密钥 account", in.AccountID); err != nil {
 		return nil, err
@@ -123,12 +112,12 @@ func (s *Service) IssueKey(ctx context.Context, in IssueKeyInput) (*IssuedKey, e
 	if in.MerchantID != nil && *in.MerchantID == 0 {
 		return nil, fmt.Errorf("admin: 密钥 merchant 不能为 0")
 	}
-	plaintext, err := generateAPIKey()
+	plaintext, err := apikey.Generate()
 	if err != nil {
 		return nil, err
 	}
-	prefix := plaintextPrefix(plaintext)
-	hash := hashAPIKey(plaintext)
+	prefix := apikey.Prefix(plaintext)
+	hash := apikey.Hash(plaintext)
 	id, err := s.store.InsertAPIKey(ctx, store.APIKey{
 		AccountID:  in.AccountID,
 		MerchantID: in.MerchantID,
@@ -159,19 +148,4 @@ func (s *Service) RevokeKey(ctx context.Context, id uint64) error {
 		return err
 	}
 	return s.store.SetAPIKeyEnabled(ctx, id, false)
-}
-
-// generateAPIKey 生成一条高熵明文密钥。
-func generateAPIKey() (string, error) {
-	buf := make([]byte, apiKeyRandomBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("admin: 生成密钥失败: %w", err)
-	}
-	return apiKeyPrefix + hex.EncodeToString(buf), nil
-}
-
-// hashAPIKey 计算客户端密钥的存储键：SHA-256 十六进制小写串。
-func hashAPIKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
 }
