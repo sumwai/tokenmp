@@ -80,7 +80,7 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 - 非法取值一律以退出码 1 终止，进程不带着半份配置起服。
 
 各变量的运行语义（超时分级、限流、熔断、凭据轮换与 OAuth 续期、上游套餐探针、网关中间件）
-见 [README](../README.md) 的转发行为说明与 [docs/compatibility.md](compatibility.md)。
+见 [docs/compatibility.md](compatibility.md) 与 [docs/operations.md](operations.md)。
 
 ## 启动与迁移
 

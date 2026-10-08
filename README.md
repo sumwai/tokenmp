@@ -1,110 +1,67 @@
 # TokenMP
 
 大模型 API 转发网关与计费平台：把客户端的模型请求转发到上游渠道，按用量计费并从账户余额扣款。
+Go 单模块（`github.com/sumwai/tokenmp`），发布产物是一个二进制，前端静态产物另行部署。
+
+## 能力概览
+
+以下每行只是索引，行为口径与字段在「文档」一节的规范文件里展开。
+
+- **数据面**：`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` 与 Gemini 的
+  `POST /v1beta/models/{model}:generateContent`（含 `:streamGenerateContent`）四个转发端点，
+  另有账户自助查询 `GET /v1/me/account` 与探活 `GET /healthz`，见 [docs/openapi.yaml](docs/openapi.yaml)。
+- **协议互转**：同一份内部请求/响应格式在四种方言之间转换，一条渠道因此可以承接任一方言的请求；
+  参数处理、模型名替换、跨协议降级与流式用量帧见 [docs/compatibility.md](docs/compatibility.md)。
+- **鉴权与限额**：Bearer 鉴权、账户额度预检与账户／API key 两个维度的窗口限额处置，
+  状态码与错误码口径见 [docs/compatibility.md](docs/compatibility.md) 的错误码表。
+- **上游调度**：候选链选路、同渠道换凭据重试与按类冷却、渠道级限流与熔断、上游套餐配额探针，
+  各变量的运行语义见 [docs/deploy.md](docs/deploy.md)。
+- **网关中间件**：本机可配置插件在四个时机改写请求体、流式内容事件与响应体，
+  注册与启停用 `tokenmp admin plugin`；可改写范围与沙箱边界见
+  [docs/compatibility.md](docs/compatibility.md)，可运行示例见 [examples/](examples/)。
+- **页面通信**：`/api/v1/*` 供浏览器控制台调用，前端的响应类型与客户端由
+  [docs/openapi-web.yaml](docs/openapi-web.yaml) 生成，前端工程规则见 [web/AGENTS.md](web/AGENTS.md)。
+- **日志**：每次请求与每次上游尝试各写一条 JSON 日志到标准输出，凭据与密钥不进入日志，
+  见 [docs/deploy.md](docs/deploy.md)。
 
 ## 快速开始
 
-发布产物是单个二进制，迁移 SQL 已内嵌，运行只需一个可写的 MySQL 库。
+迁移 SQL 已内嵌，运行只需一个可写的 MySQL 库，`serve` 启动时自动建表。
 
 ```sh
 TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
   ./tokenmp serve
 ```
 
-默认监听 `:8080`，启动时自动建表，`GET /healthz` 返回 200。环境变量与 systemd 示例见
-[docs/deploy.md](docs/deploy.md)，建渠道、发密钥的步骤见 [docs/operations.md](docs/operations.md)。
+默认监听 `:8080`，`GET /healthz` 固定返回 200。必填项、默认值、取值规则与 systemd 单元示例见
+[docs/deploy.md](docs/deploy.md)。
 
-从源码构建需要 Go 1.27 及以上。
-
-```
-make check              # 编译、单测（-race）、静态检查、格式检查
-make check-integration  # 对真实 MySQL 跑迁移验证（需 TOKENMP_TEST_MYSQL_DSN）
-make e2e                # 端到端运营剧本：入驻到对账全流程（需 TOKENMP_TEST_MYSQL_DSN）
-make build-binary       # 产出 bin/tokenmp 并注入版本号
-./bin/tokenmp version
-```
-
-`make check` 只依赖 Go 与 golangci-lint，不需要 docker、数据库或 node。
-`make check-integration` 与 `make e2e` 需要指向可丢弃库的 DSN，见目标注释。
+## 构建与门禁
 
 工具链版本由 `.mise.toml` 锁定，`make tools` 执行 `mise install` 装齐。
 
+| 命令 | 作用 | 额外依赖 |
+|---|---|---|
+| `make check` | 编译、单测（`-race`）、静态检查、格式检查 | 无 |
+| `make build-binary` | 产出 `bin/tokenmp` 并注入版本号 | 无 |
+| `make check-integration` | 对真实 MySQL 验证迁移 | `TOKENMP_TEST_MYSQL_DSN` |
+| `make e2e` | 端到端运营剧本：入驻到对账 | `TOKENMP_TEST_MYSQL_DSN` |
+| `make web-install` / `web-lint` / `web-test` / `web-build` | 前端四件套，产物在 `web/dist` | node |
+
+`make check` 的契约是无外部依赖。`check-integration` 与 `e2e` 的 DSN 须指向可丢弃的库，
+未设置时测试跳过而不是失败。前端产物由部署侧取用，不进入二进制。开发门禁与提交规范见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 子命令
 
-```
-$ ./bin/tokenmp help
-用法：tokenmp <子命令>
-
-子命令：
-  serve      启动网关 HTTP 服务
-  admin      管理面：商家、渠道、账户、定价与充值
-  version    报出版本号、构建自哪个提交，以及运行时的 Go 版本
-  help       打印本帮助
-```
+| 子命令 | 作用 |
+|---|---|
+| `serve` | 启动网关 HTTP 服务 |
+| `admin` | 管理面：商家、渠道、账户、定价与充值 |
+| `version` | 报出版本号、构建自哪个提交，以及运行时的 Go 版本 |
+| `help` | 打印本帮助（`-h` / `--help` 同义） |
 
 未知子命令或缺参数时退出码为 2，运行失败为 1。
-
-`tokenmp serve` 从环境变量读取运行配置，启动时执行数据库迁移，暴露
-`GET /healthz`（200）与三个转发端点 `POST /v1/chat/completions`、
-`POST /v1/responses`、`POST /v1/messages`，收到退出信号后优雅关闭。
-对外契约见 [docs/openapi.yaml](docs/openapi.yaml)，参数取舍、跨协议降级与用量计费口径见
-[docs/compatibility.md](docs/compatibility.md)。
-转发端点要求 `Authorization: Bearer <key>`。鉴权通过后先做额度预检与窗口限额
-判定：无可用额度回 402；账户或 API key 维度的窗口用量达到限额时按限额处置回 429，
-`reject` 的错误码为 `quota_exceeded`，`throttle` 为 `rate_limited` 并附 `Retry-After`。
-
-运行配置全部来自环境变量，必填项、默认值、单位与取值规则见
-[docs/deploy.md](docs/deploy.md) 的环境变量全表。流式转发不设整体超时，
-只受首字节与空闲读两级约束。
-
-同一分组下的多条启用上游凭据按轮换顺序取用；本次凭据不可用时在同一条渠道内换下一条重试，
-失败的那条进入冷却（内存态，重启即重置）。
-
-「不可用」由失败分类判定，判据是状态码加响应报文而不是只看状态码：认证失败（401 / 403、
-`invalid_api_key` 一类字面量）之外，**余额耗尽与套餐额度用尽也算** —— 这两种常见报在 400 或 429
-上，错当限流重试的话，那把 key 重试多少次都不会成功。分类名（`auth` / `quota` / `credit` /
-`rate_limit` / `context_length` / `model_unavailable`）写进尝试日志的 `failure_class`。
-
-冷却时长按类分级：认证失败用 `TOKENMP_UPSTREAM_CREDENTIAL_COOLDOWN`（默认 60s），额度用尽 15 分钟，
-余额耗尽 30 分钟 —— 后两者是账号级事实，要等窗口滚动或到账，停一个分钟级根本没意义。
-限流、上下文超限与模型不可用**不**停用凭据：换 key 也解决不了，把它们算作不可用只会让一次
-参数错误放大成对整组 key 的枚举（单次尝试最多试 4 条）。
-
-渠道的 `rate_limit_qps` 与 `rate_limit_concurrency` 在网关侧执行：进入渠道尝试前
-取令牌与并发位，令牌不足时短暂等待，超过等待上限则按可重试失败换下一条候选。
-流式请求占并发位到流终态才释放。限流状态是进程内的，多实例部署时各实例独立计数。
-
-渠道连续出现上游硬故障（5xx、连接失败、上游超时）达到阈值时进入熔断：冷却期内该渠道
-不参与调度，冷却期后放行探测，成功恢复闭合、失败重新打开。上游限流、上游 4xx 拒绝、
-客户端取消与本端写出失败不计入熔断。全部候选都处于打开态时放行其中一条探测一次，
-而不是直接把请求判为失败。熔断状态是进程内的，多实例部署时各实例独立计数。
-
-选路按两级取候选：与客户端方言一致的渠道成段在前，不限方言的渠道成段在后，回退按链上顺序推进。
-同协议候选始终排在跨协议候选之前；跨协议段排除已在同协议段出现过的渠道。
-两级都无候选时仍回 404。
-尝试预算按段计量：同协议段与跨协议段各有额度，默认分别为 2 次与 1 次，
-同协议候选全部失败不会挤掉跨协议降级的机会；总次数另设防御性上限。
-
-拼候选链之前按上游套餐跳过配额耗尽的渠道：套餐的全部限额行都已用满且快照仍然新鲜时，
-该 `cred_group` 下的候选不进入回退链；快照超过两个采集周期视为未知并放行，
-宁可尝试不可误杀。套餐与限额行的已用量来自周期探针采集，采集周期由
-`TOKENMP_UPSTREAM_PROBE_INTERVAL` 控制；探针不可达或配置写坏时保留旧快照，
-转发路径不受影响。上游套餐与配额的运营序列见 [docs/operations.md](docs/operations.md)。
-
-本机可配置网关中间件：插件登记在本机清单里（清单路径由 `TOKENMP_PLUGIN_STATE_FILE` 指定），
-用 `tokenmp admin plugin add/list/enable/disable/del` 维护，在四个时机介入转发：`onRequest` 在选路
-之前改写请求体，改写后的模型名参与选路；`onEvent` 在流式分片写回客户端之前改写或丢弃
-内容事件；`onStreamEnd` 在终止帧之前补发分片；`onResponse` 在非流式响应体写回之前改写。
-钩子抛错、超时或返回非法值一律按原样放行并记结构化日志。可改写范围、失败语义与沙箱边界见
-[docs/compatibility.md](docs/compatibility.md)。
-
-每请求写一条 JSON 请求日志到标准输出：请求 id（客户端带 `X-Request-Id` 时沿用）、
-协议方言、请求模型名、命中的渠道 id、上游状态码、是否跨协议重建与耗时。凭据与密钥不进入日志。
-
-每次上游尝试另写一条 JSON 尝试日志：同一请求 id、尝试序号、渠道 id、协议方言、
-上游状态码、耗时、是否重试、是否换渠道、是否跨协议重建、错误码与已取得的用量分量。
-被熔断跳过的候选也各写一条 `outcome=skipped` 的记录，说明该候选未发起上游调用。
-一次请求发生重试或换渠道时会留下多行，与请求日志按请求 id 关联。凭据与密钥不进入日志。
 
 ## 管理面
 
@@ -115,7 +72,7 @@ $ ./bin/tokenmp help
 |---|---|
 | `merchant` | `create` / `list` / `disable` |
 | `channel` | `create` / `list` / `enable` / `disable` |
-| `credential` | `add` / `list` / `disable` / `oauth-login` |
+| `credential` | `add` / `list` / `enable` / `disable` / `oauth-login` |
 | `model-map` | `set` / `list` / `disable` |
 | `account` | `create` / `list` / `disable` / `set-multiplier` / `set-merchant` |
 | `key` | `issue` / `list` / `revoke` |
@@ -131,66 +88,51 @@ $ ./bin/tokenmp help
 | `plan` | `add` / `list` |
 | `plugin` | `add` / `list` / `enable` / `disable` / `del` / `check` |
 
-```
+```sh
 $ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
-$ ./bin/tokenmp admin account create --code acct-1 --name 账户
 $ ./bin/tokenmp admin key issue --account 1
-$ ./bin/tokenmp admin price publish --merchant 1 --model glm-5 \
-    --component input_token:0.27:currency:1000000
 $ ./bin/tokenmp admin usage list --account 1 --json
 ```
 
-所有 `list` 动作输出对齐的纯文本表格，加 `--json` 输出机器可读格式。
-`key issue` 的明文只在签发那一次输出并标注「仅此一次」，库中只存哈希与前缀；
-凭据与密钥的明文不进入 `list` 输出。用法错误退出码为 2，运行失败为 1。
-
-`calendar import` 从标准输入或 `--file` 读 `日期,day_kind` 行；`price publish` 的
-`--component` 形如 `metric:price:unit_settle:qty`，可重复。
-
-`quota add` 的 `--scope` 取规则范围、`--metric` 取计费指标、`--window` 取
-`rolling` / `calendar`、`--period` 取 `5h` / `day` / `week` / `month` / `total`、
-`--action` 取 `reject` / `throttle`；`quota list` 附当前窗口已用量与剩余额度，
-可按 `--scope` 与 `--scope-id` 过滤或按 `--account` 列出某账户的限额，不填列出全部；
-`quota reset` 在指定限额上追加一条重置基准，`--reason` 与 `--operator` 必填。
-
-`plan add` 写入一条上游套餐及其限额行：`--quota` 形如 `metric:window:limit` 且可重复，
-`window` 可写 `rolling/5h` 或简写 `5h`（`5h` 推 `rolling`，其余周期推 `calendar`）；
-`plan list` 按「一行一条限额」摊平，附当前窗口的已用百分比与重置时刻。
-`plugin add` 先装配校验、通过后才写入本机清单，`plugin list` 列出清单并对每一项做一次装配探测，
-`plugin enable/disable/del` 改清单（不动插件文件），`plugin check` 校验任意路径、不读清单。
-该组只读写本机文件，不连数据库。
-`credential oauth-login <group>` 按渠道 `config` 声明的 OAuth 画像走设备码或授权码流程换取令牌
-并写入凭据，输出只含分组与账户标识，不回显任何令牌。
+所有 `list` 动作输出对齐的纯文本表格，加 `--json` 输出机器可读格式；用法错误退出码为 2，
+运行失败为 1。`key issue` 的明文只在签发那一次输出并标注「仅此一次」，库中只存哈希与前缀。
+各动作的参数与输出形态见 [docs/operations.md](docs/operations.md) 的运营剧本。
 
 ## 目录结构
 
 ```
-cmd/tokenmp/         单一入口二进制：子命令分发、参数解析、调用与输出
-internal/gateway/    网关装配与运行：把各能力包接成 HTTP 入口并在信号下优雅退出
-internal/domain/     协议无关的内部统一请求/响应与端口定义
-internal/adapters/   三种线协议与内部统一格式的双向转换
-internal/pipeline/   核心转发流水线：选路、请求定稿、上游调用与候选回退
-internal/transport/  共用 HTTP 入口与 SSE 逐帧读取
-internal/upstream/   调用上游渠道的 HTTP 客户端
-internal/credential/ 按路由引用取凭据、轮换并拼装上游请求头
-internal/oauth/      订阅型上游的 OAuth 协议交互：刷新、设备码轮询与授权码交换
-internal/access/     客户端鉴权、402 预检与 429 限额处置
-internal/route/      选路候选链：加权随机、分层与跨协议去重
-internal/observability/ 访问日志与尝试日志的字段拼装
-internal/usage/      用量落库编排：归属补全、request 分量与结算接入
-internal/ratelimit/  渠道级进程内限流：令牌桶与并发位
-internal/circuit/    渠道级进程内熔断：连续失败隔离与半开探测
-internal/store/      MySQL 连接、迁移与 schema 读写
-internal/admin/      管理面业务层：商家、渠道、账户、定价与充值
-internal/billing/    计费指标与用量映射
-internal/quota/      窗口限额判定：窗口计算与超限比较
-internal/plan/       上游套餐与配额：耗尽判定、声明式探针与周期采集
-internal/settlement/ 用量结算：定价解析、倍率链与账本扣减
-internal/plugin/     网关中间件：moejs 沙箱加载、四个钩子与进程内统计
-internal/config/     环境变量到运行配置
-pkg/                 可被外部导入的包
-examples/            可运行的中间件示例：由 internal/plugin 的用例加载，避免与文档漂移
-.github/workflows/   CI 与发布链路
+cmd/tokenmp/            单一入口二进制：子命令分发、参数解析与输出
+internal/domain/        协议无关的内部统一请求/响应与端口定义
+internal/adapters/      四种线协议与内部统一格式的双向转换
+internal/pipeline/      核心转发流水线：选路、请求定稿、上游调用与候选回退
+internal/transport/     共用 HTTP 入口与 SSE 逐帧读取
+internal/upstream/      调用上游渠道的 HTTP 客户端
+internal/credential/    按路由引用取凭据、轮换并拼装上游请求头
+internal/oauth/         订阅型上游的 OAuth 协议交互：刷新、设备码轮询与授权码交换
+internal/access/        客户端鉴权、额度预检与限额处置
+internal/apikey/        客户端 API 密钥的生成、展示前缀与存储哈希
+internal/auth/          页面账号体系：注册、登录、会话签发与销毁
+internal/me/            账户自助查询端点：摘要、包存量、限额窗口与最近流水
+internal/user/          /api/v1/user/* 用户级业务端点
+internal/webapi/        页面通信的公共部分：六字段信封与会话令牌解析
+internal/route/         选路候选链：加权随机首选与同协议／跨协议分段拼链
+internal/failure/       上游失败处理的唯一出处：诊断、处置与动作
+internal/observability/ 请求日志与尝试日志的字段拼装
+internal/usage/         用量落库编排：归属补全、request 分量与结算接入
+internal/ratelimit/     渠道级进程内限流：令牌桶与并发位
+internal/circuit/       渠道级进程内熔断：连续失败隔离与半开探测
+internal/billing/       计费领域的公共定义：计费指标与用量映射
+internal/quota/         窗口限额判定：窗口计算与超限比较
+internal/plan/          上游套餐与配额：耗尽判定、声明式探针与周期采集
+internal/settlement/    用量结算：定价解析、倍率链与账本扣减
+internal/store/         MySQL 连接、迁移与 schema 读写
+internal/admin/         管理面业务层：商家、渠道、账户、定价与充值
+internal/plugin/        网关中间件：moejs 沙箱加载、四个钩子与进程内统计
+internal/config/        环境变量到运行配置
+web/                    浏览器控制台前端（React + Vite + TypeScript），产物 web/dist
+examples/               可运行的中间件示例，由 internal/plugin 的用例加载以避免与文档漂移
+docs/                   数据面、页面通信、兼容性与计费口径、部署、运营五份规范
+.github/workflows/      CI 与发布链路
 ```
 
 ## 文档
@@ -198,9 +140,10 @@ examples/            可运行的中间件示例：由 internal/plugin 的用例
 | 文件 | 内容 |
 |---|---|
 | [docs/openapi.yaml](docs/openapi.yaml) | 数据面 OpenAPI 3.1 规范：端点、请求/响应 schema、SSE、错误体与状态码 |
-| [docs/compatibility.md](docs/compatibility.md) | 三方言参数处理、模型名替换、跨协议降级、流式用量帧与用量计费口径 |
+| [docs/openapi-web.yaml](docs/openapi-web.yaml) | 页面通信 OpenAPI 3.1 规范：信封字段、业务码与会话流程 |
+| [docs/compatibility.md](docs/compatibility.md) | 参数处理、模型名替换、跨协议降级、流式用量帧、用量计费口径与错误码表 |
 | [docs/deploy.md](docs/deploy.md) | 部署形态、环境变量全表、启动与迁移、优雅关闭、systemd 单元示例 |
-| [docs/operations.md](docs/operations.md) | 运营剧本：入驻到对账的命令序列，步骤编号与端到端剧本互引 |
+| [docs/operations.md](docs/operations.md) | 运营剧本：入驻到对账的命令序列，与端到端剧本互引 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发门禁与提交规范 |
 | [RELEASE.md](RELEASE.md) | 发布链路与本地验证 |
 | [CHANGELOG.md](CHANGELOG.md) | 由 release-please 维护的变更记录 |
@@ -216,11 +159,9 @@ tokenmp v0.1.0 (go go1.27.1)
 构建 2026-10-05T06:33:15Z
 ```
 
-- **版本号**：构建期注入值 → 未注入时退化为提交短哈希 → 都没有时为 `dev`
-- **提交行**：来自二进制内嵌的 VCS 信息，取不到时整行省略
-- **构建日期**：GoReleaser 注入，本机构建没有这一行
-
-版本号随 tag 发布，产物挂在 GitHub Release 页面，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+版本号取构建期注入值，未注入时退化为提交短哈希，都取不到时为 `dev`；提交行来自二进制内嵌的
+VCS 信息；构建日期由 GoReleaser 注入，本机构建没有这一行。版本号随 tag 发布，产物挂在
+GitHub Release 页面，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 贡献
 
