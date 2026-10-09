@@ -28,6 +28,9 @@ type fakeStore struct {
 	insertMerchant       func(context.Context, store.Merchant) (uint64, error)
 	listMerchants        func(context.Context) ([]store.Merchant, error)
 	setMerchantStatus    func(context.Context, uint64, string) error
+	merchantSettleInfo   func(context.Context, uint64) ([]byte, error)
+	setMerchantSettle    func(context.Context, uint64, []byte) error
+	settlementFacts      func(context.Context, uint64, time.Time, time.Time) (store.SettlementFacts, error)
 	insertChannel        func(context.Context, store.Channel) (uint64, error)
 	listChannels         func(context.Context) ([]store.Channel, error)
 	setChannelEnabled    func(context.Context, uint64, bool) error
@@ -97,6 +100,30 @@ func (f *fakeStore) SetMerchantStatus(ctx context.Context, id uint64, status str
 		return f.setMerchantStatus(ctx, id, status)
 	}
 	return nil
+}
+
+func (f *fakeStore) MerchantSettleInfo(ctx context.Context, id uint64) ([]byte, error) {
+	f.record("MerchantSettleInfo")
+	if f.merchantSettleInfo != nil {
+		return f.merchantSettleInfo(ctx, id)
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) SetMerchantSettleInfo(ctx context.Context, id uint64, raw []byte) error {
+	f.record("SetMerchantSettleInfo")
+	if f.setMerchantSettle != nil {
+		return f.setMerchantSettle(ctx, id, raw)
+	}
+	return nil
+}
+
+func (f *fakeStore) MerchantSettlementFacts(ctx context.Context, merchantID uint64, from, to time.Time) (store.SettlementFacts, error) {
+	f.record("MerchantSettlementFacts")
+	if f.settlementFacts != nil {
+		return f.settlementFacts(ctx, merchantID, from, to)
+	}
+	return store.SettlementFacts{MerchantID: merchantID}, nil
 }
 
 func (f *fakeStore) InsertChannel(ctx context.Context, c store.Channel) (uint64, error) {

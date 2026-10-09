@@ -13,6 +13,7 @@ Go 单模块（`github.com/sumwai/tokenmp`），发布产物是一个二进制�
 | 协议互转 | 同一份内部请求/响应格式在四种方言之间转换，一条渠道因此可以承接任一方言的请求；含参数处理、模型名替换、跨协议降级与流式用量帧 | [docs/compatibility.md](docs/compatibility.md) |
 | 鉴权与限额 | Bearer 鉴权、账户额度预检，以及账户与 API key 两个维度的窗口限额处置 | [docs/compatibility.md](docs/compatibility.md) 的错误码表 |
 | 上游调度 | 候选链选路、同渠道换凭据重试与按类冷却、渠道级限流与熔断、上游套餐配额探针 | [docs/deploy.md](docs/deploy.md) |
+| 商家分佣 | 按 `merchant.settle_info` 的抽成率与账期给入驻商家出账，对账单由卖出总额、平台抽成与上游成本构成 | [docs/compatibility.md](docs/compatibility.md) |
 | 网关中间件 | 本机可配置插件在四个时机改写请求体、流式内容事件与响应体，注册与启停用 `tokenmp admin plugin` | [docs/compatibility.md](docs/compatibility.md)、[examples/](examples/) |
 | 页面通信 | `/api/v1/*` 供浏览器控制台调用，前端的响应类型与客户端由契约生成 | [docs/openapi-web.yaml](docs/openapi-web.yaml)、[web/AGENTS.md](web/AGENTS.md) |
 | 日志 | 每次请求与每次上游尝试各写一条 JSON 日志到标准输出，凭据与密钥不进入日志 | [docs/deploy.md](docs/deploy.md) |
@@ -79,10 +80,13 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 | `adjust` | `add` / `list` |
 | `quota` | `add` / `list` / `del` / `reset` |
 | `plan` | `add` / `list` |
+| `settlement` | `set` / `get` / `list` |
 | `plugin` | `add` / `list` / `enable` / `disable` / `del` / `check` |
 
 ```sh
 $ ./bin/tokenmp admin merchant create --code partner-1 --name 入驻 --kind partner
+$ ./bin/tokenmp admin settlement set --merchant 2 --commission-rate 0.1 --period month
+$ ./bin/tokenmp admin settlement list --merchant 2
 $ ./bin/tokenmp admin key issue --account 1
 $ ./bin/tokenmp admin usage list --account 1 --json
 ```
@@ -117,7 +121,7 @@ internal/circuit/       渠道级进程内熔断：连续失败隔离与半开�
 internal/billing/       计费领域的公共定义：计费指标与用量映射
 internal/quota/         窗口限额判定：窗口计算与超限比较
 internal/plan/          上游套餐与配额：耗尽判定、声明式探针与周期采集
-internal/settlement/    用量结算：定价解析、倍率链与账本扣减
+internal/settlement/    用量结算与商家分佣：定价解析、倍率链、账本扣减与账期出账
 internal/store/         MySQL 连接、迁移与 schema 读写
 internal/admin/         管理面业务层：商家、渠道、账户、定价与充值
 internal/plugin/        网关中间件：moejs 沙箱加载、四个钩子与进程内统计

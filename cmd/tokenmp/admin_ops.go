@@ -40,7 +40,7 @@ func adminUsage(ctx context.Context, args []string, env *adminEnv) int {
 		})
 	}
 	return env.emit(*asJSON,
-		[]string{flagID, headerCreatedAt, flagAccount, flagChannel, flagModel, "gross_amount", flagMultiplier, usageName, "settlement"},
+		[]string{flagID, headerCreatedAt, flagAccount, flagChannel, flagModel, "gross_amount", flagMultiplier, usageName, settlementName},
 		rows, records)
 }
 

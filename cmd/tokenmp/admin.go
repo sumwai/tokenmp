@@ -82,10 +82,14 @@ const (
 // 为了不给已有的 flag 常量列表带出一大片纯格式改动。
 const flagCredentialStyle = "credential-style" //nolint:gosec // G101：这是 CLI flag 名，不是凭据。
 
+// flagCommissionRate 同理单独声明：分佣口径的 flag 不该为对齐问题改动上面的整块。
+const flagCommissionRate = "commission-rate"
+
 // 管理动作名集中声明：同一动作名在多个组里出现。
 const (
 	actionCreate        = "create"
 	actionList          = "list"
+	actionGet           = "get"
 	actionDisable       = "disable"
 	actionEnable        = "enable"
 	actionAdd           = "add"
@@ -112,17 +116,22 @@ const (
 
 // 表格列名用下划线命名的取值；对应的 flag 常量是连字符形态，不能直接当表头。
 const (
-	headerCredGroup = "cred_group"
-	headerBaseURL   = "base_url"
-	headerScopeID   = "scope_id"
-	headerValidFrom = "valid_from"
-	headerValidTo   = "valid_to"
-	headerTimeFrom  = "time_from"
-	headerTimeTo    = "time_to"
+	headerMerchantID     = "merchant_id"
+	headerCommissionRate = "commission_rate"
+	headerCredGroup      = "cred_group"
+	headerBaseURL        = "base_url"
+	headerScopeID        = "scope_id"
+	headerValidFrom      = "valid_from"
+	headerValidTo        = "valid_to"
+	headerTimeFrom       = "time_from"
+	headerTimeTo         = "time_to"
 )
 
 // usageName 同时是管理组名与用量流水表的列名。
 const usageName = "usage"
+
+// settlementName 同时是管理组名与流水表的结算明细列名，理由同 usageName。
+const settlementName = "settlement"
 
 // minAdminArgs 是组 + 动作两个参数的最小个数。
 const minAdminArgs = 2
@@ -201,6 +210,7 @@ var adminGroups = []adminGroupSpec{
 	{"adjust", []string{actionAdd, actionList}},
 	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
 	{"plan", []string{actionAdd, actionList}},
+	{settlementName, []string{actionSet, actionGet, actionList}},
 	{pluginGroupName, []string{actionAdd, actionList, actionEnable, actionDisable, actionDel, "check"}},
 }
 
@@ -320,6 +330,8 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminQuota(ctx, rest, env)
 	case "plan":
 		return adminPlan(ctx, rest, env)
+	case settlementName:
+		return adminSettlement(ctx, rest, env)
 	case pluginGroupName:
 		return adminPlugin(ctx, rest, env)
 	case helpName, helpShortFlag, helpLongFlag:

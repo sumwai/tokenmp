@@ -28,6 +28,10 @@ type Store interface {
 	InsertMerchant(ctx context.Context, m store.Merchant) (uint64, error)
 	ListMerchants(ctx context.Context) ([]store.Merchant, error)
 	SetMerchantStatus(ctx context.Context, id uint64, status string) error
+	// 商家分账口径与账期聚合。读出的 settle_info 是原文，解析规则在 internal/settlement。
+	MerchantSettleInfo(ctx context.Context, id uint64) ([]byte, error)
+	SetMerchantSettleInfo(ctx context.Context, id uint64, raw []byte) error
+	MerchantSettlementFacts(ctx context.Context, merchantID uint64, from, to time.Time) (store.SettlementFacts, error)
 
 	// 渠道。
 	InsertChannel(ctx context.Context, c store.Channel) (uint64, error)
