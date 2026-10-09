@@ -43,6 +43,15 @@ describe('entryForPath', () => {
   it('清单里没有的路径返回 null：骨架据此渲染无权访问页', () => {
     expect(entryForPath(manifest, '/usage')).toBeNull();
   });
+
+  it('二级页归属到它的入口：详情深链不被判成无权访问', () => {
+    expect(entryForPath(manifest, '/requests/req_abc')?.title).toBe('请求记录');
+  });
+
+  it('根路径只按精确匹配，不覆盖其余路径', () => {
+    expect(entryForPath(manifest, '/unknown')?.title).toBeUndefined();
+    expect(entryForPath(manifest, '/unknown')).toBeNull();
+  });
 });
 
 describe('allows', () => {

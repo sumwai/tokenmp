@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { ArrowRight, ChevronRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 import { ApiError, Code } from '../lib/envelope';
@@ -190,7 +191,10 @@ export function RequestRow({ item }: { item: RequestItem }) {
           <StatusBadge status={item.status} />
           <span className="truncate text-sm font-medium">{item.model}</span>
           {item.upstream_model !== item.model ? (
-            <span className="shrink-0 text-xs text-muted">→ {item.upstream_model}</span>
+            <span className="flex shrink-0 items-center gap-1 text-xs text-muted">
+              <ArrowRight size={16} aria-hidden />
+              {item.upstream_model}
+            </span>
           ) : null}
         </div>
         <div className="mt-1 flex items-center gap-2 truncate text-xs text-muted tabular-nums">
@@ -211,9 +215,7 @@ export function RequestRow({ item }: { item: RequestItem }) {
           <div>未取得用量</div>
         )}
       </div>
-      <span aria-hidden="true" className="shrink-0 text-muted">
-        ›
-      </span>
+      <ChevronRight size={16} className="shrink-0 text-muted" aria-hidden />
     </Link>
   );
 }
@@ -318,8 +320,7 @@ export function ShapeDiff({
               <span className="text-muted">{entry.path}</span>
               <span>{diffKindLabel(entry.kind)}</span>
               <span className="tabular-nums">
-                {entry.from}
-                {entry.to ? ` → ${entry.to}` : ''}
+                {entry.to ? `${entry.from} 改为 ${entry.to}` : entry.from}
               </span>
             </li>
           ))}

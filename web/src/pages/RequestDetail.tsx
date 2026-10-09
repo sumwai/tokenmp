@@ -1,3 +1,4 @@
+import { ArrowLeft } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import {
@@ -47,8 +48,8 @@ export function RequestDetail() {
   return (
     <main className="mx-auto max-w-3xl px-4 py-6">
       <div className="flex items-center gap-3">
-        <Link to={requestsPath(EMPTY_LIST_QUERY)} aria-label="返回列表" className="text-lg">
-          ←
+        <Link to={requestsPath(EMPTY_LIST_QUERY)} aria-label="返回列表">
+          <ArrowLeft size={20} aria-hidden />
         </Link>
         <h1 className="text-lg font-bold">请求详情</h1>
       </div>

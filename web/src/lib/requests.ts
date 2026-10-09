@@ -1,28 +1,87 @@
 import { request, requestEnvelope } from './client';
 import { ApiError, Code } from './envelope';
-import type { components } from './generated/schema';
 
 /**
  * 请求记录的数据层：端点调用、URL 查询参数与展示口径。
  *
- * 响应类型一律取自契约生成的类型（web/AGENTS.md：接口类型由契约文件生成，禁止手写），
- * 页面只消费本模块导出的类型与函数。
+ * 契约类型暂按仓库现状手写，与 docs/openapi-web.yaml 的 UsageTokens / RequestItem /
+ * RequestAttempt / RequestDetail / RequestStatsItem 逐字段对齐；#135 的契约生成管道
+ * 落地后改为消费生成物（同 web/src/lib/console.ts 的现状）。
  *
  * 列表页的筛选状态与发往服务端的查询参数是同一份：URL query 的键名与契约参数名一致
  * （page / size / since / until / model / api_key_id / status / request_id），
  * 因此深链、刷新与请求三者天然对齐，不需要两套映射。
  */
 
+/** 一次调用的 token 用量分量；子项包含于主计数。 */
+export interface UsageTokens {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cache_write_5m_tokens: number;
+  cache_write_1h_tokens: number;
+  reasoning_tokens: number;
+  server_tool_uses: number;
+}
+
 /** 一条请求记录的摘要与归属层字段。 */
-export type RequestItem = components['schemas']['RequestItem'];
-/** 一条请求记录的完整视图。 */
-export type RequestDetail = components['schemas']['RequestDetail'];
+export interface RequestItem {
+  request_id: string;
+  created_at: string;
+  status: 'success' | 'failed' | 'cancelled';
+  http_status: number;
+  upstream_status: number | null;
+  failure_class: string | null;
+  error_code: string | null;
+  duration_ms: number;
+  model: string;
+  upstream_model: string;
+  protocol: string;
+  upstream_protocol: string;
+  cross_protocol: boolean;
+  api_key_id: number;
+  usage: UsageTokens | null;
+  payload_available: boolean;
+  stream?: boolean;
+  written_bytes?: number;
+}
+
 /** 一次上游尝试。 */
-export type RequestAttempt = components['schemas']['RequestAttempt'];
+export interface RequestAttempt {
+  attempt: number;
+  outcome: 'ok' | 'failed' | 'cancelled' | 'skipped';
+  upstream_status: number | null;
+  failure_class: string | null;
+  error_code: string | null;
+  cross_protocol: boolean;
+  duration_ms: number;
+}
+
+/** 脱敏后的报文结构：键名与嵌套层次保留，用户内容替换为类型标记。 */
+export type RedactedPayload = Record<string, unknown>;
+
+/** 一条请求记录的完整视图。 */
+export interface RequestDetail {
+  request: RequestItem;
+  attempts: RequestAttempt[];
+  request_shape: RedactedPayload | null;
+  upstream_request_shape: RedactedPayload | null;
+  error_response_shape: RedactedPayload | null;
+  rewritten_parts: string[];
+  client_ip: string;
+  user_agent: string;
+}
+
 /** 一个分组维度的请求计数。 */
-export type RequestStatsItem = components['schemas']['RequestStatsItem'];
-/** 脱敏后的报文结构。 */
-export type RedactedPayload = components['schemas']['RedactedPayload'];
+export interface RequestStatsItem {
+  key: string;
+  total: number;
+  success: number;
+  failed: number;
+  cancelled: number;
+}
+
 /** 请求终态。 */
 export type RequestStatus = RequestItem['status'];
 /** 一次尝试的结果。 */
@@ -146,7 +205,7 @@ export interface RequestPage {
 
 /** listRequests 拉取一页请求记录。 */
 export async function listRequests(query: RequestListQuery): Promise<RequestPage> {
-  const env = await requestEnvelope<components['schemas']['PageOfRequestItem']>(requestsAPI(query));
+  const env = await requestEnvelope<{ items: RequestItem[] }>(requestsAPI(query));
   if (env.code !== Code.OK) {
     throw new ApiError(env.code, env.message);
   }
@@ -186,7 +245,7 @@ export async function requestStats(query: RequestStatsQuery): Promise<RequestSta
   if (query.model !== '') params.set('model', query.model);
   if (query.apiKeyID !== '') params.set('api_key_id', query.apiKeyID);
   params.set('group_by', query.groupBy);
-  const data = await request<components['schemas']['RequestStatsPage']>(
+  const data = await request<{ items: RequestStatsItem[] }>(
     `/api/v1/user/requests/stats?${params.toString()}`,
   );
   return data?.items ?? [];

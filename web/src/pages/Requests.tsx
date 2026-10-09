@@ -77,16 +77,11 @@ export function Requests() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-bold">请求记录</h1>
-          <p className="mt-1 text-xs text-muted">
-            按请求时刻倒序；重试过的失败尝试不单独成行，条数与实际调用次数一致。
-          </p>
-        </div>
-        <Link to="/" className="min-h-10 rounded-lg border border-edge px-3 py-2 text-sm">
-          返回首页
-        </Link>
+      <div>
+        <h1 className="text-lg font-bold">请求记录</h1>
+        <p className="mt-1 text-xs text-muted">
+          按请求时刻倒序；重试过的失败尝试不单独成行，条数与实际调用次数一致。
+        </p>
       </div>
 
       <FilterBar
