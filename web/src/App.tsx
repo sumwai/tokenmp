@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { ConsoleLayout } from './components/console';
+import { Account } from './pages/Account';
 import { Callback } from './pages/Callback';
 import { ForgotPassword } from './pages/ForgotPassword';
 import { Home } from './pages/Home';
@@ -26,6 +27,7 @@ export function App() {
       <Route path="/auth/callback" element={<Callback />} />
       <Route element={<ConsoleLayout />}>
         <Route index element={<Home />} />
+        <Route path="account" element={<Account />} />
         <Route path="requests" element={<Requests />} />
         <Route path="requests/:requestID" element={<RequestDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
