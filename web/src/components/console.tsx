@@ -13,6 +13,7 @@ import {
   Tag,
   UserRound,
   Users,
+  Wallet,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -49,6 +50,7 @@ const icons: Record<string, LucideIcon> = {
   gauge: Gauge,
   scale: Scale,
   receipt: Receipt,
+  wallet: Wallet,
 };
 
 /** EntryIcon 渲染条目声明的图标；名字未登记时不渲染。 */

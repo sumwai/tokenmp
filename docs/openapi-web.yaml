@@ -38,6 +38,7 @@ info:
     | 200 | 成功 |
     | 400 | 参数缺失或非法 |
     | 401 | 未登录、会话失效或凭据错误 |
+    | 402 | 账户无可用额度，按账户页的存量与引导区块充值或购买 |
     | 403 | 已登录但无权访问 |
     | 404 | 资源不存在或登录方式未启用 |
     | 409 | 状态冲突（邮箱已注册等） |
@@ -522,7 +523,7 @@ paths:
 
         `capabilities` 的取值：`console` 控制台首页、`keys` 密钥自助管理、
         `requests` 请求记录、`usage` 用量与应扣量、`account` 账户概览、
-        `ops` 管理面。取值只增不改语义，未识别的取值前端忽略。
+        `purchase` 充值 / 购买、`ops` 管理面。取值只增不改语义，未识别的取值前端忽略。
       operationId: getUserConsole
       responses:
         "200":
@@ -551,6 +552,8 @@ paths:
         返回当前登录主体所属账户的摘要：账户标识、可用包存量、生效中的窗口限额与最近流水。
         与数据面的账户自助查询（`docs/openapi.yaml` 的 `/v1/me/account`）口径一致，
         差别只在鉴权与作用域推导；判定复用同一份实现，展示与判定不会漂移。
+        账户无可用额度（`settlement.Fundable` 判定为否）时回 `402`，与数据面同一门闸；
+        页面据此把 402 分支渲染成充值 / 购买引导。
         响应不含密钥、上游凭据或商家内部标识。
       operationId: getUserAccount
       parameters:
@@ -579,6 +582,110 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/products:
+    get:
+      tags: [user]
+      summary: 商品目录
+      description: |
+        列出可购买的商品档位：名称、结算单位、每份数量、售价、可用模型范围与有效天数。
+        数量与售价都是十进制字符串；`model_scope` 为 `null` 表示不限模型。
+        目录不分页，但分页三字段照填：档位是运营上架的有限集合，与模型目录同一形状。
+      operationId: listUserProducts
+      responses:
+        "200":
+          description: 商品目录。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfProduct"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/user/orders:
+    get:
+      tags: [user]
+      summary: 订单列表
+      description: |
+        列出当前账户的订单，按购买时刻倒序。每笔订单记录买了哪个商品档位、几份、
+        实付金额与派生的存量；金额、数量与折算率都是十进制字符串，不经浮点。
+      operationId: listUserOrders
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 订单列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfOrder"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [user]
+      summary: 下单购买
+      description: |
+        购买一个商品档位：写入购买事实并派生账本，存量、有效期与折算率按档位口径生成。
+        归属由会话推导，不接受账户或商家参数。
+
+        幂等：请求必须携带客户端生成的 `idempotency_key`，服务端以
+        `(账户, idempotency_key)` 唯一。同一键重复提交（双击、超时重试）只产生一笔订单，
+        响应返回首次创建的那笔订单，不重复发放存量。键在账户内唯一，不同账户可用同一个键；
+        同一键用于不同的商品或份数时同样返回首次订单，不按本次请求重新下单。
+      operationId: createUserOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+      responses:
+        "200":
+          description: 订单；幂等命中时是首次创建的那笔。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
         "500":
@@ -1233,9 +1340,9 @@ components:
       description: |-
         业务结果码，取值见 info.description 的业务码表；程序按它分支，不解析 message。
         取值与常量名同时是前端业务码常量的生成来源。
-      enum: [200, 400, 401, 403, 404, 409, 410, 429, 500]
+      enum: [200, 400, 401, 402, 403, 404, 409, 410, 429, 500]
       x-enum-varnames:
-        [OK, BadRequest, Unauthorized, Forbidden, NotFound, Conflict, ChallengeExpired, TooManyRequests, InternalError]
+        [OK, BadRequest, Unauthorized, PaymentRequired, Forbidden, NotFound, Conflict, ChallengeExpired, TooManyRequests, InternalError]
 
     Envelope:
       type: object
@@ -1821,6 +1928,120 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ModelInfo"
+      additionalProperties: false
+
+    Product:
+      type: object
+      description: 一个可购买的商品档位；数量与售价都是十进制字符串。
+      required: [id, name, unit, qty, price, model_scope, validity_days]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
+          description: 档位名称，面向用户。
+        unit:
+          type: string
+          description: 派生存量的结算单位 `currency` / `token` / `credit`。
+        qty:
+          type: string
+          description: 每份包含的数量，十进制字符串。
+        price:
+          type: string
+          description: 售价，十进制字符串。
+        model_scope:
+          type: [array, "null"]
+          description: |-
+            该档位的可用模型范围；`null` 表示不限。空数组表示一个模型都不含，
+            与 `null` 是两个不同的口径。
+          items:
+            type: string
+        validity_days:
+          type: integer
+          minimum: 0
+          description: 派生账本的有效天数；`0` 表示不过期。
+      additionalProperties: false
+
+    PageOfProduct:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Product"
+      additionalProperties: false
+
+    CreateOrderRequest:
+      type: object
+      description: 下单请求；账户归属由会话推导，不接受账户或商家参数。
+      required: [product_id, qty, idempotency_key]
+      properties:
+        product_id:
+          type: integer
+          format: int64
+          minimum: 1
+        qty:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 购买份数，正数的十进制字符串。
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 64
+          description: |-
+            客户端生成的幂等键。同一账户下同一键的重复提交只产生一笔订单，
+            响应返回首次创建的那笔订单；键在账户内唯一，不同账户可以用同一个键。
+      additionalProperties: false
+
+    Order:
+      type: object
+      description: 一笔订单；金额、数量与折算率都是十进制字符串，不经浮点。
+      required: [id, product_id, product_name, unit, qty, price_paid, total, unit_rate, purchased_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        product_id:
+          type: integer
+          format: int64
+          minimum: 1
+        product_name:
+          type: string
+          description: 购买时档位的名称。
+        unit:
+          type: string
+          description: 派生存量的结算单位 `currency` / `token` / `credit`。
+        qty:
+          type: string
+          description: 购买份数，十进制字符串。
+        price_paid:
+          type: string
+          description: 实付金额，十进制字符串。
+        total:
+          type: string
+          description: 本次购买派生的存量 = 每份数量 × 份数，十进制字符串。
+        unit_rate:
+          type: string
+          description: 购买时刻锁定的折算率 = 售价 / 每份数量，十进制字符串。
+        purchased_at:
+          type: string
+          format: date-time
+          description: 购买时刻。
+      additionalProperties: false
+
+    PageOfOrder:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Order"
       additionalProperties: false
 
     RequestItem:
@@ -2455,6 +2676,15 @@ components:
             $ref: "#/components/schemas/Envelope"
     Unauthorized:
       description: 未登录、会话失效或凭据错误，`code=401`。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Envelope"
+    PaymentRequired:
+      description: |-
+        账户无可用额度，`code=402`。与数据面同一判定（`settlement.Fundable`）：
+        没有任何未过期且可扣的账本，也不存在可透支的货币账本。
+        页面据此给出充值 / 购买引导（web/AGENTS.md 的三态）。
       content:
         application/json:
           schema:

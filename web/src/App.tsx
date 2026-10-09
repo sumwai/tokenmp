@@ -15,6 +15,7 @@ import { ForgotPassword } from './pages/ForgotPassword';
 import { Home } from './pages/Home';
 import { Keys } from './pages/Keys';
 import { Login } from './pages/Login';
+import { Purchase } from './pages/Purchase';
 import { RequestDetail } from './pages/RequestDetail';
 import { Requests } from './pages/Requests';
 import { ResetPassword } from './pages/ResetPassword';
@@ -39,6 +40,7 @@ export function App() {
         <Route index element={<Home />} />
         <Route path="account" element={<Account />} />
         <Route path="keys" element={<Keys />} />
+        <Route path="purchase" element={<Purchase />} />
         <Route path="requests" element={<Requests />} />
         <Route path="usage" element={<Usage />} />
         <Route path="requests/:requestID" element={<RequestDetail />} />

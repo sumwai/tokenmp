@@ -8,9 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/shopspring/decimal"
+
+	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/identity"
 	"github.com/sumwai/tokenmp/internal/me"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
@@ -78,6 +83,36 @@ type fakeStore struct {
 	usageStats      []store.UsageStatsItem
 	usageStatsErr   error
 	usageStatsQuery store.UsageStatsQuery
+
+	// 账本：默认给一份未过期且有余量的货币包，使账户概览在既有用例里保持 fundable；
+	// 402 分支的用例把它置空。
+	buckets    []settlement.Bucket
+	bucketsErr error
+
+	// 商品与订单：字段承载替身返回值与最后一次调用的入参。
+	products       []store.Product
+	productsErr    error
+	product        *store.Product
+	productErr     error
+	createdOrder   store.OrderWrite
+	createOrderErr error
+	purchaseArg    store.Purchase
+	bucketArg      store.BucketRow
+	orders         []store.OrderRow
+	ordersTotal    int
+	ordersErr      error
+	ordersLimit    int
+	ordersOffset   int
+}
+
+// fundableBucket 是一份可用的账本行：判定为 fundable，账户概览因此正常返回摘要。
+func fundableBucket() []settlement.Bucket {
+	return []settlement.Bucket{{
+		ID:        1,
+		Unit:      billing.UnitSettleCurrency,
+		Remaining: decimal.NewFromInt(1),
+		Fallback:  billing.FallbackChargeBalance,
+	}}
 }
 
 func (f *fakeStore) AccountByOwner(_ context.Context, _ uint64) (*store.Account, error) {
@@ -173,6 +208,43 @@ func (f *fakeStore) AccountUsageStats(_ context.Context, q store.UsageStatsQuery
 	return f.usageStats, nil
 }
 
+func (f *fakeStore) AccountBuckets(_ context.Context, _ uint64) ([]settlement.Bucket, error) {
+	if f.bucketsErr != nil {
+		return nil, f.bucketsErr
+	}
+	return f.buckets, nil
+}
+
+func (f *fakeStore) ListProducts(_ context.Context) ([]store.Product, error) {
+	if f.productsErr != nil {
+		return nil, f.productsErr
+	}
+	return f.products, nil
+}
+
+func (f *fakeStore) Product(_ context.Context, _ uint64) (*store.Product, error) {
+	if f.productErr != nil {
+		return nil, f.productErr
+	}
+	return f.product, nil
+}
+
+func (f *fakeStore) CreateOrder(_ context.Context, p store.Purchase, b store.BucketRow) (store.OrderWrite, error) {
+	f.purchaseArg, f.bucketArg = p, b
+	if f.createOrderErr != nil {
+		return store.OrderWrite{}, f.createOrderErr
+	}
+	return f.createdOrder, nil
+}
+
+func (f *fakeStore) ListOrdersByAccount(_ context.Context, _ uint64, limit, offset int) ([]store.OrderRow, int, error) {
+	f.ordersLimit, f.ordersOffset = limit, offset
+	if f.ordersErr != nil {
+		return nil, 0, f.ordersErr
+	}
+	return f.orders, f.ordersTotal, nil
+}
+
 type fakeSummary struct {
 	accountID uint64
 	apiKeyID  uint64
@@ -198,15 +270,21 @@ type testEnv struct {
 
 func newTestEnv() *testEnv {
 	session := &fakeSessions{userID: 7, roles: identity.Roles(store.RoleMember)}
-	st := &fakeStore{account: &store.Account{ID: 42, Code: "acc_42"}}
+	st := &fakeStore{account: &store.Account{ID: 42, Code: "acc_42"}, buckets: fundableBucket()}
 	summary := &fakeSummary{summary: &me.Summary{Account: me.AccountView{ID: 42, Code: "acc_42"}}}
 	return &testEnv{
-		handler: NewHandler(Options{Sessions: session, Store: st, Summary: summary}),
+		handler: NewHandler(Options{Sessions: session, Store: st, Summary: summary, Now: fixedClock}),
 		session: session,
 		store:   st,
 		summary: summary,
 	}
 }
+
+// testInstant 是测试用的固定时刻：额度预检与购买派生的有效期都按它计算。
+var testInstant = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+
+// fixedClock 返回固定时刻，使额度预检与有效期断言可复现。
+func fixedClock() time.Time { return testInstant }
 
 // do 发起一次请求并解码信封，同时校验六个字段固定出现。
 func (e *testEnv) do(t *testing.T, method, path, token, query string) (int, map[string]json.RawMessage) {

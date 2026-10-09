@@ -14,9 +14,12 @@ import (
 
 // 页面业务码。取值与 docs/openapi-web.yaml 的业务码表一致，改动须同步契约。
 const (
-	CodeOK               = 200
-	CodeBadRequest       = 400
-	CodeUnauthorized     = 401
+	CodeOK           = 200
+	CodeBadRequest   = 400
+	CodeUnauthorized = 401
+	// CodePaymentRequired 与数据面的 402 同一语义：账户无可用额度。
+	// 页面侧的落点是账户概览，页面据此给充值指引（web/AGENTS.md 的三态）。
+	CodePaymentRequired  = 402
 	CodeForbidden        = 403
 	CodeNotFound         = 404
 	CodeConflict         = 409

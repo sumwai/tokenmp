@@ -40,6 +40,7 @@ var consoleNavigation = []consoleEntry{
 	{Title: "首页", Icon: "house", Path: "/", Capability: identity.CapConsole},
 	{Title: "密钥", Description: "签发与吊销调用密钥", Icon: "key-round", Path: "/keys", Capability: identity.CapKeys},
 	{Title: "用量", Description: "token 与应扣量", Icon: "chart-line", Path: "/usage", Capability: identity.CapUsage},
+	{Title: "充值", Description: "购买存量与订单", Icon: "wallet", Path: "/purchase", Capability: identity.CapPurchase},
 	{Title: "我的", Description: "包存量与窗口限额", Icon: "user-round", Path: "/account", Capability: identity.CapAccount},
 }
 

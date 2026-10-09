@@ -127,3 +127,21 @@ func (f *fakeGatewayStore) RequestAttempts(context.Context, string) ([]store.Req
 func (f *fakeGatewayStore) RequestStats(context.Context, store.RequestStatsQuery) ([]store.RequestStatsItem, error) {
 	return nil, nil
 }
+
+// 以下四个方法补齐用户级端点的商品目录与订单依赖，同样返回空结果。
+
+func (f *fakeGatewayStore) ListProducts(context.Context) ([]store.Product, error) {
+	return nil, nil
+}
+
+func (f *fakeGatewayStore) Product(context.Context, uint64) (*store.Product, error) {
+	return nil, sql.ErrNoRows
+}
+
+func (f *fakeGatewayStore) CreateOrder(context.Context, store.Purchase, store.BucketRow) (store.OrderWrite, error) {
+	return store.OrderWrite{}, nil
+}
+
+func (f *fakeGatewayStore) ListOrdersByAccount(context.Context, uint64, int, int) ([]store.OrderRow, int, error) {
+	return nil, 0, nil
+}

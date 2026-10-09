@@ -74,7 +74,7 @@ func TestConsoleRejectsNonGet(t *testing.T) {
 // 响应下发它包含的全部身份），差异只来自服务端的能力集合，条目按能力过滤，
 // 因此前端不需要按身份分支。
 func TestConsolePerIdentity(t *testing.T) {
-	dataCaps := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount}
+	dataCaps := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount, identity.CapPurchase}
 	tests := []struct {
 		name       string
 		role       string
@@ -88,7 +88,7 @@ func TestConsolePerIdentity(t *testing.T) {
 			role:       store.RoleMember,
 			wantRoles:  []string{store.RoleMember},
 			wantCaps:   dataCaps,
-			wantNav:    []string{"/", "/keys", "/usage", "/account"},
+			wantNav:    []string{"/", "/keys", "/usage", "/purchase", "/account"},
 			wantSectNo: 1,
 		},
 		{
@@ -96,7 +96,7 @@ func TestConsolePerIdentity(t *testing.T) {
 			role:       store.RolePartner,
 			wantRoles:  []string{store.RoleMember, store.RolePartner},
 			wantCaps:   dataCaps,
-			wantNav:    []string{"/", "/keys", "/usage", "/account"},
+			wantNav:    []string{"/", "/keys", "/usage", "/purchase", "/account"},
 			wantSectNo: 1,
 		},
 		{
@@ -105,7 +105,7 @@ func TestConsolePerIdentity(t *testing.T) {
 			role:       store.RoleAdmin,
 			wantRoles:  []string{store.RoleMember, store.RolePartner, store.RoleAdmin},
 			wantCaps:   append(slices.Clone(dataCaps), identity.CapOps),
-			wantNav:    []string{"/", "/keys", "/usage", "/account"},
+			wantNav:    []string{"/", "/keys", "/usage", "/purchase", "/account"},
 			wantSectNo: 2,
 		},
 	}
@@ -178,12 +178,12 @@ func TestConsoleCapabilitiesAreUnion(t *testing.T) {
 		t.Fatalf("应 200: %d %s", status, env)
 	}
 	data := consoleDataOf(t, env)
-	want := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount, identity.CapOps}
+	want := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount, identity.CapPurchase, identity.CapOps}
 	if !slices.Equal(data.Capabilities, want) {
 		t.Fatalf("capabilities = %v，期望并集 %v", data.Capabilities, want)
 	}
 	// 条目同样不重复：能力重复会让同一入口在导航里出现多次。
-	if got := pathsOf(data.Navigation); !slices.Equal(got, []string{"/", "/keys", "/usage", "/account"}) {
+	if got := pathsOf(data.Navigation); !slices.Equal(got, []string{"/", "/keys", "/usage", "/purchase", "/account"}) {
 		t.Fatalf("navigation = %v，期望每条目一次", got)
 	}
 }
@@ -192,7 +192,7 @@ func TestConsoleCapabilitiesAreUnion(t *testing.T) {
 // 该条目不出现，段落条目被过滤光时整段不返回。
 func TestConsoleFiltersByCapability(t *testing.T) {
 	// 缺少请求记录能力：唯一含该能力的段落整体消失，导航不含相关条目。
-	caps := []string{identity.CapConsole, identity.CapKeys, identity.CapUsage, identity.CapAccount}
+	caps := []string{identity.CapConsole, identity.CapKeys, identity.CapUsage, identity.CapAccount, identity.CapPurchase}
 	if nav := filterEntries(consoleNavigation, caps); len(nav) != len(consoleNavigation) {
 		t.Fatalf("导航项都不需要 %s，应全部保留，得到 %d 项", identity.CapRequests, len(nav))
 	}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
 import {
   DEFAULT_RECENT,
@@ -163,6 +163,29 @@ export function Account() {
         <div>
           <Title subtitle="包存量、窗口限额与最近流水" />
           <Forbidden message={load.message} />
+        </div>
+      );
+    }
+    // 402 是充值 / 购买引导的落点（web/AGENTS.md 的三态）：服务端与数据面同一判定，
+    // 账户没有任何可用额度时不再返回摘要，页面据此给出下一步动作。
+    if (load.code === Code.PaymentRequired) {
+      return (
+        <div>
+          <Title subtitle="包存量、窗口限额与最近流水" />
+          <Section title="账户无可用额度">
+            <div className="flex flex-col items-start gap-3 text-sm">
+              <p className="text-muted">{load.message}</p>
+              <p className="text-muted">
+                购买一个存量包后即可继续调用；包存量与窗口限额也会在到账后显示在这里。
+              </p>
+              <Link
+                to="/purchase"
+                className="inline-flex min-h-11 items-center rounded-lg bg-action px-4 text-sm font-semibold text-white"
+              >
+                去充值 / 购买
+              </Link>
+            </div>
+          </Section>
         </div>
       );
     }

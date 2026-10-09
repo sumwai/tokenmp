@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/sumwai/tokenmp/internal/billing"
 )
 
@@ -199,13 +201,16 @@ type Product struct {
 
 // Purchase 是 account_purchase 的一行。
 type Purchase struct {
-	ID          uint64    `json:"id"`
-	AccountID   uint64    `json:"account_id"`
-	MerchantID  uint64    `json:"merchant_id"`
-	ProductID   uint64    `json:"product_id"`
-	Qty         string    `json:"qty"`
-	PricePaid   string    `json:"price_paid"`
-	PurchasedAt time.Time `json:"purchased_at"`
+	ID         uint64 `json:"id"`
+	AccountID  uint64 `json:"account_id"`
+	MerchantID uint64 `json:"merchant_id"`
+	ProductID  uint64 `json:"product_id"`
+	Qty        string `json:"qty"`
+	PricePaid  string `json:"price_paid"`
+	// IdempotencyKey 是客户端生成的幂等键，(account_id, idempotency_key) 唯一。
+	// 空串即未提供，落库为 NULL（MySQL 唯一索引允许多个 NULL）。
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	PurchasedAt    time.Time `json:"purchased_at"`
 }
 
 // Quota 是 account_quota 的一行：窗口型限额定义。
@@ -766,8 +771,8 @@ func (s *Store) Product(ctx context.Context, id uint64) (*Product, error) {
 	return &p, nil
 }
 
-const insertPurchaseSQL = `INSERT INTO account_purchase (account_id, merchant_id, product_id, qty, price_paid, purchased_at)
-VALUES (?, ?, ?, ?, ?, ?)`
+const insertPurchaseSQL = `INSERT INTO account_purchase (account_id, merchant_id, product_id, qty, price_paid, purchased_at, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 // insertPurchase 写一条购买记录。
 func insertPurchase(ctx context.Context, ex executor, p Purchase) (uint64, error) {
@@ -789,14 +794,224 @@ func insertPurchase(ctx context.Context, ex executor, p Purchase) (uint64, error
 	if p.PurchasedAt.IsZero() {
 		return 0, errors.New("store: account_purchase.purchased_at 不能为零值")
 	}
+	// 幂等键由客户端给出，超长直接拒绝而不是让列定义在写入时报 1406：
+	// 越界的键是调用方的契约错误，应在进入 SQL 之前报出来。
+	if len(p.IdempotencyKey) > maxIdempotencyKeyLen {
+		return 0, fmt.Errorf("store: account_purchase.idempotency_key 超过 %d 字符", maxIdempotencyKeyLen)
+	}
 	res, err := ex.ExecContext(ctx, insertPurchaseSQL,
-		p.AccountID, p.MerchantID, p.ProductID, p.Qty, p.PricePaid, p.PurchasedAt)
+		p.AccountID, p.MerchantID, p.ProductID, p.Qty, p.PricePaid, p.PurchasedAt, nullArg(p.IdempotencyKey))
 	return insertID(res, err, "account_purchase")
 }
 
 // InsertPurchase 记录一次购买。
 func (s *Store) InsertPurchase(ctx context.Context, p Purchase) (uint64, error) {
 	return insertPurchase(ctx, s.db, p)
+}
+
+const (
+	// maxIdempotencyKeyLen 是幂等键的长度上限，与列定义 VARCHAR(64) 一致。
+	maxIdempotencyKeyLen = 64
+	// UnitRateScale 是购买派生折算率的十进制小数位，与 account_bucket.unit_rate
+	// 的列标度 DECIMAL(24,8) 一致。
+	UnitRateScale int32 = 8
+)
+
+// DeriveUnitRate 算购买时刻锁定的折算率 = 商品单价 / 商品每份数量。
+//
+// 按单份口径计算，与购买份数无关：多份购买的 price_paid / total 约简后等于单份比值，
+// 因此同一档位不论买几份，折算率相同。舍入为四舍五入（DivRound），位数取列标度。
+// 购买动作（internal/admin）与订单读取（本文件）共用本函数，两处不会各算一套。
+func DeriveUnitRate(price, qty decimal.Decimal) string {
+	return price.DivRound(qty, UnitRateScale).String()
+}
+
+// OrderRow 是账户面订单列表的一行：购买事实，加上它买到的商品档位口径。
+//
+// 商品名、结算单位与派生存量取自 merchant_product：档位是商品事实的来源，订单记的是
+// 「买了哪个档位、几份、付了多少」。档位在现行运营动作里只新增，不修改也不下架，
+// 因此这些取值对既有订单是稳定的；将来若加下架动作，它必须是状态位而不是删行，
+// 否则订单会失去档位（本查询用内连接，档位缺失的订单不会出现在列表里）。
+type OrderRow struct {
+	ID          uint64
+	ProductID   uint64
+	ProductName string
+	Unit        billing.UnitSettle
+	Qty         string
+	PricePaid   string
+	// Total 是本次购买派生的存量 = 商品每份数量 × 购买份数。
+	Total string
+	// UnitRate 是本次购买锁定的折算率，算式见 DeriveUnitRate。
+	UnitRate    string
+	PurchasedAt time.Time
+}
+
+// OrderRowFrom 把一笔购买与它的商品档位折成订单展示口径。
+//
+// 购买行的 qty / price_paid 从 DECIMAL 列读回时带列标度（写入 "2" 读回 "2.00000000"），
+// 这里按数值归一到 decimal.String() 的形态：否则同一笔订单在「下单响应」与「订单列表」
+// 两条路径上会给出不同的字符串，展示层也会把尾零一并显示出来。
+func OrderRowFrom(p Purchase, product Product) (OrderRow, error) {
+	productQty, err := decimal.NewFromString(product.Qty)
+	if err != nil {
+		return OrderRow{}, fmt.Errorf("store: 商品 %d 的数量无法解析: %w", product.ID, err)
+	}
+	productPrice, err := decimal.NewFromString(product.Price)
+	if err != nil {
+		return OrderRow{}, fmt.Errorf("store: 商品 %d 的价格无法解析: %w", product.ID, err)
+	}
+	qty, err := decimal.NewFromString(p.Qty)
+	if err != nil {
+		return OrderRow{}, fmt.Errorf("store: 订单 %d 的份数无法解析: %w", p.ID, err)
+	}
+	pricePaid, err := decimal.NewFromString(p.PricePaid)
+	if err != nil {
+		return OrderRow{}, fmt.Errorf("store: 订单 %d 的实付金额无法解析: %w", p.ID, err)
+	}
+	return OrderRow{
+		ID:          p.ID,
+		ProductID:   product.ID,
+		ProductName: product.Name,
+		Unit:        product.Unit,
+		Qty:         qty.String(),
+		PricePaid:   pricePaid.String(),
+		Total:       productQty.Mul(qty).String(),
+		UnitRate:    DeriveUnitRate(productPrice, productQty),
+		PurchasedAt: p.PurchasedAt,
+	}, nil
+}
+
+// orderColumnsSQL 是订单列表的列清单：购买事实 + 商品档位口径。
+const orderColumnsSQL = `SELECT p.id, p.product_id, p.qty, p.price_paid, p.purchased_at,
+  m.name, m.unit, m.qty, m.price
+FROM account_purchase p
+JOIN merchant_product m ON m.id = p.product_id`
+
+// orderAccountCondition 是订单读路径的账户谓词：作用域只能来自会话。
+const orderAccountCondition = " WHERE p.account_id = ?"
+
+// ListOrdersByAccount 按账户分页列出订单，返回当页行与满足条件的总数。
+//
+// 排序按购买行主键倒序：同一秒内落库的两笔订单也有确定顺序，翻页不会因排序不稳定
+// 而重复或漏行。主键与购买顺序一致，与契约的「按购买时刻倒序」等价。
+func (s *Store) ListOrdersByAccount(ctx context.Context, accountID uint64, limit, offset int) ([]OrderRow, int, error) {
+	if accountID == 0 {
+		return nil, 0, errors.New("store: account_purchase.account_id 不能为 0")
+	}
+	if limit <= 0 {
+		return nil, 0, errors.New("store: 分页条数必须为正")
+	}
+	if offset < 0 {
+		return nil, 0, errors.New("store: 分页偏移不能为负")
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM account_purchase p"+
+		" JOIN merchant_product m ON m.id = p.product_id"+orderAccountCondition, accountID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("store: 统计 account_purchase 失败: %w", err)
+	}
+	//nolint:gosec // G202：拼进去的是列清单与由常量组成的谓词，取值一律走问号占位符。
+	query := orderColumnsSQL + orderAccountCondition + " ORDER BY p.id DESC LIMIT ? OFFSET ?"
+	rows, err := s.db.QueryContext(ctx, query, accountID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: 查询 account_purchase 失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var orders []OrderRow
+	for rows.Next() {
+		var (
+			id                     uint64
+			productID              uint64
+			purchase               Purchase
+			purchasedAt            scanTime
+			product                Product
+			unitRaw                string
+			productQty, productPri string
+		)
+		if err := rows.Scan(&id, &productID, &purchase.Qty, &purchase.PricePaid, &purchasedAt,
+			&product.Name, &unitRaw, &productQty, &productPri); err != nil {
+			return nil, 0, fmt.Errorf("store: 解析订单行失败: %w", err)
+		}
+		purchase.PurchasedAt = purchasedAt.Time
+		purchase.ID = id
+		product.ID = productID
+		product.Unit = billing.UnitSettleFromDB(unitRaw)
+		product.Qty, product.Price = productQty, productPri
+		order, err := OrderRowFrom(purchase, product)
+		if err != nil {
+			return nil, 0, err
+		}
+		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("store: 遍历订单行失败: %w", err)
+	}
+	return orders, total, nil
+}
+
+const purchaseByKeySQL = `SELECT id, account_id, merchant_id, product_id, qty, price_paid, purchased_at
+FROM account_purchase
+WHERE account_id = ? AND idempotency_key = ?`
+
+// purchaseByAccountAndKey 按幂等键读回首次创建的订单；无匹配时返回 sql.ErrNoRows。
+func (s *Store) purchaseByAccountAndKey(ctx context.Context, accountID uint64, key string) (*Purchase, error) {
+	var (
+		p           Purchase
+		purchasedAt scanTime
+	)
+	err := s.db.QueryRowContext(ctx, purchaseByKeySQL, accountID, key).Scan(
+		&p.ID, &p.AccountID, &p.MerchantID, &p.ProductID, &p.Qty, &p.PricePaid, &purchasedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: 按幂等键查询 account_purchase 失败: %w", err)
+	}
+	p.PurchasedAt = purchasedAt.Time
+	p.IdempotencyKey = key
+	return &p, nil
+}
+
+// OrderWrite 是幂等下单的结果。
+type OrderWrite struct {
+	// Purchase 是本次下单对应的那一笔订单：新建时是刚写入的行，幂等命中时是首次创建的行。
+	Purchase Purchase
+	// BucketID 是派生的账本行 id；幂等命中时为 0，表示本次没有新发存量。
+	BucketID uint64
+	// Replayed 报告本次是幂等命中而不是新建。
+	Replayed bool
+}
+
+// CreateOrder 在同一个事务内写购买记录与派生账本，并按幂等键去重。
+//
+// 去重靠 (account_id, idempotency_key) 唯一索引而不是先查后写：先查后写在并发提交
+// 之间留了窗口，两次请求都能查到「不存在」然后各写一笔，正是要防的重复下单。
+// 命中唯一键时回滚本次事务并读回首次创建的订单 —— 唯一索引检查会等胜者的写锁，
+// 因此读回时那一行一定已经提交。
+func (s *Store) CreateOrder(ctx context.Context, p Purchase, b BucketRow) (OrderWrite, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OrderWrite{}, fmt.Errorf("store: 开启下单事务失败: %w", err)
+	}
+	id, err := insertPurchase(ctx, tx, p)
+	if err != nil {
+		_ = tx.Rollback()
+		if p.IdempotencyKey == "" || !isDuplicateKey(err) {
+			return OrderWrite{}, err
+		}
+		existing, lookupErr := s.purchaseByAccountAndKey(ctx, p.AccountID, p.IdempotencyKey)
+		if lookupErr != nil {
+			return OrderWrite{}, lookupErr
+		}
+		return OrderWrite{Purchase: *existing, Replayed: true}, nil
+	}
+	bucketID, err := insertBucket(ctx, tx, b)
+	if err != nil {
+		_ = tx.Rollback()
+		return OrderWrite{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OrderWrite{}, fmt.Errorf("store: 提交下单事务失败: %w", err)
+	}
+	p.ID = id
+	return OrderWrite{Purchase: p, BucketID: bucketID}, nil
 }
 
 const insertQuotaSQL = `INSERT INTO account_quota (scope, scope_id, metric, window_kind, period, limit_amount, action)

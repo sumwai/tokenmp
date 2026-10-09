@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
@@ -42,6 +43,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleModels(w, r)
 	case r.URL.Path == RequestsPath:
 		h.handleRequests(w, r)
+	case r.URL.Path == ProductsPath:
+		h.handleProducts(w, r)
+	case r.URL.Path == OrdersPath:
+		h.handleOrders(w, r)
 	case r.URL.Path == RequestsPath+requestStatsSuffix:
 		h.handleRequestStats(w, r)
 	case strings.HasPrefix(r.URL.Path, RequestsPath+"/"):
@@ -64,6 +69,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAccount 返回当前账户的摘要。
+//
+// 额度预检与数据面的账户自助查询同口径（internal/settlement 的 Fundable）：账户没有
+// 任何可用额度时回 402，而不是回一份空摘要。页面据此把 402 分支渲染成充值引导
+// （web/AGENTS.md 的三态）。判定放在参数校验之前，与数据面「鉴权通过后先预检、
+// 再进处理器」的顺序一致。
 func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "只支持 GET 方法")
@@ -71,6 +81,15 @@ func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	account, ok := h.currentAccount(w, r)
 	if !ok {
+		return
+	}
+	buckets, err := h.store.AccountBuckets(r.Context(), account.ID)
+	if err != nil {
+		webapi.WriteError(w, http.StatusInternalServerError, webapi.CodeInternal, "额度预检失败")
+		return
+	}
+	if !settlement.Fundable(buckets, h.now()) {
+		webapi.WriteError(w, http.StatusPaymentRequired, webapi.CodePaymentRequired, "账户无可用额度")
 		return
 	}
 	limit, err := parseRecent(r.URL.Query().Get(recentQueryParam))
