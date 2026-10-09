@@ -80,10 +80,11 @@ const mysqlDuplicateEntry = 1062
 // describeWriteError 把驱动错误转成可读错误；唯一键冲突单独给出口径。
 //
 // 管理面的写操作要求「幂等或明确报错」：冲突必须让人一眼看出是同键已存在，
-// 而不是把 1062 原样抛出让人去查文档。
+// 而不是把 1062 原样抛出让人去查文档。冲突同时包上 store.ErrConflict 哨兵：
+// 页面层要把「同名记录已存在」翻成 409，判定只能靠可识别的错误，不能靠文案。
 func describeWriteError(table string, err error) error {
 	if isDuplicateKey(err) {
-		return fmt.Errorf("store: 写入 %s 失败：唯一键冲突，同键记录已存在: %w", table, err)
+		return fmt.Errorf("%w：写入 %s 失败，同键记录已存在: %w", ErrConflict, table, err)
 	}
 	return fmt.Errorf("store: 写入 %s 失败: %w", table, err)
 }
