@@ -27,6 +27,8 @@ import (
 	"github.com/sumwai/tokenmp/internal/adapters/gemini"
 	"github.com/sumwai/tokenmp/internal/adapters/openaichat"
 	"github.com/sumwai/tokenmp/internal/adapters/openairesponses"
+	"github.com/sumwai/tokenmp/internal/admin"
+	"github.com/sumwai/tokenmp/internal/adminapi"
 	webauth "github.com/sumwai/tokenmp/internal/auth"
 	"github.com/sumwai/tokenmp/internal/circuit"
 	"github.com/sumwai/tokenmp/internal/credential"
@@ -131,6 +133,11 @@ type gatewayStore interface {
 
 // 编译期断言：真实存储层满足装配层的依赖面。
 var _ gatewayStore = (*store.Store)(nil)
+
+// 编译期断言：真实存储层满足管理面的数据面（管理面清单的派生与脱敏由 internal/admin
+// 的 Service 承担，其构造要求整张管理面数据面）。缺一个方法时在这里编译失败，
+// 而不是等到运行期发现管理面子树没挂上。
+var _ admin.Store = (*store.Store)(nil)
 
 // 编译期断言：熔断器同时满足流水线的熔断端口与「全部候选被拒时放行探测」的兜底能力。
 // 兜底能力经类型断言检测，缺失时不会编译报错，因此在这里固定住。
@@ -451,6 +458,15 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		Store:    st,
 		Summary:  meService,
 	}))
+	// 管理面只读清单与用户面同一套会话令牌，差别只在权限判定（要求管理面身份）。
+	// 清单的派生与脱敏复用 internal/admin 的 Service，因此需要存储层满足整张管理面
+	// 数据面：真实存储层满足（见上面的编译期断言），测试替身不满足时不挂载该子树。
+	if adminStore, ok := st.(admin.Store); ok {
+		mux.Handle(adminapi.PathPrefix, adminapi.NewHandler(adminapi.Options{
+			Sessions: webAuth,
+			Lister:   admin.New(adminStore),
+		}))
+	}
 	mux.HandleFunc("/", notFoundJSON)
 
 	gw := &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector, plugins: middleware}

@@ -60,6 +60,38 @@ export const api = {
   getUserUsageStats: (init?: ApiInit<"/api/v1/user/usage/stats", "get">) =>
     apiRequest("/api/v1/user/usage/stats", "get", init),
 
+  /** 账户清单 */
+  listAdminAccounts: (init?: ApiInit<"/api/v1/admin/accounts", "get">) =>
+    apiRequest("/api/v1/admin/accounts", "get", init),
+
+  /** 调账清单 */
+  listAdminAdjustments: (init?: ApiInit<"/api/v1/admin/adjustments", "get">) =>
+    apiRequest("/api/v1/admin/adjustments", "get", init),
+
+  /** 渠道清单 */
+  listAdminChannels: (init?: ApiInit<"/api/v1/admin/channels", "get">) =>
+    apiRequest("/api/v1/admin/channels", "get", init),
+
+  /** 上游凭据清单 */
+  listAdminCredentials: (init?: ApiInit<"/api/v1/admin/credentials", "get">) =>
+    apiRequest("/api/v1/admin/credentials", "get", init),
+
+  /** 渠道模型映射清单 */
+  listAdminModelMaps: (init?: ApiInit<"/api/v1/admin/modelmaps", "get">) =>
+    apiRequest("/api/v1/admin/modelmaps", "get", init),
+
+  /** 定价版本清单 */
+  listAdminPricing: (init?: ApiInit<"/api/v1/admin/pricing", "get">) =>
+    apiRequest("/api/v1/admin/pricing", "get", init),
+
+  /** 窗口限额清单 */
+  listAdminQuotas: (init?: ApiInit<"/api/v1/admin/quotas", "get">) =>
+    apiRequest("/api/v1/admin/quotas", "get", init),
+
+  /** 全平台用量流水 */
+  listAdminUsage: (init?: ApiInit<"/api/v1/admin/usage", "get">) =>
+    apiRequest("/api/v1/admin/usage", "get", init),
+
   /** 列出可用登录方式 */
   listAuthProviders: (init?: ApiInit<"/api/v1/auth/providers", "get">) =>
     apiRequest("/api/v1/auth/providers", "get", init),

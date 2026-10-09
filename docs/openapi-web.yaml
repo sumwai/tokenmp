@@ -63,7 +63,10 @@ info:
     - `/api/v1/user/*`：用户级业务数据。作用域由会话推导，不接受账户 id 参数；
       一个登录主体拥有一个账户（`account.owner_user_id`），密钥、用量与请求记录
       都挂在该账户上。列表端点用偏移分页，分页信息在信封的 `page` / `size` / `total`。
-    - `/api/v1/merchant/*`、`/api/v1/admin/*`：商家面与管理面，尚未定义。
+    - `/api/v1/merchant/*`：商家面，尚未定义。
+    - `/api/v1/admin/*`：管理面。已定义平台管理员的只读清单（渠道、凭据、模型映射、
+      账户、价格、限额、调账与流水），字段与 `tokenmp admin <组> list --json` 的行一致；
+      动作类端点尚未定义。请求方须持有管理面能力，越权返回 `code=403`。
 servers:
   - url: http://localhost:8080
     description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
@@ -75,6 +78,8 @@ tags:
     description: 第三方登录
   - name: user
     description: 用户级业务数据：账户概览、密钥、用量、请求记录与模型目录
+  - name: admin
+    description: 管理面只读清单：渠道、凭据、模型映射、账户、价格、限额、调账与流水
 
 # 默认端点需要会话令牌；公开端点逐个置空。
 security:
@@ -928,6 +933,281 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/admin/channels:
+    get:
+      tags: [admin]
+      summary: 渠道清单
+      description: |
+        列出全部上游渠道，与 `tokenmp admin channel list --json` 同一份行数据。
+        渠道的 `config` 不回显：探针请求头里可能有鉴权 token。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminChannels
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 渠道清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminChannel"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/credentials:
+    get:
+      tags: [admin]
+      summary: 上游凭据清单
+      description: |
+        列出全部上游凭据，与 `tokenmp admin credential list --json` 同一份行数据。
+        只给脱敏前缀与形态，明文与 secret JSON 任何端点都不返回。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminCredentials
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 凭据清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminCredential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/modelmaps:
+    get:
+      tags: [admin]
+      summary: 渠道模型映射清单
+      description: |
+        列出全部渠道模型映射，与 `tokenmp admin model-map list --json` 同一份行数据。
+        路径段用单词（`modelmaps`），与认证面路径的命名约定一致。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminModelMaps
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 模型映射清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminModelMap"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/accounts:
+    get:
+      tags: [admin]
+      summary: 账户清单
+      description: |
+        列出全部账户，与 `tokenmp admin account list --json` 同一份行数据。
+        含归属主体与默认商家的标识：管理面要据此把账户与运营对象对应起来。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminAccounts
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 账户清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminAccount"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/pricing:
+    get:
+      tags: [admin]
+      summary: 定价版本清单
+      description: |
+        列出定价版本，与 `tokenmp admin price list --json` 同一份行数据；按 id 升序。
+        未下架的行 `retired_at` 为 `null`，据此区分生效与已退役版本（与 CLI 的
+        `active` / `retired` 列同一判定）。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminPricing
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/AdminMerchantFilter"
+        - $ref: "#/components/parameters/ModelFilter"
+      responses:
+        "200":
+          description: 定价版本清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminPricing"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/quotas:
+    get:
+      tags: [admin]
+      summary: 窗口限额清单
+      description: |
+        列出窗口限额定义，附当前窗口的已用量与剩余额度，与
+        `tokenmp admin quota list --json` 同一份行数据。已用量与剩余额度复用判定链上的
+        同一份窗口计算；无法判定的行两者为 `null`，展示层给占位符。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminQuotas
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/AdminScopeFilter"
+        - $ref: "#/components/parameters/AdminScopeIDFilter"
+        - $ref: "#/components/parameters/AdminAccountFilter"
+      responses:
+        "200":
+          description: 限额清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminQuota"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/adjustments:
+    get:
+      tags: [admin]
+      summary: 调账清单
+      description: |
+        列出人工调账记录，与 `tokenmp admin adjust list --json` 同一份行数据；按 id 升序。
+        调整数量是十进制字符串，正数为补扣、负数为退费。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminAdjustments
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/AdminAccountFilter"
+      responses:
+        "200":
+          description: 调账清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminAdjustment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/usage:
+    get:
+      tags: [admin]
+      summary: 全平台用量流水
+      description: |
+        列出用量流水，与 `tokenmp admin usage list --json` 同一份行数据；按 id 升序。
+        与用户面流水的差别只在作用域：这里跨账户，用于对账与排障，因此多出
+        `merchant_id` 与结算字段。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminUsage
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - $ref: "#/components/parameters/AdminAccountFilter"
+        - $ref: "#/components/parameters/Since"
+      responses:
+        "200":
+          description: 用量流水。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminUsageItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     webSession:
@@ -1732,6 +2012,350 @@ components:
             只作排障线索。
       additionalProperties: false
 
+    AdminChannel:
+      type: object
+      description: |
+        一条上游渠道，字段与 `tokenmp admin channel list --json` 的行一致。
+        `config` 不在其中：探针请求头里可能有鉴权 token，管理面不回显配置原文。
+      required: [id, merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        merchant_id:
+          type: integer
+          format: int64
+          description: 归属商家 id。
+        name:
+          type: string
+        vendor:
+          type: string
+          description: 厂商标识，如 `openai` / `anthropic` / `gemini`。
+        type:
+          type: string
+          description: 渠道的线协议类型，取值见数据面的渠道类型白名单。
+        cred_group:
+          type: string
+          description: 取用上游凭据的分组名。
+        base_url:
+          type: string
+          description: 上游基地址。
+        priority:
+          type: integer
+          description: 选路优先级，越小越优先。
+        weight:
+          type: integer
+          description: 同优先级内的加权轮询权重。
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    PageOfAdminChannel:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminChannel"
+      additionalProperties: false
+
+    AdminCredential:
+      type: object
+      description: |
+        一行上游凭据，字段与 `tokenmp admin credential list --json` 的行一致。
+        明文与 secret JSON 从不出现，只有脱敏前缀。
+      required: [id, merchant_id, cred_group, name, kind, prefix, expired, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        merchant_id:
+          type: integer
+          format: int64
+        cred_group:
+          type: string
+          description: 凭据分组；渠道按它取用凭据。
+        name:
+          type: string
+          description: 凭据名，用于同组内区分轮换。
+        kind:
+          type: string
+          description: "凭据形态：`api`、`oauth`，解析失败时为 `unknown`。"
+        prefix:
+          type: string
+          description: 可展示的明文前缀。
+        expires:
+          type: string
+          description: oauth 凭据的过期时刻（RFC3339）；api 凭据没有该字段。
+        expired:
+          type: boolean
+          description: oauth 凭据的访问令牌是否已过期；api 凭据恒为 false。
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    PageOfAdminCredential:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminCredential"
+      additionalProperties: false
+
+    AdminModelMap:
+      type: object
+      description: 一条渠道模型映射，字段与 `tokenmp admin model-map list --json` 的行一致。
+      required: [id, channel_id, model, upstream_model, price_multiplier, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        channel_id:
+          type: integer
+          format: int64
+        model:
+          type: string
+          description: 客户端请求的模型名。
+        upstream_model:
+          type: string
+          description: 转发给该渠道时替换成的模型名。
+        price_multiplier:
+          type: string
+          description: 该映射的价格倍率，十进制字符串。
+        request_overrides:
+          type: object
+          additionalProperties: true
+          description: 转发时叠加到请求体上的字段；未配置时该字段不出现。
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    PageOfAdminModelMap:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminModelMap"
+      additionalProperties: false
+
+    AdminAccount:
+      type: object
+      description: 一个账户，字段与 `tokenmp admin account list --json` 的行一致。
+      required: [id, code, name, owner_user_id, default_merchant_id, price_multiplier, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        code:
+          type: string
+        name:
+          type: string
+        owner_user_id:
+          type: [integer, "null"]
+          description: 归属登录主体的 id；平台账户没有归属时为 `null`。
+        default_merchant_id:
+          type: [integer, "null"]
+          description: 默认商家 id；未指定时为 `null`。
+        price_multiplier:
+          type: string
+          description: 账户级价格倍率，十进制字符串。
+        status:
+          type: string
+          description: "账户状态：`active` 可用，`disabled` 已停用。"
+      additionalProperties: false
+
+    PageOfAdminAccount:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminAccount"
+      additionalProperties: false
+
+    AdminPricing:
+      type: object
+      description: |
+        一个定价版本，字段与 `tokenmp admin price list --json` 的行一致。
+        改价产生新版本行并把旧版本 `retired_at` 置位，不覆盖旧行。
+      required: [id, merchant_id, model, version, effective_at, retired_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        merchant_id:
+          type: integer
+          format: int64
+          description: 定价归属的商家 id。
+        model:
+          type: string
+          description: 客户端请求的模型名。
+        version:
+          type: integer
+          description: 同一 (商家, 模型) 下自增的版本号。
+        effective_at:
+          type: string
+          format: date-time
+          description: 版本生效时刻。
+        retired_at:
+          type: [string, "null"]
+          format: date-time
+          description: 版本退役时刻；`null` 表示当前生效。
+      additionalProperties: false
+
+    PageOfAdminPricing:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminPricing"
+      additionalProperties: false
+
+    AdminQuota:
+      type: object
+      description: |
+        一条窗口限额定义加当前窗口的已用量，字段与 `tokenmp admin quota list --json`
+        的行一致。已用量与剩余额度由判定链上的同一份窗口计算得出。
+      required: [id, scope, scope_id, metric, window_kind, period, limit_amount, action, used, remaining]
+      properties:
+        id:
+          type: integer
+          format: int64
+        scope:
+          type: string
+          description: "限额作用范围：`account` / `api_key` / `channel` / `plan`。"
+        scope_id:
+          type: integer
+          format: int64
+          description: 范围实体的 id。
+        metric:
+          type: string
+          description: 计量指标，取值见数据面的计费指标白名单。
+        window_kind:
+          type: string
+          description: 窗口类型。
+        period:
+          type: string
+          description: 窗口周期。
+        limit_amount:
+          type: string
+          description: 窗口内允许的额度上限，十进制字符串。
+        action:
+          type: string
+          description: 超限时的处置动作。
+        used:
+          type: [string, "null"]
+          description: 当前窗口已用量，十进制字符串；无法判定时为 `null`。
+        remaining:
+          type: [string, "null"]
+          description: 当前窗口剩余额度，十进制字符串；无法判定时为 `null`。
+      additionalProperties: false
+
+    PageOfAdminQuota:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminQuota"
+      additionalProperties: false
+
+    AdminAdjustment:
+      type: object
+      description: 一条人工调账记录，字段与 `tokenmp admin adjust list --json` 的行一致。
+      required: [id, account_id, delta_amount, reason, operator, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        account_id:
+          type: integer
+          format: int64
+        delta_amount:
+          type: string
+          description: 调整数量，十进制字符串；正数为补扣，负数为退费。
+        reason:
+          type: string
+        operator:
+          type: string
+          description: 操作者标识。
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PageOfAdminAdjustment:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminAdjustment"
+      additionalProperties: false
+
+    AdminUsageItem:
+      type: object
+      description: |
+        一条跨账户的用量流水，字段与 `tokenmp admin usage list --json` 的行一致。
+        流水是 append-only 的计费事实，一次请求一行。
+      required: [id, merchant_id, account_id, channel_id, model, usage, gross_amount, multiplier, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        merchant_id:
+          type: integer
+          format: int64
+          description: 结算归属的商家 id。
+        account_id:
+          type: integer
+          format: int64
+        channel_id:
+          type: integer
+          format: int64
+          description: 实际履约的渠道 id。
+        model:
+          type: string
+        usage:
+          type: object
+          additionalProperties:
+            type: string
+          description: 本次调用的用量分量，键为计费指标、值为十进制字符串。
+        gross_amount:
+          type: string
+          description: 结算前的应扣量，十进制字符串。
+        multiplier:
+          type: string
+          description: 本次生效的总倍率，十进制字符串。
+        settlement:
+          type: object
+          additionalProperties: true
+          description: 结算明细；未结算时该字段不出现。
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PageOfAdminUsageItem:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUsageItem"
+      additionalProperties: false
+
   parameters:
     Page:
       name: page
@@ -1780,6 +2404,43 @@ components:
       in: query
       required: false
       description: 按签发本次调用的密钥 id 过滤；缺省不过滤。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    AdminMerchantFilter:
+      name: merchant_id
+      in: query
+      required: false
+      description: 按商家 id 过滤；缺省不过滤。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    AdminAccountFilter:
+      name: account_id
+      in: query
+      required: false
+      description: 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    AdminScopeFilter:
+      name: scope
+      in: query
+      required: false
+      description: |
+        按限额 / 规则的作用范围过滤，取值 `account` / `api_key` / `channel` / `plan`；
+        与 `scope_id` 必须成对给出，缺省列出全部。
+      schema:
+        type: string
+        enum: [account, api_key, channel, plan]
+    AdminScopeIDFilter:
+      name: scope_id
+      in: query
+      required: false
+      description: 范围实体的 id，与 `scope` 成对使用。
       schema:
         type: integer
         format: int64
