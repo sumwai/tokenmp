@@ -16,6 +16,14 @@ export const api = {
   changePassword: (init: ApiInit<"/api/v1/auth/password", "put">) =>
     apiRequest("/api/v1/auth/password", "put", init),
 
+  /** 登记上游渠道 */
+  createPartnerChannel: (init: ApiInit<"/api/v1/partner/channels", "post">) =>
+    apiRequest("/api/v1/partner/channels", "post", init),
+
+  /** 登记上游凭据 */
+  createPartnerCredential: (init: ApiInit<"/api/v1/partner/credentials", "post">) =>
+    apiRequest("/api/v1/partner/credentials", "post", init),
+
   /** 创建密钥 */
   createUserKey: (init: ApiInit<"/api/v1/user/keys", "post">) =>
     apiRequest("/api/v1/user/keys", "post", init),
@@ -23,6 +31,22 @@ export const api = {
   /** 下单购买 */
   createUserOrder: (init: ApiInit<"/api/v1/user/orders", "post">) =>
     apiRequest("/api/v1/user/orders", "post", init),
+
+  /** 停用上游渠道 */
+  disablePartnerChannel: (init: ApiInit<"/api/v1/partner/channels/{id}/disable", "post">) =>
+    apiRequest("/api/v1/partner/channels/{id}/disable", "post", init),
+
+  /** 停用上游凭据 */
+  disablePartnerCredential: (init: ApiInit<"/api/v1/partner/credentials/{id}/disable", "post">) =>
+    apiRequest("/api/v1/partner/credentials/{id}/disable", "post", init),
+
+  /** 启用上游渠道 */
+  enablePartnerChannel: (init: ApiInit<"/api/v1/partner/channels/{id}/enable", "post">) =>
+    apiRequest("/api/v1/partner/channels/{id}/enable", "post", init),
+
+  /** 启用上游凭据 */
+  enablePartnerCredential: (init: ApiInit<"/api/v1/partner/credentials/{id}/enable", "post">) =>
+    apiRequest("/api/v1/partner/credentials/{id}/enable", "post", init),
 
   /** 注销账号 */
   eraseAccount: (init: ApiInit<"/api/v1/auth/erase", "post">) =>
@@ -43,6 +67,10 @@ export const api = {
   /** 查询当前会话身份 */
   getAuthSession: (init?: ApiInit<"/api/v1/auth/session", "get">) =>
     apiRequest("/api/v1/auth/session", "get", init),
+
+  /** 名下调用量与应扣量聚合 */
+  getPartnerUsageStats: (init?: ApiInit<"/api/v1/partner/usage/stats", "get">) =>
+    apiRequest("/api/v1/partner/usage/stats", "get", init),
 
   /** 账户概览 */
   getUserAccount: (init?: ApiInit<"/api/v1/user/account", "get">) =>
@@ -99,6 +127,14 @@ export const api = {
   /** 列出可用登录方式 */
   listAuthProviders: (init?: ApiInit<"/api/v1/auth/providers", "get">) =>
     apiRequest("/api/v1/auth/providers", "get", init),
+
+  /** 上游渠道列表 */
+  listPartnerChannels: (init?: ApiInit<"/api/v1/partner/channels", "get">) =>
+    apiRequest("/api/v1/partner/channels", "get", init),
+
+  /** 上游凭据列表 */
+  listPartnerCredentials: (init?: ApiInit<"/api/v1/partner/credentials", "get">) =>
+    apiRequest("/api/v1/partner/credentials", "get", init),
 
   /** 密钥列表 */
   listUserKeys: (init?: ApiInit<"/api/v1/user/keys", "get">) =>

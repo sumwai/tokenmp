@@ -104,17 +104,25 @@ func (s *Store) AccountUsageStats(ctx context.Context, q UsageStatsQuery) ([]Usa
 	if q.AccountID == 0 {
 		return nil, errors.New("store: billing_usage.account_id 不能为 0")
 	}
-	keyExpr, ok := usageStatsGroupKeys[q.GroupBy]
-	if !ok {
-		return nil, fmt.Errorf("store: 未知的聚合维度 %q", q.GroupBy)
-	}
-	where, args := usagePredicate{
+	return s.usageStatsBy(ctx, usagePredicate{
 		AccountID:      q.AccountID,
 		Since:          q.Since,
 		Until:          q.Until,
 		RequestedModel: q.RequestedModel,
 		APIKeyID:       q.APIKeyID,
-	}.where()
+	}, q.GroupBy)
+}
+
+// usageStatsBy 按谓词与分组维度聚合 billing_usage，按 key 升序返回。
+//
+// 账户面与商家面共用本实现：分组表达式、指标集合与逐行折算都只有一处，两条入口在
+// 同一区间上给出的合计因此必然一致。
+func (s *Store) usageStatsBy(ctx context.Context, pred usagePredicate, groupBy string) ([]UsageStatsItem, error) {
+	keyExpr, ok := usageStatsGroupKeys[groupBy]
+	if !ok {
+		return nil, fmt.Errorf("store: 未知的聚合维度 %q", groupBy)
+	}
+	where, args := pred.where()
 
 	metrics := usageStatsMetrics()
 	selects := []string{keyExpr + " AS k", "COUNT(*)", "SUM(gross_amount * multiplier)"}

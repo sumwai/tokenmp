@@ -23,6 +23,8 @@ func adminMerchant(ctx context.Context, args []string, env *adminEnv) int {
 		return adminMerchantList(ctx, rest, env)
 	case actionDisable:
 		return adminMerchantDisable(ctx, rest, env)
+	case actionSetOwner:
+		return adminMerchantSetOwner(ctx, rest, env)
 	default:
 		return env.usageErrorf("merchant 未知动作 %q", action)
 	}
@@ -63,10 +65,32 @@ func adminMerchantList(ctx context.Context, args []string, env *adminEnv) int {
 	rows := make([][]string, 0, len(merchants))
 	for _, m := range merchants {
 		rows = append(rows, []string{
-			strconv.FormatUint(m.ID, 10), m.Code, m.Name, string(m.Kind), m.Status, formatTime(m.CreatedAt),
+			strconv.FormatUint(m.ID, 10), m.Code, m.Name, string(m.Kind), m.Status,
+			formatOwner(m.OwnerUserID), formatTime(m.CreatedAt),
 		})
 	}
-	return env.emit(*asJSON, []string{flagID, flagCode, flagName, flagKind, headerStatus, headerCreatedAt}, rows, merchants)
+	return env.emit(*asJSON, []string{flagID, flagCode, flagName, flagKind, headerStatus, flagOwner, headerCreatedAt}, rows, merchants)
+}
+
+// formatOwner 渲染商家的归属登录主体；未绑定时留空而不是写 0。
+func formatOwner(owner *uint64) string {
+	if owner == nil {
+		return ""
+	}
+	return strconv.FormatUint(*owner, 10)
+}
+
+func adminMerchantSetOwner(ctx context.Context, args []string, env *adminEnv) int {
+	fs := env.newFlagSet("admin merchant set-owner")
+	id := fs.Uint64(flagID, 0, "商家 id")
+	owner := fs.Uint64(flagOwner, 0, "归属的登录主体 id")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	if err := env.service.SetMerchantOwner(ctx, *id, *owner); err != nil {
+		return env.fail(err)
+	}
+	return env.printf("已绑定商家 id=%d 到登录主体 %d\n", *id, *owner)
 }
 
 func adminMerchantDisable(ctx context.Context, args []string, env *adminEnv) int {

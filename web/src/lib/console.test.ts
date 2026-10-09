@@ -79,12 +79,19 @@ describe('前端零角色分支', () => {
   }) as Record<string, string>;
   const roleLiteral = /['"`](member|partner|admin)['"`]/;
 
+  /**
+   * 路由段与身份取值同名（商家域的 `/partner`）：`path="partner"` 是路径，不是身份分支，
+   * 骨架按服务端清单下发的 path 匹配入口。扫描前只抹掉路由声明里的 path 字面量，
+   * 其余位置照旧一律拦下 —— 把 `role === 'partner'` 这类分支放行才是真的放水。
+   */
+  const routePath = /\bpath=\{?["'`][^"'`]*["'`]\}?/g;
+
   it('web/src 里没有角色取值字面量', () => {
     const offenders = Object.entries(sources)
       .filter(([path]) => !path.includes('.test.'))
       // 生成物镜像契约，必然出现身份取值（SessionUser.roles 的 enum）；红线针对手写代码。
       .filter(([path]) => !path.includes('/generated/'))
-      .filter(([, text]) => roleLiteral.test(text))
+      .filter(([, text]) => roleLiteral.test(text.replace(routePath, 'path=')))
       .map(([path]) => path);
     expect(offenders).toEqual([]);
   });

@@ -34,6 +34,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/credential"
 	"github.com/sumwai/tokenmp/internal/domain"
 	"github.com/sumwai/tokenmp/internal/me"
+	"github.com/sumwai/tokenmp/internal/partner"
 	"github.com/sumwai/tokenmp/internal/pipeline"
 	"github.com/sumwai/tokenmp/internal/plan"
 	"github.com/sumwai/tokenmp/internal/plugin"
@@ -124,6 +125,16 @@ type gatewayStore interface {
 	Product(ctx context.Context, id uint64) (*store.Product, error)
 	CreateOrder(ctx context.Context, p store.Purchase, b store.BucketRow) (store.OrderWrite, error)
 	ListOrdersByAccount(ctx context.Context, accountID uint64, limit, offset int) ([]store.OrderRow, int, error)
+	// 商家域（页面 /api/v1/partner/*）相关方法：作用域由会话推导出的商家给定，
+	// 每一处读写都按商家收敛；登记动作也落在这里，页面与管理面写同一张表。
+	MerchantByOwner(ctx context.Context, userID uint64) (*store.Merchant, error)
+	ChannelsByMerchant(ctx context.Context, merchantID uint64, enabled *bool, limit, offset int) ([]store.Channel, int, error)
+	CredentialsByMerchant(ctx context.Context, merchantID uint64, limit, offset int) ([]store.CredentialRow, int, error)
+	InsertChannel(ctx context.Context, c store.Channel) (uint64, error)
+	InsertCredential(ctx context.Context, c store.CredentialRow) (uint64, error)
+	SetChannelEnabledForMerchant(ctx context.Context, id, merchantID uint64, enabled bool) (bool, error)
+	SetCredentialEnabledForMerchant(ctx context.Context, id, merchantID uint64, enabled bool) (bool, error)
+	MerchantUsageStats(ctx context.Context, q store.MerchantUsageStatsQuery) ([]store.UsageStatsItem, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。
@@ -472,6 +483,12 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 			Lister:   admin.New(adminStore),
 		}))
 	}
+	// 商家域挂在同一页面会话之上：归属由会话推导出的商家给定，读与写都按商家收敛，
+	// 页面登记出来的行与管理面登记出来的行写同一张表。
+	mux.Handle(partner.PathPrefix, partner.NewHandler(partner.Options{
+		Sessions: webAuth,
+		Store:    st,
+	}))
 	mux.HandleFunc("/", notFoundJSON)
 
 	gw := &Gateway{handler: mux, upstream: upstreamHTTP, probes: collector, plugins: middleware}

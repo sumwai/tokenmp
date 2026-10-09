@@ -121,21 +121,33 @@ export function totalUsage(items: UsageStatsItem[]): UsageTotal {
   return { calls, tokens, chargedAmount: addDecimals(amounts) };
 }
 
+/**
+ * usageStatsQuery 把页面状态翻成契约的查询参数。
+ *
+ * 账户面与商家面的聚合端点取同一组参数（区间、分组维度、模型与密钥过滤），映射只有
+ * 这一处：两条入口在同一区间上发出的请求因此逐字相同。
+ */
+export function usageStatsQuery(query: UsageQuery): {
+  since?: string;
+  until?: string;
+  group_by: UsageGroupBy;
+  model?: string;
+  api_key_id?: number;
+} {
+  const apiKeyID = query.apiKeyID === '' ? undefined : parseUnsignedInt(query.apiKeyID);
+  return {
+    // 空串表示不过滤：不写进请求，避免把「不限」表达成空参数。
+    since: query.since === '' ? undefined : query.since,
+    until: query.until === '' ? undefined : query.until,
+    group_by: query.groupBy,
+    model: query.model === '' ? undefined : query.model,
+    api_key_id: apiKeyID ?? undefined,
+  };
+}
+
 /** usageStats 拉取当前账户的用量聚合；端点不分页，一次返回全部维度分组。 */
 export async function usageStats(query: UsageQuery): Promise<UsageStatsItem[]> {
-  const apiKeyID = query.apiKeyID === '' ? undefined : parseUnsignedInt(query.apiKeyID);
-  const data = await api.getUserUsageStats({
-    params: {
-      query: {
-        // 空串表示不过滤：不写进请求，避免把「不限」表达成空参数。
-        since: query.since === '' ? undefined : query.since,
-        until: query.until === '' ? undefined : query.until,
-        group_by: query.groupBy,
-        model: query.model === '' ? undefined : query.model,
-        api_key_id: apiKeyID ?? undefined,
-      },
-    },
-  });
+  const data = await api.getUserUsageStats({ params: { query: usageStatsQuery(query) } });
   return data?.items ?? [];
 }
 

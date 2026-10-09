@@ -15,6 +15,8 @@ import { ForgotPassword } from './pages/ForgotPassword';
 import { Home } from './pages/Home';
 import { Keys } from './pages/Keys';
 import { Login } from './pages/Login';
+import { Partner } from './pages/Partner';
+import { PartnerUsage } from './pages/PartnerUsage';
 import { Purchase } from './pages/Purchase';
 import { RequestDetail } from './pages/RequestDetail';
 import { Requests } from './pages/Requests';
@@ -40,6 +42,8 @@ export function App() {
         <Route index element={<Home />} />
         <Route path="account" element={<Account />} />
         <Route path="keys" element={<Keys />} />
+        <Route path="partner" element={<Partner />} />
+        <Route path="partner/usage" element={<PartnerUsage />} />
         <Route path="purchase" element={<Purchase />} />
         <Route path="requests" element={<Requests />} />
         <Route path="usage" element={<Usage />} />

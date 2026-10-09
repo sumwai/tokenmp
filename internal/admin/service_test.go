@@ -31,6 +31,7 @@ type fakeStore struct {
 	merchantSettleInfo   func(context.Context, uint64) ([]byte, error)
 	setMerchantSettle    func(context.Context, uint64, []byte) error
 	settlementFacts      func(context.Context, uint64, time.Time, time.Time) (store.SettlementFacts, error)
+	setMerchantOwner     func(context.Context, uint64, uint64) error
 	insertChannel        func(context.Context, store.Channel) (uint64, error)
 	listChannels         func(context.Context) ([]store.Channel, error)
 	setChannelEnabled    func(context.Context, uint64, bool) error
@@ -114,6 +115,14 @@ func (f *fakeStore) SetMerchantSettleInfo(ctx context.Context, id uint64, raw []
 	f.record("SetMerchantSettleInfo")
 	if f.setMerchantSettle != nil {
 		return f.setMerchantSettle(ctx, id, raw)
+	}
+	return nil
+}
+
+func (f *fakeStore) SetMerchantOwner(ctx context.Context, id, userID uint64) error {
+	f.record("SetMerchantOwner")
+	if f.setMerchantOwner != nil {
+		return f.setMerchantOwner(ctx, id, userID)
 	}
 	return nil
 }

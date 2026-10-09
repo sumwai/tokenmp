@@ -28,6 +28,7 @@ const (
 	flagName          = "name"
 	flagKind          = "kind"
 	flagMerchant      = "merchant"
+	flagOwner         = "owner"
 	flagType          = "type"
 	flagVendor        = "vendor"
 	flagBaseURL       = "base-url"
@@ -103,6 +104,7 @@ const (
 	actionCredit        = "credit"
 	actionSetMultiplier = "set-multiplier"
 	actionSetMerchant   = "set-merchant"
+	actionSetOwner      = "set-owner"
 	actionReset         = "reset"
 	actionOAuthLogin    = "oauth-login"
 )
@@ -194,7 +196,7 @@ type adminGroupSpec struct {
 
 // adminGroups 按帮助展示顺序列出全部组与动作。
 var adminGroups = []adminGroupSpec{
-	{flagMerchant, []string{actionCreate, actionList, actionDisable}},
+	{flagMerchant, []string{actionCreate, actionList, actionDisable, actionSetOwner}},
 	{flagChannel, []string{actionCreate, actionList, actionEnable, actionDisable}},
 	{"credential", []string{actionAdd, actionList, actionEnable, actionDisable, actionOAuthLogin}},
 	{"model-map", []string{actionSet, actionList, actionDisable}},

@@ -56,10 +56,30 @@ func TestInsertMerchant(t *testing.T) {
 	if id != 7 {
 		t.Errorf("自增 id = %d，期望 7", id)
 	}
-	// 未显式给状态时取 active。
-	want := []any{"partner-1", "入驻", MerchantKindPartner, StatusActive}
+	// 未显式给状态时取 active；未给归属时写 NULL。
+	want := []any{"partner-1", "入驻", MerchantKindPartner, StatusActive, nil}
 	if !reflect.DeepEqual(fake.args, want) {
 		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
+	}
+
+	// 给了归属时按值写入，商家域的作用域由它推导。
+	owner := uint64(9)
+	bound := &recordedExec{id: 8}
+	if _, err := insertMerchant(context.Background(), bound, Merchant{
+		Code: "partner-2", Name: "入驻二", Kind: MerchantKindPartner, OwnerUserID: &owner,
+	}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if wantArgs := []any{"partner-2", "入驻二", MerchantKindPartner, StatusActive, owner}; !reflect.DeepEqual(bound.args, wantArgs) {
+		t.Errorf("带归属的参数 = %#v，期望 %#v", bound.args, wantArgs)
+	}
+
+	// 归属为 0 是非法取值：0 不是任何登录主体。
+	zero := uint64(0)
+	if _, err := insertMerchant(context.Background(), &recordedExec{}, Merchant{
+		Code: "c", Name: "n", Kind: MerchantKindPartner, OwnerUserID: &zero,
+	}); err == nil {
+		t.Error("归属为 0 应当被拒绝")
 	}
 }
 
@@ -205,7 +225,8 @@ func TestInsertAPIKeyArgs(t *testing.T) {
 func TestListMerchantsScan(t *testing.T) {
 	created := time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC)
 	fake := &recordedQuery{rows: [][]any{
-		{uint64(1), "platform", "平台自营", "platform", StatusActive, scanTime{Time: created, Valid: true}},
+		{uint64(1), "platform", "平台自营", "platform", StatusActive, nil, scanTime{Time: created, Valid: true}},
+		{uint64(2), "partner-1", "入驻商家", "partner", StatusActive, sql.NullInt64{Int64: 9, Valid: true}, scanTime{Time: created, Valid: true}},
 	}}
 	got, err := listMerchants(context.Background(), fake)
 	if err != nil {
@@ -214,8 +235,15 @@ func TestListMerchantsScan(t *testing.T) {
 	if fake.query != listMerchantsSQL {
 		t.Errorf("SQL = %q，期望 %q", fake.query, listMerchantsSQL)
 	}
-	if len(got) != 1 || got[0].Code != "platform" || got[0].Kind != MerchantKindPlatform || !got[0].CreatedAt.Equal(created) {
+	if len(got) != 2 || got[0].Code != "platform" || got[0].Kind != MerchantKindPlatform || !got[0].CreatedAt.Equal(created) {
 		t.Errorf("结果不符：%+v", got)
+	}
+	// 未绑定归属的商家读出 nil，绑定的读出主体 id：nil 与 0 不能混为一谈。
+	if got[0].OwnerUserID != nil {
+		t.Errorf("平台自营的归属应为 nil，得到 %v", *got[0].OwnerUserID)
+	}
+	if got[1].OwnerUserID == nil || *got[1].OwnerUserID != 9 {
+		t.Errorf("入驻商家的归属应为 9，得到 %+v", got[1].OwnerUserID)
 	}
 }
 

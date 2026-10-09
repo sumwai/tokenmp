@@ -38,8 +38,8 @@
 
 ```
 $ tokenmp admin merchant list
-id  code      name      kind      status  created_at
-1   platform  平台自营  platform  active  2026-01-01 00:00:00
+id  code      name      kind      status  owner  created_at
+1   platform  平台自营  platform  active         2026-01-01 00:00:00
 ```
 
 ```
@@ -49,6 +49,17 @@ $ tokenmp admin merchant create --code partner-1 --name 入驻商家 --kind part
 
 `--kind` 取 `platform`（平台自营）或 `partner`（入驻商家）。平台自营也是一行数据。
 以下步骤用新商家的 id（此处为 2）继续。
+
+入驻商家要自助管理上游账号时，先把商家的归属绑到它的登录主体上：
+
+```
+$ tokenmp admin merchant set-owner --id 2 --owner 7
+已绑定商家 id=2 到登录主体 7
+```
+
+`--owner` 是 `web_user.id`。绑定是商家域（页面 `/api/v1/partner/*`）唯一的作用域来源：
+没有绑定的商家在页面上没有主人，绑定后该登录主体才能在自己的控制台里登记与启停上游
+账号、查名下调用量。归属唯一，重复绑定被唯一键拦下。`merchant list` 的 `owner` 列即该绑定。
 
 停用：`tokenmp admin merchant disable --id 2`，输出 `已停用商家 id=2`。
 

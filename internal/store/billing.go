@@ -1155,6 +1155,10 @@ type AccountUsageRow struct {
 // 都按它收敛作用域，写成一个常量让「作用域必须带账户」这条规则只有一处出处。
 const accountIDCondition = "account_id = ?"
 
+// merchantIDCondition 是商家维度的过滤谓词：商家面的用量聚合按它收敛作用域。
+// 与 accountIDCondition 是同一层的作用域维度，两者在谓词里互斥出现。
+const merchantIDCondition = "merchant_id = ?"
+
 // accountUsageColumns 是账户面列表的列清单，计数与取页共用同一份谓词。
 const accountUsageColumns = `SELECT id, model, requested_model, protocol, cross_protocol, ` + "`usage`" +
 	`, gross_amount, multiplier, created_at
@@ -1162,11 +1166,16 @@ FROM billing_usage`
 
 // usagePredicate 是账户面用量读路径共用的过滤谓词。
 //
+// AccountID 与 MerchantID 是两种作用域维度：账户面给前者，商家面给后者，同一份
+// 谓词实现服务两条入口。两者可以同时给出（账户的流水限定在某商家名下）。
+//
 // 列表与聚合共用一份：两处各拼一次谓词，任一处漏一个条件，同一区间上的明细与合计
 // 就会对不上，而那种偏差只在特定过滤组合下出现。
 type usagePredicate struct {
-	// AccountID 是流水的归属账户，必填：作用域只能来自会话。
+	// AccountID 是流水的归属账户；0 表示不按账户收敛作用域（商家面）。
 	AccountID uint64
+	// MerchantID 是流水归属的商家；0 表示不按商家收敛作用域（账户面）。
+	MerchantID uint64
 	// Since / Until 是写入时刻的闭区间；零值表示该侧不限。
 	Since time.Time
 	Until time.Time
@@ -1176,10 +1185,44 @@ type usagePredicate struct {
 	APIKeyID uint64
 }
 
-// where 组装 WHERE 子句与参数。
+// where 组装 WHERE 子句与参数：作用域维度（账户 / 商家）按实际给出的取值出现，
+// 时刻区间与模型、密钥过滤是两条入口共用的一组可选条件。
+//
+// 作用域至少要给一个：调用方都在入口显式校验。真出现一个都没给的情形（新增入口
+// 漏了校验），退化成匹配不到任何行，而不是把全量流水读出来。
 func (p usagePredicate) where() (string, []any) {
-	conditions := []string{accountIDCondition}
-	args := []any{p.AccountID}
+	conditions, args := p.scopeConditions()
+	filters, filterArgs := p.filterConditions()
+	conditions = append(conditions, filters...)
+	args = append(args, filterArgs...)
+	if len(conditions) == 0 {
+		conditions = append(conditions, "1 = 0")
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+// scopeConditionCap 是作用域谓词的条件数上限：账户与商家各一个。
+const scopeConditionCap = 2
+
+// scopeConditions 组装作用域谓词：账户与商家各自按是否给出取值出现。
+func (p usagePredicate) scopeConditions() ([]string, []any) {
+	conditions := make([]string, 0, scopeConditionCap)
+	args := make([]any, 0, scopeConditionCap)
+	if p.AccountID != 0 {
+		conditions = append(conditions, accountIDCondition)
+		args = append(args, p.AccountID)
+	}
+	if p.MerchantID != 0 {
+		conditions = append(conditions, merchantIDCondition)
+		args = append(args, p.MerchantID)
+	}
+	return conditions, args
+}
+
+// filterConditions 组装时刻区间与模型、密钥过滤，账户面与商家面共用同一组。
+func (p usagePredicate) filterConditions() ([]string, []any) {
+	var conditions []string
+	var args []any
 	if !p.Since.IsZero() {
 		conditions = append(conditions, "created_at >= ?")
 		args = append(args, p.Since)
@@ -1196,7 +1239,7 @@ func (p usagePredicate) where() (string, []any) {
 		conditions = append(conditions, "api_key_id = ?")
 		args = append(args, p.APIKeyID)
 	}
-	return " WHERE " + strings.Join(conditions, " AND "), args
+	return conditions, args
 }
 
 // accountUsageWhere 组装账户面列表的 WHERE 子句与参数。
