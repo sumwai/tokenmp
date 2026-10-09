@@ -264,10 +264,10 @@ func TestBillingUsageRequestInfoMigrationShape(t *testing.T) {
 	}
 }
 
-// TestMerchantOwnerMigrationShape 断言 0010 给 merchant 加归属列与唯一索引：
+// TestMerchantOwnerMigrationShape 断言 0011 给 merchant 加归属列与唯一索引：
 // 商家域（/api/v1/partner/*）的作用域由该列推导，两段 DDL 都要可重跑。
 func TestMerchantOwnerMigrationShape(t *testing.T) {
-	raw, err := migrationsFS.ReadFile(migrationsDir + "/0010_merchant_owner.sql")
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0011_merchant_owner.sql")
 	if err != nil {
 		t.Fatalf("读取内嵌迁移失败：%v", err)
 	}
@@ -275,7 +275,7 @@ func TestMerchantOwnerMigrationShape(t *testing.T) {
 	script := strings.Join(statements, "\n")
 
 	if len(statements) != 8 {
-		t.Errorf("0010 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
+		t.Errorf("0011 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
 			len(statements), statements)
 	}
 	for _, want := range []string{
@@ -288,7 +288,7 @@ func TestMerchantOwnerMigrationShape(t *testing.T) {
 		"DEALLOCATE PREPARE",
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("0010 缺少可重跑所需的 %q", want)
+			t.Errorf("0011 缺少可重跑所需的 %q", want)
 		}
 	}
 }
@@ -335,7 +335,7 @@ func TestPurchaseIdempotencyMigrationShape(t *testing.T) {
 	script := strings.Join(statements, "\n")
 
 	if len(statements) != 8 {
-		t.Errorf("0010 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
+		t.Errorf("0011 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
 			len(statements), statements)
 	}
 	for _, want := range []string{
@@ -348,7 +348,7 @@ func TestPurchaseIdempotencyMigrationShape(t *testing.T) {
 		"DEALLOCATE PREPARE",
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("0010 缺少可重跑所需的 %q", want)
+			t.Errorf("0011 缺少可重跑所需的 %q", want)
 		}
 	}
 	// 只加列与索引、不回填存量：不得出现 UPDATE / INSERT，也不建新表。
