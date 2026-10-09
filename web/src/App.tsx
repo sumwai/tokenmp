@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 
+import { ConsoleLayout } from './components/console';
 import { Callback } from './pages/Callback';
 import { ForgotPassword } from './pages/ForgotPassword';
 import { Home } from './pages/Home';
@@ -7,7 +8,12 @@ import { Login } from './pages/Login';
 import { ResetPassword } from './pages/ResetPassword';
 import { Signup } from './pages/Signup';
 
-/** 路由表：认证四页公开，其余落到首页（首页自行做会话校验与回跳）。 */
+/**
+ * 路由表：认证五页公开，其余路径都落在控制台骨架内。
+ *
+ * 骨架承担会话校验、登录回跳、导航与无权访问兜底，页面只按清单渲染内容；
+ * 控制台内未声明的路径回首页。
+ */
 export function App() {
   return (
     <Routes>
@@ -16,8 +22,10 @@ export function App() {
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/auth/callback" element={<Callback />} />
-      <Route path="/" element={<Home />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route element={<ConsoleLayout />}>
+        <Route index element={<Home />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
     </Routes>
   );
 }
