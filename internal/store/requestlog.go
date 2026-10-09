@@ -20,7 +20,9 @@ import (
 // created_at 只在首次插入时写入，不在更新列表里：两次写入的时刻差值属毫秒级，
 // 但「请求时刻」只能有一个取值，后到的写入无权改写它。
 //
-// 读取一律带 account_id 条件：作用域来自会话，不给「按 request_id 直查」留越权面。
+// 账户面的读取一律带 account_id 条件：作用域来自会话，不给「按 request_id 直查」留越权面。
+// 管理面（ops）的读路径允许省略账户，用于跨账户排障；越权面仍由会话推导的作用域收敛，
+// 不带账户的入口因此只挂在管理面。
 
 // RequestAttempt 是一条尝试时间线记录。
 type RequestAttempt struct {
@@ -325,7 +327,8 @@ func nullableInt(v int) any {
 
 // RequestLogFilter 是请求记录列表的过滤条件。
 type RequestLogFilter struct {
-	// AccountID 是记录的归属账户，必填：作用域只能来自会话。
+	// AccountID 是记录的归属账户。0 表示不限账户，仅管理面全平台清单使用；
+	// 账户面必须传会话推导出的非零值。
 	AccountID uint64
 	// Since / Until 是请求时刻的闭区间；零值表示该侧不限。
 	Since time.Time
@@ -347,6 +350,8 @@ type RequestLogFilter struct {
 type RequestLogRow struct {
 	ID        uint64
 	RequestID string
+	// AccountID 是记录的归属账户；跨账户清单据此分行。
+	AccountID uint64
 	// APIKeyID 是签发本次调用的密钥，供页面按密钥过滤与展示。
 	APIKeyID   uint64
 	CreatedAt  time.Time
@@ -394,7 +399,7 @@ var (
 )
 
 // 列表不读报文列：报文只在详情端点展示，列表带上它们会把每页响应放大到报文体量。
-var requestLogListColumns = `id, request_id, api_key_id, created_at, status, http_status, upstream_status,
+var requestLogListColumns = `id, request_id, account_id, api_key_id, created_at, status, http_status, upstream_status,
 failure_class, error_code, duration_ms, requested_model, upstream_model, protocol, upstream_protocol,
 cross_protocol, stream, written_bytes, client_ip, user_agent, ` + "`usage`" + `, ` +
 	payloadAvailableExpr + `, rewritten_parts`
@@ -413,8 +418,14 @@ const statusNotNullCondition = "status IS NOT NULL"
 // status IS NOT NULL 固定带上：归属与用量可能先于终态落库，没有终态的行表示这次请求
 // 中断在写终态之前，不是一条可展示的事实，也不能计入聚合。
 func requestLogWhere(f RequestLogFilter) (string, []any) {
-	conditions := []string{accountIDCondition, statusNotNullCondition}
-	args := []any{f.AccountID}
+	conditions := []string{statusNotNullCondition}
+	var args []any
+	// 账户缺省表示不限账户：只有管理面全平台清单这么用，账户面的调用方始终传入
+	// 会话推导出的非零账户，作用域不会因此落空。
+	if f.AccountID != 0 {
+		conditions = append(conditions, accountIDCondition)
+		args = append(args, f.AccountID)
+	}
 	if !f.Since.IsZero() {
 		conditions = append(conditions, "created_at >= ?")
 		args = append(args, f.Since)
@@ -442,13 +453,10 @@ func requestLogWhere(f RequestLogFilter) (string, []any) {
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
-// ListRequestLogs 按账户分页列出请求记录，返回当页行与满足条件的总数。
+// ListRequestLogs 按过滤条件分页列出请求记录，返回当页行与满足条件的总数。
 //
 // 排序按主键倒序：同一秒内的多条请求也有确定顺序，翻页不会重复或漏行。
 func (s *Store) ListRequestLogs(ctx context.Context, f RequestLogFilter) ([]RequestLogRow, int, error) {
-	if f.AccountID == 0 {
-		return nil, 0, errors.New("store: request_log.account_id 不能为 0")
-	}
 	if f.Limit <= 0 {
 		return nil, 0, errors.New("store: 分页条数必须为正")
 	}
@@ -511,6 +519,28 @@ func (s *Store) RequestLogByRequestID(ctx context.Context, accountID uint64, req
 	return record, nil
 }
 
+// RequestLogByRequestIDUnscoped 按请求标识读任意账户的一条请求记录。
+//
+// 管理面排障要定位不属于自己的请求，因此不带账户条件；账户面走 RequestLogByRequestID，
+// 那里的 account_id 是必填条件，request_id 不构成越权入口。
+func (s *Store) RequestLogByRequestIDUnscoped(ctx context.Context, requestID string) (*RequestLogRow, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return nil, errors.New("store: request_log.request_id 不能为空")
+	}
+	//nolint:gosec // G202：拼进去的是列清单与由常量组成的谓词，取值一律走问号占位符。
+	query := "SELECT " + requestLogDetailColumns +
+		" FROM request_log WHERE request_id = ? AND status IS NOT NULL"
+	row := s.db.QueryRowContext(ctx, query, requestID)
+	record, err := scanRequestLogRow(row.Scan, true)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("store: 查询 request_log 失败: %w", err)
+	}
+	return record, nil
+}
+
 // scanRequestLogRow 解析一行请求记录；withPayload 为真时读报文三列。
 func scanRequestLogRow(scan func(dest ...any) error, withPayload bool) (*RequestLogRow, error) {
 	var (
@@ -532,7 +562,7 @@ func scanRequestLogRow(scan func(dest ...any) error, withPayload bool) (*Request
 	// 报文三列先扫进 []byte 再转 json.RawMessage：JSON 列可为 NULL，
 	// 而 json.RawMessage 不接受 NULL（与 usage / rewritten_parts 同一处理）。
 	var requestShape, upstreamRequestShape, errorResponseShape []byte
-	dest := []any{&r.ID, &r.RequestID, &r.APIKeyID, &createdAt, &r.Status, &httpStatus, &upstreamStatus,
+	dest := []any{&r.ID, &r.RequestID, &r.AccountID, &r.APIKeyID, &createdAt, &r.Status, &httpStatus, &upstreamStatus,
 		&failureClass, &errorCode, &durationMS, &requestedModel, &upstreamModel, &protocol,
 		&upstreamProtocol, &r.CrossProtocol, &r.Stream, &writtenBytes, &r.ClientIP, &r.UserAgent,
 		&usage, &r.PayloadAvailable, &rewrittenParts}
@@ -563,7 +593,8 @@ func scanRequestLogRow(scan func(dest ...any) error, withPayload bool) (*Request
 
 // RequestStatsQuery 是按维度聚合请求计数的条件。
 type RequestStatsQuery struct {
-	// AccountID 是聚合的归属账户，必填。
+	// AccountID 是聚合的归属账户。0 表示不限账户，仅管理面全平台聚合使用；
+	// 账户面必须传会话推导出的非零值。
 	AccountID uint64
 	// Since / Until 是请求时刻的闭区间，按天取整；零值表示该侧不限。
 	Since time.Time
@@ -586,27 +617,33 @@ type RequestStatsItem struct {
 	Cancelled int64
 }
 
+// groupByAccount 是请求记录聚合的账户维度：管理面按账户看全平台分布。
+const groupByAccount = "account"
+
 // requestStatsKeys 是聚合维度的取值集合，也是「分组表达式」的唯一出处。
 //
 // 表达式来自本表而不是调用方拼串：分组维度是列映射，让调用方拼 SQL 片段等于
 // 把注入面开在查询条件上。
 var requestStatsKeys = map[string]string{
-	groupByDay:    "DATE_FORMAT(`day`, '%Y-%m-%d')",
-	groupByModel:  "model",
-	groupByStatus: "status",
+	groupByDay:     "DATE_FORMAT(`day`, '%Y-%m-%d')",
+	groupByModel:   "model",
+	groupByStatus:  "status",
+	groupByAccount: "CAST(account_id AS CHAR)",
 }
 
 // RequestStats 按维度聚合账户的请求计数，按 key 升序返回。
 func (s *Store) RequestStats(ctx context.Context, q RequestStatsQuery) ([]RequestStatsItem, error) {
-	if q.AccountID == 0 {
-		return nil, errors.New("store: request_stats_daily.account_id 不能为 0")
-	}
 	keyExpr, ok := requestStatsKeys[q.GroupBy]
 	if !ok {
 		return nil, fmt.Errorf("store: 未知的聚合维度 %q", q.GroupBy)
 	}
-	conditions := []string{accountIDCondition}
-	args := []any{q.AccountID}
+	conditions := []string{}
+	var args []any
+	// 账户缺省表示不限账户，与 ListRequestLogs 同一口径。
+	if q.AccountID != 0 {
+		conditions = append(conditions, accountIDCondition)
+		args = append(args, q.AccountID)
+	}
 	if !q.Since.IsZero() {
 		conditions = append(conditions, "`day` >= DATE(?)")
 		args = append(args, q.Since)
@@ -623,13 +660,17 @@ func (s *Store) RequestStats(ctx context.Context, q RequestStatsQuery) ([]Reques
 		conditions = append(conditions, "api_key_id = ?")
 		args = append(args, q.APIKeyID)
 	}
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
 	//nolint:gosec // G202：拼进去的是映射到白名单表达式的分组列与常量谓词，取值一律走问号占位符。
 	// 分项计数按状态条件求和而不是数行数：同一 (日期, 模型, 密钥) 在每个状态下各占一行，
 	// 行数恒为「有几种状态」，只有按 total 条件求和才回答「成功了多少次」。
 	query := "SELECT " + keyExpr + ` AS k, SUM(total),
 SUM(IF(status = 'success', total, 0)), SUM(IF(status = 'failed', total, 0)),
 SUM(IF(status = 'cancelled', total, 0))
-FROM request_stats_daily WHERE ` + strings.Join(conditions, " AND ") + " GROUP BY k ORDER BY k"
+FROM request_stats_daily` + where + " GROUP BY k ORDER BY k"
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
