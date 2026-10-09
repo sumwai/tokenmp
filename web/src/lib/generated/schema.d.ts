@@ -398,6 +398,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/user/usage/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用量聚合
+         * @description 按维度把区间内的用量与应扣量合计起来，用于回答趋势与「花在哪了」。
+         *
+         *     分组维度 `day` 取日期（`YYYY-MM-DD`，按写入时刻所在的自然日）、`model` 取客户端
+         *     请求的模型名、`api_key` 取密钥 id 的十进制文本。合计与流水明细同源：同一组过滤
+         *     参数下，明细逐行相加应等于本端点的合计。
+         *
+         *     它只回答合计，不返回单条流水；看某次调用的明细走用量流水端点。
+         */
+        get: operations["getUserUsageStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/user/models": {
         parameters: {
             query?: never;
@@ -781,6 +807,22 @@ export interface components {
         };
         PageOfUsageItem: {
             items: components["schemas"]["UsageItem"][];
+        };
+        /** @description 一个分组维度的用量合计。 */
+        UsageStatsItem: {
+            /**
+             * @description 分组值：`day` 为日期（`YYYY-MM-DD`），`model` 为客户端请求的模型名，
+             *     `api_key` 为密钥 id 的十进制文本。
+             */
+            key: string;
+            /** @description 区间内成功履约的请求次数，与流水明细的行数一致。 */
+            calls: number;
+            usage: components["schemas"]["UsageTokens"];
+            /** @description 应扣量合计：逐行「基础价 × 倍率」相加，十进制字符串。 */
+            charged_amount: string;
+        };
+        PageOfUsageStatsItem: {
+            items: components["schemas"]["UsageStatsItem"][];
         };
         /** @description 一个当前账户可调用的模型。 */
         ModelInfo: {
@@ -1564,6 +1606,43 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["PageOfUsageItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUserUsageStats: {
+        parameters: {
+            query?: {
+                /** @description 起始时刻（含），RFC3339；缺省不限。 */
+                since?: components["parameters"]["Since"];
+                /** @description 结束时刻（含），RFC3339；缺省不限。 */
+                until?: components["parameters"]["Until"];
+                /** @description 分组维度；缺省 `day`。 */
+                group_by?: "day" | "model" | "api_key";
+                /** @description 按模型名精确匹配；缺省不过滤。 */
+                model?: components["parameters"]["ModelFilter"];
+                /** @description 按签发本次调用的密钥 id 过滤；缺省不过滤。 */
+                api_key_id?: components["parameters"]["ApiKeyFilter"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 聚合合计，按 `key` 升序。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfUsageStatsItem"];
                     };
                 };
             };

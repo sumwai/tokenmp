@@ -63,6 +63,8 @@ type Store interface {
 	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
 	// ListAccountUsage 按账户分页列出用量流水，返回当页行与满足条件的总数。
 	ListAccountUsage(ctx context.Context, f store.AccountUsageFilter) ([]store.AccountUsageRow, int, error)
+	// AccountUsageStats 按维度聚合账户的用量合计。
+	AccountUsageStats(ctx context.Context, q store.UsageStatsQuery) ([]store.UsageStatsItem, error)
 	// ListAccountModels 列出账户可调用的模型及其协议方言。
 	ListAccountModels(ctx context.Context, accountID uint64) ([]store.AccountModel, error)
 	// ListRequestLogs 按账户分页列出请求记录，返回当页行与满足条件的总数。

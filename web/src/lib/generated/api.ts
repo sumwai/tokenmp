@@ -56,6 +56,10 @@ export const api = {
   getUserRequestStats: (init?: ApiInit<"/api/v1/user/requests/stats", "get">) =>
     apiRequest("/api/v1/user/requests/stats", "get", init),
 
+  /** 用量聚合 */
+  getUserUsageStats: (init?: ApiInit<"/api/v1/user/usage/stats", "get">) =>
+    apiRequest("/api/v1/user/usage/stats", "get", init),
+
   /** 列出可用登录方式 */
   listAuthProviders: (init?: ApiInit<"/api/v1/auth/providers", "get">) =>
     apiRequest("/api/v1/auth/providers", "get", init),

@@ -174,24 +174,30 @@ func newUsageItemView(row *store.AccountUsageRow) (usageItemView, error) {
 }
 
 // decodeUsageTokens 把落库的 metric -> 数量 JSON 映射为对外的分量字段。
-//
-// 未登记的键直接忽略：计费表可以新增 metric（见 billing 的枚举约定），
-// 多出来的键属于该版本还不认识的计费维度，读到这里既不必报错也无处展示。
 func decodeUsageTokens(raw json.RawMessage) (usageTokensView, error) {
-	var metrics map[string]int
+	var metrics map[string]int64
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &metrics); err != nil {
 			return usageTokensView{}, err
 		}
 	}
+	return usageTokensFromMetrics(metrics), nil
+}
+
+// usageTokensFromMetrics 把 metric -> 数量 映射为对外的分量字段。
+//
+// 未登记的键直接忽略：计费表可以新增 metric（见 billing 的枚举约定），
+// 多出来的键属于该版本还不认识的计费维度，读到这里既不必报错也无处展示。
+// 用量明细与用量聚合共用本映射：同一个指标在两处的落位不会各写一份后漂开。
+func usageTokensFromMetrics(metrics map[string]int64) usageTokensView {
 	return usageTokensView{
-		InputTokens:        metrics[string(billing.MetricInputToken)],
-		OutputTokens:       metrics[string(billing.MetricOutputToken)],
-		CacheReadTokens:    metrics[string(billing.MetricCacheReadToken)],
-		CacheWriteTokens:   metrics[string(billing.MetricCacheWriteToken)],
-		CacheWrite5mTokens: metrics[string(billing.MetricCacheWrite5m)],
-		CacheWrite1hTokens: metrics[string(billing.MetricCacheWrite1h)],
-		ReasoningTokens:    metrics[string(billing.MetricReasoningToken)],
-		ServerToolUses:     metrics[serverToolUsesMetric],
-	}, nil
+		InputTokens:        int(metrics[string(billing.MetricInputToken)]),
+		OutputTokens:       int(metrics[string(billing.MetricOutputToken)]),
+		CacheReadTokens:    int(metrics[string(billing.MetricCacheReadToken)]),
+		CacheWriteTokens:   int(metrics[string(billing.MetricCacheWriteToken)]),
+		CacheWrite5mTokens: int(metrics[string(billing.MetricCacheWrite5m)]),
+		CacheWrite1hTokens: int(metrics[string(billing.MetricCacheWrite1h)]),
+		ReasoningTokens:    int(metrics[string(billing.MetricReasoningToken)]),
+		ServerToolUses:     int(metrics[serverToolUsesMetric]),
+	}
 }

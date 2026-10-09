@@ -717,6 +717,52 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/user/usage/stats:
+    get:
+      tags: [user]
+      summary: 用量聚合
+      description: |
+        按维度把区间内的用量与应扣量合计起来，用于回答趋势与「花在哪了」。
+
+        分组维度 `day` 取日期（`YYYY-MM-DD`，按写入时刻所在的自然日）、`model` 取客户端
+        请求的模型名、`api_key` 取密钥 id 的十进制文本。合计与流水明细同源：同一组过滤
+        参数下，明细逐行相加应等于本端点的合计。
+
+        它只回答合计，不返回单条流水；看某次调用的明细走用量流水端点。
+      operationId: getUserUsageStats
+      parameters:
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - name: group_by
+          in: query
+          required: false
+          description: 分组维度；缺省 `day`。
+          schema:
+            type: string
+            enum: [day, model, api_key]
+        - $ref: "#/components/parameters/ModelFilter"
+        - $ref: "#/components/parameters/ApiKeyFilter"
+      responses:
+        "200":
+          description: 聚合合计，按 `key` 升序。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfUsageStatsItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/user/models:
     get:
       tags: [user]
@@ -1426,6 +1472,36 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UsageItem"
+      additionalProperties: false
+
+    UsageStatsItem:
+      type: object
+      description: 一个分组维度的用量合计。
+      required: [key, calls, usage, charged_amount]
+      properties:
+        key:
+          type: string
+          description: |
+            分组值：`day` 为日期（`YYYY-MM-DD`），`model` 为客户端请求的模型名，
+            `api_key` 为密钥 id 的十进制文本。
+        calls:
+          type: integer
+          description: 区间内成功履约的请求次数，与流水明细的行数一致。
+        usage:
+          $ref: "#/components/schemas/UsageTokens"
+        charged_amount:
+          type: string
+          description: 应扣量合计：逐行「基础价 × 倍率」相加，十进制字符串。
+      additionalProperties: false
+
+    PageOfUsageStatsItem:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageStatsItem"
       additionalProperties: false
 
     ModelInfo:

@@ -102,6 +102,10 @@ func (f *fakeGatewayStore) ListAccountUsage(context.Context, store.AccountUsageF
 	return nil, 0, nil
 }
 
+func (f *fakeGatewayStore) AccountUsageStats(context.Context, store.UsageStatsQuery) ([]store.UsageStatsItem, error) {
+	return nil, nil
+}
+
 func (f *fakeGatewayStore) ListAccountModels(context.Context, uint64) ([]store.AccountModel, error) {
 	return nil, nil
 }

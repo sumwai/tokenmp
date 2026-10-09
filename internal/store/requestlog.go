@@ -591,9 +591,9 @@ type RequestStatsItem struct {
 // 表达式来自本表而不是调用方拼串：分组维度是列映射，让调用方拼 SQL 片段等于
 // 把注入面开在查询条件上。
 var requestStatsKeys = map[string]string{
-	"day":    "DATE_FORMAT(`day`, '%Y-%m-%d')",
-	"model":  "model",
-	"status": "status",
+	groupByDay:    "DATE_FORMAT(`day`, '%Y-%m-%d')",
+	groupByModel:  "model",
+	groupByStatus: "status",
 }
 
 // RequestStats 按维度聚合账户的请求计数，按 key 升序返回。
