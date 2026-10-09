@@ -38,6 +38,16 @@ func newRateLimiter(window time.Duration, maxHits int, now func() time.Time) *ra
 	}
 }
 
+// limit 记一次调用：放行返回 nil，拒绝返回带退避提示的限频错误。
+//
+// 键在此处拼一次，allow 与提示取的是同一个键 —— 两处各拼一遍迟早会漂开。
+func (s *Service) limit(key string) error {
+	if s.limiter.allow(key) {
+		return nil
+	}
+	return &rateLimitError{retryAfter: s.limiter.retryAfter(key)}
+}
+
 // allow 记一次调用并报告是否放行。
 //
 // 拒绝时同样记账：被拒的重试也占窗口额度，否则固定间隔的脚本永远踩不进拒绝分支。
@@ -64,6 +74,23 @@ func (l *rateLimiter) allow(key string) bool {
 		}
 	}
 	return len(l.hits[key]) <= l.maxHits
+}
+
+// retryAfter 返回该来源需要等待的时长：窗口内最早一次调用滑出窗口的时刻减去当前时刻。
+//
+// 滑动窗口下这是最短的等待时长 —— 写 Retry-After 用它，页面才能给出一个能兑现的倒计时。
+// 窗口内没有记录（键不存在或已全部滑出）时返回 0，由 HTTP 层兜底成下限 1 秒。
+func (l *rateLimiter) retryAfter(key string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	cutoff := l.now().Add(-l.window)
+	for _, t := range l.hits[key] {
+		if t.After(cutoff) {
+			return t.Add(l.window).Sub(l.now())
+		}
+	}
+	return 0
 }
 
 // tokenPair 是一对明文与哈希：明文只回给客户端一次，哈希才是后续查询的钥匙。

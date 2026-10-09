@@ -891,6 +891,16 @@ components:
         会话访问令牌，登录响应的 `data.access_token` 取得，随 `Authorization: Bearer` 提交。
         与数据面的模型 API 密钥是两套独立凭据，不得互换。
 
+  headers:
+    # 页面侧的退避提示；与数据面的同名头（docs/openapi.yaml 的 RetryAfter）同一套语义。
+    RetryAfter:
+      description: |
+        触发频率限制（`code=429`）时出现，单位秒：按来源的滑动窗口推算出的最短等待时长。
+        页面按它显示等待时间，不做自动重试（web/AGENTS.md 的三态）。
+      schema:
+        type: integer
+        minimum: 1
+
   schemas:
     BusinessCode:
       type: integer
@@ -1706,6 +1716,9 @@ components:
             $ref: "#/components/schemas/Envelope"
     TooManyRequests:
       description: 触发频率限制，`code=429`。
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:

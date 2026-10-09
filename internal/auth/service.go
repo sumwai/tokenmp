@@ -84,8 +84,8 @@ type sessionUser struct {
 
 // Challenge 签发一次性加密公钥。
 func (s *Service) Challenge(_ context.Context, addr, fingerprint string) (*publicKeyData, error) {
-	if !s.limiter.allow("challenge:" + addr) {
-		return nil, ErrRateLimited
+	if err := s.limit("challenge:" + addr); err != nil {
+		return nil, err
 	}
 	if err := validateFingerprint(fingerprint); err != nil {
 		return nil, err
@@ -98,8 +98,8 @@ func (s *Service) Challenge(_ context.Context, addr, fingerprint string) (*publi
 // 三类失败（账号不存在、密码错误、账号停用）折叠为 ErrInvalidCredentials，
 // 由 handler 映射为同一个 401 与同一句文案。
 func (s *Service) Signin(ctx context.Context, addr, login, passwordCipher, fingerprint string) (*sessionTokens, error) {
-	if !s.limiter.allow("signin:" + addr) {
-		return nil, ErrRateLimited
+	if err := s.limit("signin:" + addr); err != nil {
+		return nil, err
 	}
 	plain, err := s.decryptPassword(fingerprint, passwordCipher)
 	if err != nil {
@@ -123,8 +123,8 @@ func (s *Service) Signin(ctx context.Context, addr, login, passwordCipher, finge
 // 「这个标识已被占用」，区分来源只会泄漏注册探测信息。账号与账户在存储层
 // 同一事务内写入，失败时不留下能登录却没有账户可操作的账号。
 func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCipher, fingerprint string) (*sessionTokens, error) {
-	if !s.limiter.allow("signup:" + addr) {
-		return nil, ErrRateLimited
+	if err := s.limit("signup:" + addr); err != nil {
+		return nil, err
 	}
 	if s.opts.SignupDisabled {
 		return nil, ErrSignupDisabled
@@ -205,8 +205,8 @@ func (s *Service) SessionByAccess(ctx context.Context, accessToken string) (*ses
 // 重放检测：请求的令牌若命中 prev_refresh_hash，说明它已被轮换过 ——
 // 只有失窃副本才会拿旧值回来，因此撤销整个会话而不是只拒绝本次请求。
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*accessTokenData, error) {
-	if !s.limiter.allow("refresh:" + hashToken(refreshToken)) {
-		return nil, ErrRateLimited
+	if err := s.limit("refresh:" + hashToken(refreshToken)); err != nil {
+		return nil, err
 	}
 	expect := hashToken(refreshToken)
 	row, err := s.store.WebSessionByRefresh(ctx, expect)

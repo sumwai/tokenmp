@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/sumwai/tokenmp/internal/store"
@@ -19,6 +21,10 @@ import (
 // maxBodyBytes 是认证请求体的上限：本族端点只有几个短字段，
 // 放大上限只会给「用大 body 撑爆解析」留空间。
 const maxBodyBytes = 64 << 10
+
+// retryAfterHeader 是限频响应的退避提示头：名称与数据面一致，
+// 契约在页面通信与数据面两处都声明了它。
+const retryAfterHeader = "Retry-After"
 
 // NewHandler 构造页面认证的 HTTP 处理器，挂载于 PathPrefix。
 func NewHandler(svc *Service) http.Handler {
@@ -384,6 +390,22 @@ func bearerToken(header string) (string, bool) {
 	return webapi.BearerToken(header)
 }
 
+// writeRetryAfter 在限频响应上写 Retry-After（秒）。
+//
+// 契约在 429 响应上声明了该头：页面按它显示等待时长，不做自动重试（web/AGENTS.md 的三态）。
+// 提示不足一秒或取不到时写 1 —— 既然写了这个头，就必须给出一个能兑现的等待时长。
+func writeRetryAfter(w http.ResponseWriter, err error) {
+	var limitErr *rateLimitError
+	if !errors.As(err, &limitErr) {
+		return
+	}
+	seconds := int(math.Ceil(limitErr.retryAfter.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set(retryAfterHeader, strconv.Itoa(seconds))
+}
+
 // writeServiceErr 把业务哨兵映射为信封；未识别的错误按 500 处理并保留内部语义日志点。
 func writeServiceErr(w http.ResponseWriter, err error) {
 	switch {
@@ -402,6 +424,7 @@ func writeServiceErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrInvalidOTP):
 		writeErr(w, http.StatusBadRequest, codeBadRequest, "验证码无效或已过期")
 	case errors.Is(err, ErrRateLimited):
+		writeRetryAfter(w, err)
 		writeErr(w, http.StatusTooManyRequests, codeTooManyRequests, "请求过于频繁，请稍后再试")
 	case errors.Is(err, ErrMailerNotConfigured):
 		writeErr(w, http.StatusInternalServerError, codeInternal, "邮件服务未配置")

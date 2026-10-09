@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -313,6 +314,24 @@ func newTestEnv(t *testing.T, opts Options) *testEnv {
 // do 发起一次请求并解码信封。
 func (e *testEnv) do(t *testing.T, method, path string, body any, bearer string) (int, map[string]json.RawMessage) {
 	t.Helper()
+	rec := e.doRaw(t, method, path, body, bearer)
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("响应不是 JSON（%d）: %s", rec.Code, rec.Body.String())
+	}
+	// 信封六字段固定出现：这是页面契约的硬约束，任何端点不得缺字段。
+	for _, key := range []string{"code", "data", "message", "page", "size", "total"} {
+		if _, ok := envelope[key]; !ok {
+			t.Errorf("信封缺少字段 %s: %s", key, rec.Body.String())
+		}
+	}
+	return rec.Code, envelope
+}
+
+// doRaw 发起一次请求并返回原始响应；需要读状态码与信封之外的响应头时用它。
+func (e *testEnv) doRaw(t *testing.T, method, path string, body any, bearer string) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -329,18 +348,7 @@ func (e *testEnv) do(t *testing.T, method, path string, body any, bearer string)
 	}
 	rec := httptest.NewRecorder()
 	e.mux.ServeHTTP(rec, req)
-
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
-		t.Fatalf("响应不是 JSON（%d）: %s", rec.Code, rec.Body.String())
-	}
-	// 信封六字段固定出现：这是页面契约的硬约束，任何端点不得缺字段。
-	for _, key := range []string{"code", "data", "message", "page", "size", "total"} {
-		if _, ok := envelope[key]; !ok {
-			t.Errorf("信封缺少字段 %s: %s", key, rec.Body.String())
-		}
-	}
-	return rec.Code, envelope
+	return rec
 }
 
 // codeOf 取信封业务码。
@@ -654,6 +662,34 @@ func TestSigninRateLimited(t *testing.T) {
 		}
 	}
 	t.Fatalf("40 次 challenge 内未触发限频")
+}
+
+// TestRateLimitedCarriesRetryAfter 断上限频响应带 Retry-After，取值是可兑现的整数秒。
+//
+// 契约在 429 响应上声明了该头；页面按它显示等待时长而不是写死文案（web/AGENTS.md 的三态）。
+func TestRateLimitedCarriesRetryAfter(t *testing.T) {
+	e := newTestEnv(t, Options{})
+	for i := 0; i < 40; i++ {
+		fp := fmt.Sprintf("fp-retry-%04d", i)
+		rec := e.doRaw(t, http.MethodGet, PathChallenge+"?fingerprint="+fp, nil, "")
+		if rec.Code != http.StatusTooManyRequests {
+			continue
+		}
+		raw := rec.Header().Get("Retry-After")
+		if raw == "" {
+			t.Fatal("限频响应缺少 Retry-After 头")
+		}
+		seconds, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("Retry-After 应为整数秒，实际 %q", raw)
+		}
+		// 下限 1 秒（不足一秒也写 1），上限是限频窗口（一分钟）。
+		if seconds < 1 || seconds > 60 {
+			t.Fatalf("Retry-After 应在 1..60 秒内，实际 %d", seconds)
+		}
+		return
+	}
+	t.Fatal("40 次 challenge 内未触发限频")
 }
 
 // TestSignoutIdempotent 断言登出成功后会话失效，且重复登出不报错。
