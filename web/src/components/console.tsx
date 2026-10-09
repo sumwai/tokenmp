@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ChartLine,
   Gauge,
+  HandCoins,
   House,
   KeyRound,
+  Landmark,
   Receipt,
   Route,
   Scale,
   ScrollText,
   ShieldCheck,
   Shuffle,
+  Store,
   Tag,
   UserRound,
   Users,
@@ -50,6 +53,9 @@ const icons: Record<string, LucideIcon> = {
   gauge: Gauge,
   scale: Scale,
   receipt: Receipt,
+  store: Store,
+  'hand-coins': HandCoins,
+  landmark: Landmark,
   wallet: Wallet,
 };
 

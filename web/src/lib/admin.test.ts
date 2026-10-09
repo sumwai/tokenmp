@@ -5,14 +5,17 @@ import {
   ADMIN_PAGE_SIZE,
   AdminPaths,
   FilterAccountID,
+  FilterFrom,
   FilterMerchantID,
   FilterSince,
+  FilterTo,
   adminQueryKey,
   adminQuerySearch,
   listAdminChannels,
   listAdminCredentials,
   listAdminPricing,
   listAdminQuotas,
+  listAdminSettlements,
   listAdminUsage,
   parseAdminQuery,
 } from './admin';
@@ -153,6 +156,59 @@ describe('清单取数', () => {
     stubFetch(forbidden);
     await expect(
       listAdminChannels({ page: 1, size: ADMIN_PAGE_SIZE, filters: {} }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof ApiError && err.code === Code.Forbidden);
+  });
+});
+
+describe('结算清单取数', () => {
+  it('商家与账期过滤按契约的名字进地址，条目取自信封', async () => {
+    const fetchMock = stubFetch(
+      ok(
+        {
+          items: [
+            {
+              merchant_id: 2,
+              period: 'month',
+              from: '2026-09-01T00:00:00Z',
+              to: '2026-10-01T00:00:00Z',
+              commission_rate: '0.1000',
+              trades: 3,
+              gross_sales: '100.00000000',
+              commission: '10.00000000',
+              upstream_cost: '30.00000000',
+              payout: '60.00000000',
+            },
+          ],
+        },
+        1,
+        1,
+      ),
+    );
+
+    const { items, meta } = await listAdminSettlements({
+      page: 1,
+      size: ADMIN_PAGE_SIZE,
+      filters: {
+        [FilterMerchantID]: '2',
+        [FilterFrom]: '2026-09-01T00:00:00Z',
+        [FilterTo]: '2026-10-01T00:00:00Z',
+        account_id: '7',
+      },
+    });
+
+    // 账期原样传递不重排，未声明的过滤键（account_id）不进地址。
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `${AdminPaths.settlements}?page=1&size=${ADMIN_PAGE_SIZE}` +
+        '&merchant_id=2&from=2026-09-01T00%3A00%3A00Z&to=2026-10-01T00%3A00%3A00Z',
+    );
+    expect(items[0]?.payout).toBe('60.00000000');
+    expect(meta).toEqual({ page: 1, size: ADMIN_PAGE_SIZE, total: 1 });
+  });
+
+  it('业务码非 200 时抛 ApiError', async () => {
+    stubFetch(forbidden);
+    await expect(
+      listAdminSettlements({ page: 1, size: ADMIN_PAGE_SIZE, filters: {} }),
     ).rejects.toSatisfy((err: unknown) => err instanceof ApiError && err.code === Code.Forbidden);
   });
 });

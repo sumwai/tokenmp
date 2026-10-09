@@ -58,19 +58,22 @@ type Store interface {
 	MerchantUsageStats(ctx context.Context, q store.MerchantUsageStatsQuery) ([]store.UsageStatsItem, error)
 }
 
-// Options 是装配参数；两个字段都必填。
+// Options 是装配参数；Sessions 与 Store 必填，Settlements 由装配层给出（出账实现复用
+// internal/admin，本包不重算口径）。
 type Options struct {
-	Sessions Sessions
-	Store    Store
+	Sessions    Sessions
+	Store       Store
+	Settlements Settlements
 }
 
 // Handler 是商家域端点的 HTTP 入口，按路径分发到各动作。
 type Handler struct {
-	sessions Sessions
-	store    Store
+	sessions    Sessions
+	store       Store
+	settlements Settlements
 }
 
 // NewHandler 构造商家域端点处理器。
 func NewHandler(opts Options) *Handler {
-	return &Handler{sessions: opts.Sessions, store: opts.Store}
+	return &Handler{sessions: opts.Sessions, store: opts.Store, settlements: opts.Settlements}
 }

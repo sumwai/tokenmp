@@ -86,8 +86,13 @@ function parseKeyID(raw: string | null): string {
   return /^[1-9][0-9]*$/.test(value) ? value : '';
 }
 
-/** parseMoment 解析 RFC3339 时刻；非法取值回落「不限」，避免把脏参数发往服务端。 */
-function parseMoment(raw: string | null): string {
+/**
+ * parseMoment 解析 RFC3339 时刻；非法取值回落「不限」，避免把脏参数发往服务端。
+ *
+ * 导出给商家域的分账对账单页复用：账期同样是「URL 里手改得来的时刻」，回落口径必须与
+ * 用量页逐字相同 —— 两处各写一份正则，迟早一处放宽一处收紧。
+ */
+export function parseMoment(raw: string | null): string {
   const value = trimmed(raw);
   if (value === '') {
     return '';

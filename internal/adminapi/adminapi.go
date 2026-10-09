@@ -25,6 +25,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/admin"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/identity"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
@@ -49,6 +50,8 @@ const (
 	AdjustmentsPath = "/api/v1/admin/adjustments"
 	// UsagePath 是全平台用量流水的固定路径。
 	UsagePath = "/api/v1/admin/usage"
+	// SettlementsPath 是全平台结算对账单的固定路径。
+	SettlementsPath = "/api/v1/admin/settlements"
 )
 
 // itemsKey 是列表数据的字段名，与契约里各 PageOf* 的形状一致。
@@ -81,6 +84,8 @@ type Lister interface {
 	ListQuotas(ctx context.Context, scope billing.Scope, scopeID uint64) ([]admin.QuotaView, error)
 	ListAdjustments(ctx context.Context, accountID uint64) ([]store.Adjustment, error)
 	ListUsage(ctx context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error)
+	// SettlementBills 按账期出账，返回每个商家的对账单；缺省账期按各商家口径取上一期。
+	SettlementBills(ctx context.Context, q admin.SettlementQuery) ([]settlement.BillView, error)
 }
 
 // Options 是装配参数；两个字段都必填。
@@ -123,6 +128,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdjustments(w, r)
 	case UsagePath:
 		h.handleUsage(w, r)
+	case SettlementsPath:
+		h.handleSettlements(w, r)
 	default:
 		webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
 	}

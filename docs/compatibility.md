@@ -465,6 +465,14 @@ Chat 的机制：网关为计费在**上游请求**里注入 `include_usage: tru
   否则合计会与逐行明细相加的结果对不上。
 - 出账是只读动作：它把已经发生的流水按口径折成一张对账单，不写账、不动账户存量。
 
+出账有三个读路径，共用同一份实现，因此三处不会各算一套：
+
+| 入口 | 作用域 | 账期来源 |
+|---|---|---|
+| `tokenmp admin settlement list` | 全平台（`--merchant` 限定单商家） | `--from` / `--to`，缺省按各商家账期取上一期 |
+| `GET /api/v1/admin/settlements`（`docs/openapi-web.yaml`） | 全平台（`merchant_id` 限定单商家） | `from` / `to`，缺省同上 |
+| `GET /api/v1/partner/settlement`（同上） | 会话推导出的本商家 | `from` / `to`，缺省按本商家账期取上一期 |
+
 ## 上游失败分类与处置
 
 上游失败的分类（这是什么失败）与处置（接下来做什么）统一由 `internal/failure` 给出，

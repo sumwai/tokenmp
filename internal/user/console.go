@@ -75,6 +75,13 @@ var consoleSections = []consoleSection{
 				Path:        "/partner",
 				Capability:  identity.CapPartner,
 			},
+			{
+				Title:       "结算",
+				Description: "按账期的收益、平台抽成与上游成本",
+				Icon:        "hand-coins",
+				Path:        "/partner/settlement",
+				Capability:  identity.CapPartner,
+			},
 		},
 	},
 	{
@@ -135,6 +142,13 @@ var consoleSections = []consoleSection{
 				Description: "全平台用量流水",
 				Icon:        "receipt",
 				Path:        "/admin/usage",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "结算",
+				Description: "各商家的分账对账单",
+				Icon:        "landmark",
+				Path:        "/admin/settlements",
 				Capability:  identity.CapOps,
 			},
 		},

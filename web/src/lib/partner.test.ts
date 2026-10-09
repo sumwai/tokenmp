@@ -6,9 +6,11 @@ import {
   createCredential,
   listChannels,
   listCredentials,
+  loadSettlement,
   loadUsageStats,
   PartnerChannelsPath,
   PartnerCredentialsPath,
+  PartnerSettlementPath,
   PartnerUsageStatsPath,
   setChannelEnabled,
   setCredentialEnabled,
@@ -238,5 +240,74 @@ describe('loadUsageStats', () => {
       total: null,
     });
     await expect(loadUsageStats(EMPTY_USAGE_QUERY)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe('loadSettlement', () => {
+  it('账期进 query，对账单取自信封', async () => {
+    const fetchMock = stubFetch(
+      envelopeOf({
+        period: 'month',
+        from: '2026-09-01T00:00:00Z',
+        to: '2026-10-01T00:00:00Z',
+        commission_rate: '0.1000',
+        trades: 3,
+        gross_sales: '100.00000000',
+        commission: '10.00000000',
+        upstream_cost: '30.00000000',
+        payout: '60.00000000',
+      }),
+    );
+
+    const bill = await loadSettlement({
+      from: '2026-09-01T00:00:00Z',
+      to: '2026-10-01T00:00:00Z',
+    });
+
+    // 参数顺序由契约声明的参数顺序决定（from / to）。
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `${PartnerSettlementPath}?from=2026-09-01T00%3A00%3A00Z&to=2026-10-01T00%3A00%3A00Z`,
+    );
+    expect(bill.payout).toBe('60.00000000');
+    expect(bill.commission_rate).toBe('0.1000');
+  });
+
+  it('空账期不下发参数，由服务端按商家账期取上一期', async () => {
+    const fetchMock = stubFetch(
+      envelopeOf({
+        period: 'month',
+        from: '2026-09-01T00:00:00Z',
+        to: '2026-10-01T00:00:00Z',
+        commission_rate: '0.0000',
+        trades: 0,
+        gross_sales: '0.00000000',
+        commission: '0.00000000',
+        upstream_cost: '0.00000000',
+        payout: '0.00000000',
+      }),
+    );
+
+    await loadSettlement({ from: '', to: '' });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(PartnerSettlementPath);
+  });
+
+  it('响应缺少 data 时抛错：不把「没查出来」显示成空账期', async () => {
+    stubFetch({ code: 200, data: null, message: 'ok', page: null, size: null, total: null });
+    await expect(loadSettlement({ from: '', to: '' })).rejects.toThrow(/缺少 data/);
+  });
+
+  it('业务码非 200 抛 ApiError', async () => {
+    stubFetch({
+      code: Code.BadRequest,
+      data: null,
+      message: 'from 与 to 要么都给，要么都不给',
+      page: null,
+      size: null,
+      total: null,
+    });
+    await expect(
+      loadSettlement({ from: '2026-09-01T00:00:00Z', to: '' }),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 });

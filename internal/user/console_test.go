@@ -155,6 +155,7 @@ func TestConsoleAdminSectionPaths(t *testing.T) {
 		"/admin/quotas",
 		"/admin/adjustments",
 		"/admin/usage",
+		"/admin/settlements",
 	}
 	got := pathsOf(sections[0].Entries)
 	if len(got) != len(want) {

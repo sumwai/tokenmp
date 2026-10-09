@@ -242,6 +242,12 @@ func TestSettlementBillsKeepsIdentity(t *testing.T) {
 	}
 }
 
+// billWindow 是一次出账请求的账期，供作用域与边界断言用。
+type billWindow struct {
+	from time.Time
+	to   time.Time
+}
+
 // assertViewBalanced 断言一组对账单自洽，且金额是可解析的十进制字符串。
 func assertViewBalanced(t *testing.T, views []settlement.BillView, gross, cost string) {
 	t.Helper()
@@ -268,5 +274,83 @@ func assertViewBalanced(t *testing.T, views []settlement.BillView, gross, cost s
 			!decimal.RequireFromString(v.UpstreamCost).Equal(decimal.RequireFromString(cost)) {
 			t.Errorf("商家 %d 的合计与输入事实不符：%+v", v.MerchantID, v)
 		}
+	}
+}
+
+// TestSettlementBillSingleMerchant 覆盖页面侧的实际入口：商家由调用方给出（页面按会话
+// 推导），账期缺省时按该商家的口径取上一个完整自然周期，且不必遍历全部商家。
+func TestSettlementBillSingleMerchant(t *testing.T) {
+	var windows []billWindow
+	fake := &fakeStore{
+		listMerchants: func(context.Context) ([]store.Merchant, error) {
+			return settleMerchantsFixture(), nil
+		},
+		merchantSettleInfo: func(_ context.Context, id uint64) ([]byte, error) {
+			if id == 1 {
+				return []byte(`{"commission_rate":"0.1000","period":"week"}`), nil
+			}
+			return nil, nil
+		},
+		settlementFacts: func(_ context.Context, merchantID uint64, from, to time.Time) (store.SettlementFacts, error) {
+			windows = append(windows, billWindow{from: from, to: to})
+			return store.SettlementFacts{MerchantID: merchantID, Trades: 2, GrossSales: "100", UpstreamCost: "30"}, nil
+		},
+	}
+	svc := newService(fake)
+
+	bill, err := svc.SettlementBill(context.Background(), 1, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	if fake.called("ListMerchants") {
+		t.Error("单商家出账不应遍历全部商家")
+	}
+	wantWeek := billWindow{
+		from: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC),
+		to:   time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC),
+	}
+	if len(windows) != 1 || windows[0] != wantWeek {
+		t.Errorf("账期 = %+v，期望 %+v", windows, wantWeek)
+	}
+	if bill.MerchantID != 1 || bill.Period != string(billing.PeriodWeek) {
+		t.Errorf("对账单应带上商家与账期：%+v", bill)
+	}
+	// 对账单的金额是十进制字符串：恒等式按十进制取值比较，不按字节比较（标度可补零）。
+	sum := decimal.RequireFromString(bill.Payout).Add(decimal.RequireFromString(bill.Commission))
+	total := decimal.RequireFromString(bill.GrossSales).Sub(decimal.RequireFromString(bill.UpstreamCost))
+	if !sum.Equal(total) {
+		t.Errorf("对账单不满足分账恒等式：收益+抽成 = %s，卖出−成本 = %s", sum, total)
+	}
+
+	// 未配口径的商家取默认账期（月）：2026-10-05 之前最近一个完整自然月是 9 月。
+	if _, err := svc.SettlementBill(context.Background(), 2, time.Time{}, time.Time{}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	wantMonth := billWindow{
+		from: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		to:   time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+	if windows[1] != wantMonth {
+		t.Errorf("未配口径商家的账期 = %+v，期望 %+v", windows[1], wantMonth)
+	}
+}
+
+// TestSettlementBillRejectsPartialWindow 断言只给一侧账期被拒：缺的那一半落到零值会让
+// 账期变成空区间或「世界上所有流水」，那是用法错误而不是默认值。
+func TestSettlementBillRejectsPartialWindow(t *testing.T) {
+	fake := &fakeStore{}
+	svc := newService(fake)
+	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := svc.SettlementBill(context.Background(), 1, at, time.Time{}); err == nil {
+		t.Error("只给起点应当被拒绝")
+	}
+	if _, err := svc.SettlementBill(context.Background(), 1, time.Time{}, at); err == nil {
+		t.Error("只给终点应当被拒绝")
+	}
+	if _, err := svc.SettlementBill(context.Background(), 0, at, at); err == nil {
+		t.Error("商家 id 为 0 应当被拒绝")
+	}
+	if fake.called("MerchantSettlementFacts") {
+		t.Error("非法输入不应触达存储层")
 	}
 }

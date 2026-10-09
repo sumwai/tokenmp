@@ -779,3 +779,6 @@ merchant_id  period  from                  to                    trades  gross_s
 - 不给 `--merchant` 时列出全部商家，即全平台结算视图。
 - 出账是只读动作：它不动账户存量、不写账本。卖出总额取自 `account_purchase`，
   上游成本取自 `billing_usage`。
+- 同一次出账还有两个页面读路径（口径与上面逐条相同，只是作用域不同）：
+  `GET /api/v1/admin/settlements` 是全平台视图，`GET /api/v1/partner/settlement`
+  是商家自己的对账单（作用域由会话推导，不接受商家参数）。

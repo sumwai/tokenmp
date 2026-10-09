@@ -2,15 +2,17 @@ package adminapi
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/admin"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
 
-// 本文件是八组只读清单的视图与处理器。
+// 本文件是九组只读清单的视图与处理器。
 //
 // 视图不直接序列化存储行：对外字段是一份白名单，存储层新增列不会自动出现在管理面。
 // 每个视图的字段与 `tokenmp admin <组> list --json` 的行一一对应（凭据与限额直接
@@ -371,16 +373,106 @@ func (h *Handler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeItems(w, items, page, total)
 }
 
+// adminSettlementView 是一个商家的结算对账单的对外形状，字段与契约 AdminSettlementItem 对齐。
+//
+// 字段名与 `settlement.BillView` 一致，只多一个 merchant_id：管理面是跨商家的清单，
+// 没有它分行就无从归属。
+type adminSettlementView struct {
+	MerchantID     uint64 `json:"merchant_id"`
+	Period         string `json:"period"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	CommissionRate string `json:"commission_rate"`
+	Trades         int64  `json:"trades"`
+	GrossSales     string `json:"gross_sales"`
+	Commission     string `json:"commission"`
+	UpstreamCost   string `json:"upstream_cost"`
+	Payout         string `json:"payout"`
+}
+
+// handleSettlements 列出全平台结算对账单，支持按商家与账期过滤。
+//
+// 账期缺省时按各商家自己的 settle_info 账期取上一个完整自然周期：账期是商家自己的口径，
+// 同一批里各家的账期可以不同。出账逻辑来自 internal/admin 的 SettlementBill，
+// 与 CLI 的 `settlement list` 同源。
+func (h *Handler) handleSettlements(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
+	page, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	merchantID, err := parseOptionalUint(query, "merchant_id")
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	from, err := parseMomentParam("from", query.Get("from"))
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	to, err := parseMomentParam("to", query.Get("to"))
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	// 只给一侧会让另一半落到零值，账期变成「世界上所有流水」：那是用法错误，不是默认值。
+	if from.IsZero() != to.IsZero() {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "from 与 to 要么都给，要么都不给")
+		return
+	}
+	if !from.IsZero() && !to.After(from) {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "to 必须晚于 from")
+		return
+	}
+	bills, err := h.lister.SettlementBills(r.Context(), admin.SettlementQuery{
+		MerchantID: merchantID,
+		From:       from,
+		To:         to,
+	})
+	if err != nil {
+		writeInternal(w)
+		return
+	}
+	views := make([]adminSettlementView, 0, len(bills))
+	for _, bill := range bills {
+		views = append(views, adminSettlementView{
+			MerchantID:     bill.MerchantID,
+			Period:         bill.Period,
+			From:           bill.From,
+			To:             bill.To,
+			CommissionRate: bill.CommissionRate,
+			Trades:         bill.Trades,
+			GrossSales:     bill.GrossSales,
+			Commission:     bill.Commission,
+			UpstreamCost:   bill.UpstreamCost,
+			Payout:         bill.Payout,
+		})
+	}
+	items, total := pageSlice(views, page)
+	writeItems(w, items, page, total)
+}
+
 // parseSince 解析 since 查询参数；缺省为零值，表示不按时间过滤。
 func parseSince(raw string) (time.Time, error) {
-	if raw == "" {
+	return parseMomentParam("since", raw)
+}
+
+// parseMomentParam 解析一个 RFC3339 时刻查询参数；空串返回零值。
+//
+// name 只用于错误文案：账期端点用 from / to，沿用 since 的说法会让人以为传错了参数名。
+func parseMomentParam(name, raw string) (time.Time, error) {
+	if strings.TrimSpace(raw) == "" {
 		return time.Time{}, nil
 	}
-	since, err := time.Parse(time.RFC3339, raw)
+	moment, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return time.Time{}, errors.New("since 必须是 RFC3339 时刻")
+		return time.Time{}, fmt.Errorf("%s 必须是 RFC3339 时刻", name)
 	}
-	return since, nil
+	return moment, nil
 }
 
 // pageOf 解析分页参数并把非法取值写回信封；返回 false 表示已写出响应。

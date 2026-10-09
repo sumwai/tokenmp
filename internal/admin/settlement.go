@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -85,6 +86,41 @@ type SettlementQuery struct {
 	To   time.Time
 }
 
+// SettlementBill 出账一个商家的对账单。
+//
+// merchantID 由调用方给出：管理面按 `--merchant` 或全表遍历给，商家域页面按会话推导出的
+// 商家给 —— 出账规则因此只有一处实现，页面与 CLI 看到的数不会各算一套。
+// from / to 都为零值时按该商家 settle_info 的账期取上一个完整自然周期。
+func (s *Service) SettlementBill(ctx context.Context, merchantID uint64, from, to time.Time) (settlement.BillView, error) {
+	if err := requireID("商家 id", merchantID); err != nil {
+		return settlement.BillView{}, err
+	}
+	// 只给一侧会让缺的那一半落到零值，账期变成「世界上所有流水」或一个空区间：
+	// 调用方各自拦过一遍，但出账是共用实现，防线不靠调用方自觉。
+	if from.IsZero() != to.IsZero() {
+		return settlement.BillView{}, errors.New("admin: 账期的起点与终点要么都给，要么都不给")
+	}
+	info, err := s.MerchantSettleInfo(ctx, merchantID)
+	if err != nil {
+		return settlement.BillView{}, err
+	}
+	if from.IsZero() && to.IsZero() {
+		from, to, err = settlement.LastPeriod(info.Period, s.now())
+		if err != nil {
+			return settlement.BillView{}, err
+		}
+	}
+	facts, err := s.store.MerchantSettlementFacts(ctx, merchantID, from, to)
+	if err != nil {
+		return settlement.BillView{}, err
+	}
+	sum, err := settlementSummary(facts)
+	if err != nil {
+		return settlement.BillView{}, err
+	}
+	return settlement.Settle(merchantID, info, from, to, sum).View(), nil
+}
+
 // SettlementBills 按账期出账，返回每个商家的对账单。
 //
 // 逐个商家出账而不是一条多表查询：账期是每个商家自己的口径，同一批里各家的账期
@@ -97,26 +133,11 @@ func (s *Service) SettlementBills(ctx context.Context, q SettlementQuery) ([]set
 	}
 	views := make([]settlement.BillView, 0, len(merchants))
 	for _, m := range merchants {
-		info, infoErr := s.MerchantSettleInfo(ctx, m.ID)
-		if infoErr != nil {
-			return nil, infoErr
+		bill, billErr := s.SettlementBill(ctx, m.ID, q.From, q.To)
+		if billErr != nil {
+			return nil, billErr
 		}
-		from, to := q.From, q.To
-		if from.IsZero() && to.IsZero() {
-			from, to, err = settlement.LastPeriod(info.Period, s.now())
-			if err != nil {
-				return nil, err
-			}
-		}
-		facts, factsErr := s.store.MerchantSettlementFacts(ctx, m.ID, from, to)
-		if factsErr != nil {
-			return nil, factsErr
-		}
-		sum, sumErr := settlementSummary(facts)
-		if sumErr != nil {
-			return nil, sumErr
-		}
-		views = append(views, settlement.Settle(m.ID, info, from, to, sum).View())
+		views = append(views, bill)
 	}
 	return views, nil
 }

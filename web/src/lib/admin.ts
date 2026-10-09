@@ -26,6 +26,8 @@ export type AdminQuota = components['schemas']['AdminQuota'];
 export type AdminAdjustment = components['schemas']['AdminAdjustment'];
 /** AdminUsageItem 是一条跨账户的用量流水。 */
 export type AdminUsageItem = components['schemas']['AdminUsageItem'];
+/** AdminSettlementItem 是一个商家的结算对账单。 */
+export type AdminSettlementItem = components['schemas']['AdminSettlementItem'];
 
 /**
  * AdminPaths 与契约里的清单路径一一对应。
@@ -41,6 +43,7 @@ export const AdminPaths = {
   quotas: '/api/v1/admin/quotas',
   adjustments: '/api/v1/admin/adjustments',
   usage: '/api/v1/admin/usage',
+  settlements: '/api/v1/admin/settlements',
 } as const satisfies Record<string, keyof paths>;
 
 /** AdminList 是一次清单请求的结果：当页条目与信封里的分页信息。 */
@@ -72,6 +75,8 @@ export const FilterScope = 'scope';
 export const FilterScopeID = 'scope_id';
 export const FilterModel = 'model';
 export const FilterSince = 'since';
+export const FilterFrom = 'from';
+export const FilterTo = 'to';
 
 /**
  * parseAdminQuery 从 URL query 解析清单状态。
@@ -189,4 +194,11 @@ export async function listAdminAdjustments(
 /** listAdminUsage 列出全平台用量流水，支持按账户与起始时刻过滤。 */
 export async function listAdminUsage(query: AdminListQuery): Promise<AdminList<AdminUsageItem>> {
   return list<AdminUsageItem>('usage', query, [FilterAccountID, FilterSince]);
+}
+
+/** listAdminSettlements 列出全平台结算对账单，支持按商家与账期过滤。 */
+export async function listAdminSettlements(
+  query: AdminListQuery,
+): Promise<AdminList<AdminSettlementItem>> {
+  return list<AdminSettlementItem>('settlements', query, [FilterMerchantID, FilterFrom, FilterTo]);
 }

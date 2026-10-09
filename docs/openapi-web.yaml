@@ -1319,6 +1319,50 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/admin/settlements:
+    get:
+      tags: [admin]
+      summary: 全平台结算对账单
+      description: |
+        按商家逐行列出结算对账单，字段与 `tokenmp admin settlement list --json` 的行一致。
+        `merchant_id` 限定单个商家；账期缺省时按各商家自己的账期取上一个完整自然周期 ——
+        账期是商家自己的口径，同一批里各家的账期可以不同。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminSettlements
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: merchant_id
+          in: query
+          required: false
+          description: 按商家过滤；缺省列出全部商家。
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - $ref: "#/components/parameters/WindowFrom"
+        - $ref: "#/components/parameters/WindowTo"
+      responses:
+        "200":
+          description: 对账单清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminSettlementItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/partner/channels:
     get:
       tags: [partner]
@@ -1613,6 +1657,44 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/PageOfUsageStatsItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/settlement:
+    get:
+      tags: [partner]
+      summary: 分账对账单
+      description: |
+        返回本商家一个账期的分账对账单：账期、成交笔数与四处金额（卖出总额、平台抽成、
+        上游成本、商家收益）。作用域由会话推导，不接受商家参数；非本商家的数据不出现。
+
+        账期是左闭右开区间：`from` 与 `to` 一起给出时按该区间出账，都不给时按本商家的
+        账期取上一个完整自然周期。金额是十进制字符串（金额 8 位小数、抽成率 4 位），
+        口径见 `docs/compatibility.md` 的「分佣与结算口径」。
+      operationId: getPartnerSettlement
+      parameters:
+        - $ref: "#/components/parameters/WindowFrom"
+        - $ref: "#/components/parameters/WindowTo"
+      responses:
+        "200":
+          description: 该账期的对账单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PartnerSettlement"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2367,6 +2449,46 @@ components:
           description: 上游凭据明文，只在写入这一条路径出现。
       additionalProperties: false
 
+    PartnerSettlement:
+      type: object
+      description: |
+        一个商家一个账期的分账对账单，字段与 `settlement.BillView` 一致，只去掉商家标识 ——
+        它就是会话本身。金额与抽成率是十进制字符串（金额 8 位小数、抽成率 4 位），
+        口径见 `docs/compatibility.md` 的「分佣与结算口径」。
+      required: [period, from, to, commission_rate, trades, gross_sales, commission, upstream_cost, payout]
+      properties:
+        period:
+          type: string
+          description: 结算账期。
+          enum: [day, week, month]
+        from:
+          type: string
+          format: date-time
+          description: 账期起点（含）。
+        to:
+          type: string
+          format: date-time
+          description: 账期终点（不含）。
+        commission_rate:
+          type: string
+          description: 平台抽成率，十进制字符串，最多 4 位小数。
+        trades:
+          type: integer
+          description: 账期内的成交笔数。
+        gross_sales:
+          type: string
+          description: 卖出总额（本商家名下账户的实付合计），十进制字符串。
+        commission:
+          type: string
+          description: 平台抽成（卖出总额 × 抽成率），十进制字符串。
+        upstream_cost:
+          type: string
+          description: 上游成本（本商家名下渠道用量的牌价基础价合计），十进制字符串。
+        payout:
+          type: string
+          description: 商家收益（卖出总额 − 平台抽成 − 上游成本），十进制字符串。
+      additionalProperties: false
+
     ModelInfo:
       type: object
       description: 一个当前账户可调用的模型。
@@ -3039,6 +3161,59 @@ components:
             $ref: "#/components/schemas/AdminUsageItem"
       additionalProperties: false
 
+    AdminSettlementItem:
+      type: object
+      description: |
+        一个商家的结算对账单，字段与 `tokenmp admin settlement list --json` 的行一致；
+        比 PartnerSettlement 多 `merchant_id`：管理面是跨商家的清单，没有它分行无从归属。
+      required: [merchant_id, period, from, to, commission_rate, trades, gross_sales, commission, upstream_cost, payout]
+      properties:
+        merchant_id:
+          type: integer
+          format: int64
+          description: 结算归属的商家 id。
+        period:
+          type: string
+          description: 结算账期。
+          enum: [day, week, month]
+        from:
+          type: string
+          format: date-time
+          description: 账期起点（含）。
+        to:
+          type: string
+          format: date-time
+          description: 账期终点（不含）。
+        commission_rate:
+          type: string
+          description: 平台抽成率，十进制字符串，最多 4 位小数。
+        trades:
+          type: integer
+          description: 账期内的成交笔数。
+        gross_sales:
+          type: string
+          description: 卖出总额，十进制字符串。
+        commission:
+          type: string
+          description: 平台抽成，十进制字符串。
+        upstream_cost:
+          type: string
+          description: 上游成本，十进制字符串。
+        payout:
+          type: string
+          description: 商家收益，十进制字符串。
+      additionalProperties: false
+
+    PageOfAdminSettlementItem:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminSettlementItem"
+      additionalProperties: false
+
   parameters:
     Page:
       name: page
@@ -3072,6 +3247,24 @@ components:
       in: query
       required: false
       description: 结束时刻（含），RFC3339；缺省不限。
+      schema:
+        type: string
+        format: date-time
+    WindowFrom:
+      name: from
+      in: query
+      required: false
+      description: |-
+        账期起点（含），RFC3339。与 `to` 一起给出即按该区间出账；都不给时按商家的账期
+        取上一个完整自然周期。只给一侧返回 `code=400`。
+      schema:
+        type: string
+        format: date-time
+    WindowTo:
+      name: to
+      in: query
+      required: false
+      description: 账期终点（不含），RFC3339。与 `from` 一起给出。
       schema:
         type: string
         format: date-time
