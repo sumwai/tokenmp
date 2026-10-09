@@ -150,12 +150,38 @@ func (s *Store) InsertMerchant(ctx context.Context, m Merchant) (uint64, error) 
 	return insertMerchant(ctx, s.db, m)
 }
 
-const listMerchantsSQL = `SELECT id, code, name, kind, status, owner_user_id, created_at
-FROM merchant ORDER BY id`
+// rowScanner 是 *sql.Row 与 *sql.Rows 的公共扫描面，让按主键读取与列表共用同一份解析。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// merchantColumns 是 merchant 行的列顺序，列表与按主键读取共用。
+const merchantColumns = `id, code, name, kind, status, owner_user_id, created_at`
+
+// scanMerchantRow 把一行 merchant 扫进 Merchant，列顺序与 merchantColumns 一致。
+func scanMerchantRow(row rowScanner) (Merchant, error) {
+	var (
+		m         Merchant
+		kindRaw   string
+		owner     sql.NullInt64
+		createdAt scanTime
+	)
+	if err := row.Scan(&m.ID, &m.Code, &m.Name, &kindRaw, &m.Status, &owner, &createdAt); err != nil {
+		return Merchant{}, err
+	}
+	m.Kind = MerchantKindFromDB(kindRaw)
+	if owner.Valid {
+		//nolint:gosec // G115：owner_user_id 是非负的登录主体 id，列类型为 BIGINT UNSIGNED。
+		id := uint64(owner.Int64)
+		m.OwnerUserID = &id
+	}
+	m.CreatedAt = createdAt.Time
+	return m, nil
+}
 
 // listMerchants 列出全部商家。
 func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
-	rows, err := q.QueryContext(ctx, listMerchantsSQL)
+	rows, err := q.QueryContext(ctx, "SELECT "+merchantColumns+" FROM merchant ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 merchant 失败: %w", err)
 	}
@@ -163,22 +189,10 @@ func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
 
 	var merchants []Merchant
 	for rows.Next() {
-		var (
-			m         Merchant
-			kindRaw   string
-			owner     sql.NullInt64
-			createdAt scanTime
-		)
-		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &kindRaw, &m.Status, &owner, &createdAt); err != nil {
+		m, err := scanMerchantRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: 解析 merchant 行失败: %w", err)
 		}
-		m.Kind = MerchantKindFromDB(kindRaw)
-		if owner.Valid {
-			//nolint:gosec // G115：owner_user_id 是非负的登录主体 id，列类型为 BIGINT UNSIGNED。
-			id := uint64(owner.Int64)
-			m.OwnerUserID = &id
-		}
-		m.CreatedAt = createdAt.Time
 		merchants = append(merchants, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -190,6 +204,50 @@ func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
 // ListMerchants 列出全部商家。
 func (s *Store) ListMerchants(ctx context.Context) ([]Merchant, error) {
 	return listMerchants(ctx, dbQuerier{db: s.db})
+}
+
+// MerchantByID 按主键查商家；无匹配时错误满足 errors.Is(err, sql.ErrNoRows)。
+//
+// 供管理面校验引用：渠道、凭据与套餐都带 merchant_id，写入前先确认归属存在，
+// 否则会留下归属不明的行。
+func (s *Store) MerchantByID(ctx context.Context, id uint64) (*Merchant, error) {
+	if id == 0 {
+		return nil, errors.New("store: merchant.id 不能为 0")
+	}
+	m, err := scanMerchantRow(s.db.QueryRowContext(ctx,
+		"SELECT "+merchantColumns+" FROM merchant WHERE id = ?", id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("store: 查询 merchant 失败: %w", err)
+	}
+	return &m, nil
+}
+
+const updateMerchantSQL = `UPDATE merchant SET code = ?, name = ?, kind = ? WHERE id = ?`
+
+// UpdateMerchant 改一个商家的编码、名称与类型。
+//
+// 归属主体与状态不在这里：前者走 SetMerchantOwner（有唯一键），后者走 SetMerchantStatus
+// （启停动作与停用同源），三者的写入条件不同。
+func (s *Store) UpdateMerchant(ctx context.Context, id uint64, code, name string, kind MerchantKind) error {
+	if id == 0 {
+		return errors.New("store: merchant.id 不能为 0")
+	}
+	if strings.TrimSpace(code) == "" {
+		return errors.New("store: merchant.code 不能为空")
+	}
+	if strings.TrimSpace(name) == "" {
+		return errors.New("store: merchant.name 不能为空")
+	}
+	if err := ValidateMerchantKind(kind); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, updateMerchantSQL, code, name, kind, id); err != nil {
+		return describeWriteError("merchant", err)
+	}
+	return nil
 }
 
 const setMerchantStatusSQL = "UPDATE merchant SET status = ? WHERE id = ?"
@@ -291,12 +349,33 @@ func (s *Store) InsertChannel(ctx context.Context, c Channel) (uint64, error) {
 	return insertChannel(ctx, s.db, c)
 }
 
-const listChannelsSQL = `SELECT id, merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled, config
-FROM upstream_channel ORDER BY id`
+// channelColumns 是 upstream_channel 行的列顺序，列表与按主键读取共用。
+const channelColumns = `id, merchant_id, name, vendor, type, cred_group, base_url, priority, weight, enabled, config`
+
+// scanChannelRow 把一行 upstream_channel 扫进 Channel，列顺序与 channelColumns 一致。
+func scanChannelRow(row rowScanner) (Channel, error) {
+	var (
+		c       Channel
+		typeRaw string
+		// config 扫进 []byte 而不是直接扫进 c.Config：空配置在库里写的是 NULL，
+		// 而 json.RawMessage 的底层类型接不住 NULL，会让整条 list 直接失败。
+		// NULL 与空字节串在这里等价：两者都表示该渠道没有扩展配置。
+		config []byte
+	)
+	if err := row.Scan(&c.ID, &c.MerchantID, &c.Name, &c.Vendor, &typeRaw,
+		&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled, &config); err != nil {
+		return Channel{}, err
+	}
+	if len(config) > 0 {
+		c.Config = json.RawMessage(config)
+	}
+	c.Type = ChannelTypeFromDB(typeRaw)
+	return c, nil
+}
 
 // listChannels 列出全部渠道。
 func listChannels(ctx context.Context, q querier) ([]Channel, error) {
-	rows, err := q.QueryContext(ctx, listChannelsSQL)
+	rows, err := q.QueryContext(ctx, "SELECT "+channelColumns+" FROM upstream_channel ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 upstream_channel 失败: %w", err)
 	}
@@ -304,22 +383,10 @@ func listChannels(ctx context.Context, q querier) ([]Channel, error) {
 
 	var channels []Channel
 	for rows.Next() {
-		var (
-			c       Channel
-			typeRaw string
-			// config 扫进 []byte 而不是直接扫进 c.Config：空配置在库里写的是 NULL，
-			// 而 json.RawMessage 的底层类型接不住 NULL，会让整条 list 直接失败。
-			// NULL 与空字节串在这里等价：两者都表示该渠道没有扩展配置。
-			config []byte
-		)
-		if err := rows.Scan(&c.ID, &c.MerchantID, &c.Name, &c.Vendor, &typeRaw,
-			&c.CredGroup, &c.BaseURL, &c.Priority, &c.Weight, &c.Enabled, &config); err != nil {
+		c, err := scanChannelRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_channel 行失败: %w", err)
 		}
-		if len(config) > 0 {
-			c.Config = json.RawMessage(config)
-		}
-		c.Type = ChannelTypeFromDB(typeRaw)
 		channels = append(channels, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -331,6 +398,61 @@ func listChannels(ctx context.Context, q querier) ([]Channel, error) {
 // ListChannels 列出全部渠道。
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 	return listChannels(ctx, dbQuerier{db: s.db})
+}
+
+// ChannelByID 按主键查渠道；无匹配时错误满足 errors.Is(err, sql.ErrNoRows)。
+//
+// 供管理面校验引用与动作目标：模型映射带 channel_id，启停与修改都要求这一行存在。
+func (s *Store) ChannelByID(ctx context.Context, id uint64) (*Channel, error) {
+	if id == 0 {
+		return nil, errors.New("store: upstream_channel.id 不能为 0")
+	}
+	c, err := scanChannelRow(s.db.QueryRowContext(ctx,
+		"SELECT "+channelColumns+" FROM upstream_channel WHERE id = ?", id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("store: 查询 upstream_channel 失败: %w", err)
+	}
+	return &c, nil
+}
+
+const updateChannelSQL = `UPDATE upstream_channel
+SET merchant_id = ?, name = ?, vendor = ?, type = ?, cred_group = ?, base_url = ?, priority = ?, weight = ?, config = ?
+WHERE id = ?`
+
+// UpdateChannel 改一条渠道的全部配置字段。
+//
+// 启用位不在本方法里：启停是独立动作，修改配置不应把一条停用的渠道意外启用。
+func (s *Store) UpdateChannel(ctx context.Context, c Channel) error {
+	if c.ID == 0 {
+		return errors.New("store: upstream_channel.id 不能为 0")
+	}
+	if c.MerchantID == 0 {
+		return errors.New("store: upstream_channel.merchant_id 不能为 0")
+	}
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("store: upstream_channel.name 不能为空")
+	}
+	if err := ValidateChannelType(c.Type); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.CredGroup) == "" {
+		return errors.New("store: upstream_channel.cred_group 不能为空")
+	}
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return errors.New("store: upstream_channel.base_url 不能为空")
+	}
+	config, err := encodeChannelConfig(c.Config)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, updateChannelSQL,
+		c.MerchantID, c.Name, c.Vendor, c.Type, c.CredGroup, c.BaseURL, c.Priority, c.Weight, config, c.ID); err != nil {
+		return describeWriteError("upstream_channel", err)
+	}
+	return nil
 }
 
 const setChannelEnabledSQL = "UPDATE upstream_channel SET enabled = ? WHERE id = ?"
@@ -436,13 +558,25 @@ func (s *Store) InsertCredential(ctx context.Context, c CredentialRow) (uint64, 
 	return insertCredential(ctx, s.db, c)
 }
 
-//nolint:gosec // G101：这是 SQL 语句；命中的是表名与列名里的 credential，不是凭据原文。
-const listCredentialsSQL = `SELECT id, merchant_id, cred_group, name, secret, enabled
-FROM upstream_credential ORDER BY id`
+// credentialColumns 是 upstream_credential 行的列顺序，列表与按主键读取共用。
+//
+//nolint:gosec // G101：这是列名清单，不是凭据原文。
+const credentialColumns = `id, merchant_id, cred_group, name, secret, enabled`
+
+// scanCredentialRow 把一行 upstream_credential 扫进 CredentialRow，列顺序与 credentialColumns 一致。
+//
+// 扫出来的 Secret 是原文，只供调用方脱敏或写入用，不得进入响应。
+func scanCredentialRow(row rowScanner) (CredentialRow, error) {
+	var c CredentialRow
+	if err := row.Scan(&c.ID, &c.MerchantID, &c.CredGroup, &c.Name, &c.Secret, &c.Enabled); err != nil {
+		return CredentialRow{}, err
+	}
+	return c, nil
+}
 
 // listCredentials 列出全部上游凭据，含 secret 原文供调用方脱敏。
 func listCredentials(ctx context.Context, q querier) ([]CredentialRow, error) {
-	rows, err := q.QueryContext(ctx, listCredentialsSQL)
+	rows, err := q.QueryContext(ctx, "SELECT "+credentialColumns+" FROM upstream_credential ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 upstream_credential 失败: %w", err)
 	}
@@ -450,8 +584,8 @@ func listCredentials(ctx context.Context, q querier) ([]CredentialRow, error) {
 
 	var credentials []CredentialRow
 	for rows.Next() {
-		var c CredentialRow
-		if err := rows.Scan(&c.ID, &c.MerchantID, &c.CredGroup, &c.Name, &c.Secret, &c.Enabled); err != nil {
+		c, err := scanCredentialRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_credential 行失败: %w", err)
 		}
 		credentials = append(credentials, c)
@@ -465,6 +599,64 @@ func listCredentials(ctx context.Context, q querier) ([]CredentialRow, error) {
 // ListCredentials 列出全部上游凭据，含 secret 原文供调用方脱敏。
 func (s *Store) ListCredentials(ctx context.Context) ([]CredentialRow, error) {
 	return listCredentials(ctx, dbQuerier{db: s.db})
+}
+
+// CredentialByID 按主键查凭据；无匹配时错误满足 errors.Is(err, sql.ErrNoRows)。
+//
+// 供管理面校验动作目标：启停与修改都要求这一行存在，secret 原文由调用方脱敏。
+func (s *Store) CredentialByID(ctx context.Context, id uint64) (*CredentialRow, error) {
+	if id == 0 {
+		return nil, errors.New("store: upstream_credential.id 不能为 0")
+	}
+	c, err := scanCredentialRow(s.db.QueryRowContext(ctx,
+		"SELECT "+credentialColumns+" FROM upstream_credential WHERE id = ?", id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("store: 查询 upstream_credential 失败: %w", err)
+	}
+	return &c, nil
+}
+
+//nolint:gosec // G101：这是 SQL 语句；命中的是列名里的 secret，不是凭据原文。
+const updateCredentialProfileSQL = `UPDATE upstream_credential
+SET merchant_id = ?, cred_group = ?, name = ? WHERE id = ?`
+
+//nolint:gosec // G101：这是 SQL 语句；命中的是列名里的 secret，不是凭据原文。
+const rotateCredentialSQL = `UPDATE upstream_credential
+SET merchant_id = ?, cred_group = ?, name = ?, secret = ? WHERE id = ?`
+
+// UpdateCredential 改一行凭据的归属、分组与名称；Secret 非空时同时覆盖 secret。
+//
+// 与 UpdateCredentialSecret 的区别在这一处：那个供 OAuth 惰性续期写回，限定行仍处于
+// 启用态（停用与续期并发时停用胜出）；本方法服务于管理面的修改与轮换，对停用的行同样生效
+// —— 否则页面上改一个已被停用的凭据会静默不生效。
+func (s *Store) UpdateCredential(ctx context.Context, c CredentialRow) error {
+	if c.ID == 0 {
+		return errors.New("store: upstream_credential.id 不能为 0")
+	}
+	if c.MerchantID == 0 {
+		return errors.New("store: upstream_credential.merchant_id 不能为 0")
+	}
+	if strings.TrimSpace(c.CredGroup) == "" {
+		return errors.New("store: upstream_credential.cred_group 不能为空")
+	}
+	if len(c.Secret) == 0 {
+		if _, err := s.db.ExecContext(ctx, updateCredentialProfileSQL,
+			c.MerchantID, c.CredGroup, c.Name, c.ID); err != nil {
+			return describeWriteError("upstream_credential", err)
+		}
+		return nil
+	}
+	if !json.Valid(c.Secret) {
+		return errors.New("store: upstream_credential.secret 必须是合法 JSON")
+	}
+	if _, err := s.db.ExecContext(ctx, rotateCredentialSQL,
+		c.MerchantID, c.CredGroup, c.Name, c.Secret, c.ID); err != nil {
+		return describeWriteError("upstream_credential", err)
+	}
+	return nil
 }
 
 const setCredentialEnabledSQL = "UPDATE upstream_credential SET enabled = ? WHERE id = ?"
@@ -569,12 +761,62 @@ func (s *Store) UpsertModelMap(ctx context.Context, m ModelMap) (uint64, error) 
 	return upsertModelMap(ctx, s.db, m)
 }
 
-const listModelMapsSQL = `SELECT id, channel_id, model, upstream_model, price_multiplier, request_overrides, enabled
-FROM upstream_model_map ORDER BY id`
+const updateModelMapSQL = `UPDATE upstream_model_map
+SET channel_id = ?, model = ?, upstream_model = ?, price_multiplier = ?, request_overrides = ?
+WHERE id = ?`
+
+// UpdateModelMap 改一条模型映射的归属渠道、模型名与转发取值。
+//
+// 与 UpsertModelMap 的分工：那个按 (channel_id, model) 这个自然键置位，适合「给这条渠道配上这个别名」；
+// 本方法按主键改行，因此能改模型名本身与归属渠道——按自然键写这两项只会新增一行，旧行还在。
+//
+// 启用位不在本方法里：停用走 SetModelMapEnabled，重新启用走 UpsertModelMap（它把 enabled 置回 1）。
+func (s *Store) UpdateModelMap(ctx context.Context, m ModelMap) error {
+	if m.ID == 0 {
+		return errors.New("store: upstream_model_map.id 不能为 0")
+	}
+	if m.ChannelID == 0 {
+		return errors.New("store: upstream_model_map.channel_id 不能为 0")
+	}
+	if strings.TrimSpace(m.Model) == "" {
+		return errors.New("store: upstream_model_map.model 不能为空")
+	}
+	if strings.TrimSpace(m.UpstreamModel) == "" {
+		return errors.New("store: upstream_model_map.upstream_model 不能为空")
+	}
+	if strings.TrimSpace(m.PriceMultiplier) == "" {
+		return errors.New("store: upstream_model_map.price_multiplier 不能为空")
+	}
+	if len(m.RequestOverrides) > 0 && !json.Valid(m.RequestOverrides) {
+		return errors.New("store: upstream_model_map.request_overrides 必须是合法 JSON")
+	}
+	if _, err := s.db.ExecContext(ctx, updateModelMapSQL,
+		m.ChannelID, m.Model, m.UpstreamModel, m.PriceMultiplier, nullableJSON(m.RequestOverrides), m.ID); err != nil {
+		return describeWriteError("upstream_model_map", err)
+	}
+	return nil
+}
+
+// modelMapColumns 是 upstream_model_map 行的列顺序，列表与按主键读取共用。
+const modelMapColumns = `id, channel_id, model, upstream_model, price_multiplier, request_overrides, enabled`
+
+// scanModelMapRow 把一行 upstream_model_map 扫进 ModelMap，列顺序与 modelMapColumns 一致。
+func scanModelMapRow(row rowScanner) (ModelMap, error) {
+	var (
+		m         ModelMap
+		overrides []byte
+	)
+	if err := row.Scan(&m.ID, &m.ChannelID, &m.Model, &m.UpstreamModel,
+		&m.PriceMultiplier, &overrides, &m.Enabled); err != nil {
+		return ModelMap{}, err
+	}
+	m.RequestOverrides = json.RawMessage(overrides)
+	return m, nil
+}
 
 // listModelMaps 列出全部模型映射。
 func listModelMaps(ctx context.Context, q querier) ([]ModelMap, error) {
-	rows, err := q.QueryContext(ctx, listModelMapsSQL)
+	rows, err := q.QueryContext(ctx, "SELECT "+modelMapColumns+" FROM upstream_model_map ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("store: 查询 upstream_model_map 失败: %w", err)
 	}
@@ -582,15 +824,10 @@ func listModelMaps(ctx context.Context, q querier) ([]ModelMap, error) {
 
 	var maps []ModelMap
 	for rows.Next() {
-		var (
-			m         ModelMap
-			overrides []byte
-		)
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.Model, &m.UpstreamModel,
-			&m.PriceMultiplier, &overrides, &m.Enabled); err != nil {
+		m, err := scanModelMapRow(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: 解析 upstream_model_map 行失败: %w", err)
 		}
-		m.RequestOverrides = json.RawMessage(overrides)
 		maps = append(maps, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -602,6 +839,22 @@ func listModelMaps(ctx context.Context, q querier) ([]ModelMap, error) {
 // ListModelMaps 列出全部模型映射。
 func (s *Store) ListModelMaps(ctx context.Context) ([]ModelMap, error) {
 	return listModelMaps(ctx, dbQuerier{db: s.db})
+}
+
+// ModelMapByID 按主键查模型映射；无匹配时错误满足 errors.Is(err, sql.ErrNoRows)。
+func (s *Store) ModelMapByID(ctx context.Context, id uint64) (*ModelMap, error) {
+	if id == 0 {
+		return nil, errors.New("store: upstream_model_map.id 不能为 0")
+	}
+	m, err := scanModelMapRow(s.db.QueryRowContext(ctx,
+		"SELECT "+modelMapColumns+" FROM upstream_model_map WHERE id = ?", id))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("store: 查询 upstream_model_map 失败: %w", err)
+	}
+	return &m, nil
 }
 
 const setModelMapEnabledSQL = "UPDATE upstream_model_map SET enabled = ? WHERE id = ?"

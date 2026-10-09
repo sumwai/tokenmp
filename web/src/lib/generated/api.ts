@@ -76,6 +76,10 @@ export const api = {
   enableAdminCredential: (init: ApiInit<"/api/v1/admin/credentials/{id}/enable", "post">) =>
     apiRequest("/api/v1/admin/credentials/{id}/enable", "post", init),
 
+  /** 启用商家 */
+  enableAdminMerchant: (init: ApiInit<"/api/v1/admin/merchants/{id}/enable", "post">) =>
+    apiRequest("/api/v1/admin/merchants/{id}/enable", "post", init),
+
   /** 启用上游渠道 */
   enablePartnerChannel: (init: ApiInit<"/api/v1/partner/channels/{id}/enable", "post">) =>
     apiRequest("/api/v1/partner/channels/{id}/enable", "post", init),
@@ -243,4 +247,20 @@ export const api = {
   /** 注册 */
   signup: (init: ApiInit<"/api/v1/auth/signup", "post">) =>
     apiRequest("/api/v1/auth/signup", "post", init),
+
+  /** 修改渠道 */
+  updateAdminChannel: (init: ApiInit<"/api/v1/admin/channels/{id}", "put">) =>
+    apiRequest("/api/v1/admin/channels/{id}", "put", init),
+
+  /** 修改上游凭据 */
+  updateAdminCredential: (init: ApiInit<"/api/v1/admin/credentials/{id}", "put">) =>
+    apiRequest("/api/v1/admin/credentials/{id}", "put", init),
+
+  /** 修改商家 */
+  updateAdminMerchant: (init: ApiInit<"/api/v1/admin/merchants/{id}", "put">) =>
+    apiRequest("/api/v1/admin/merchants/{id}", "put", init),
+
+  /** 修改模型映射 */
+  updateAdminModelMap: (init: ApiInit<"/api/v1/admin/modelmaps/{id}", "put">) =>
+    apiRequest("/api/v1/admin/modelmaps/{id}", "put", init),
 };

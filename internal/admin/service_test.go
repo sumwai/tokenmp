@@ -27,6 +27,8 @@ type fakeStore struct {
 
 	insertMerchant       func(context.Context, store.Merchant) (uint64, error)
 	listMerchants        func(context.Context) ([]store.Merchant, error)
+	merchantByID         func(context.Context, uint64) (*store.Merchant, error)
+	updateMerchant       func(context.Context, uint64, string, string, store.MerchantKind) error
 	setMerchantStatus    func(context.Context, uint64, string) error
 	merchantSettleInfo   func(context.Context, uint64) ([]byte, error)
 	setMerchantSettle    func(context.Context, uint64, []byte) error
@@ -34,13 +36,19 @@ type fakeStore struct {
 	setMerchantOwner     func(context.Context, uint64, uint64) error
 	insertChannel        func(context.Context, store.Channel) (uint64, error)
 	listChannels         func(context.Context) ([]store.Channel, error)
+	channelByID          func(context.Context, uint64) (*store.Channel, error)
+	updateChannel        func(context.Context, store.Channel) error
 	setChannelEnabled    func(context.Context, uint64, bool) error
 	insertCredential     func(context.Context, store.CredentialRow) (uint64, error)
 	listCredentials      func(context.Context) ([]store.CredentialRow, error)
+	credentialByID       func(context.Context, uint64) (*store.CredentialRow, error)
+	updateCredential     func(context.Context, store.CredentialRow) error
 	setCredentialEnabled func(context.Context, uint64, bool) error
 	channelConfigByGroup func(context.Context, uint64, string) ([]byte, error)
 	upsertModelMap       func(context.Context, store.ModelMap) (uint64, error)
+	updateModelMap       func(context.Context, store.ModelMap) error
 	listModelMaps        func(context.Context) ([]store.ModelMap, error)
+	modelMapByID         func(context.Context, uint64) (*store.ModelMap, error)
 	setModelMapEnabled   func(context.Context, uint64, bool) error
 	insertAccount        func(context.Context, store.Account) (uint64, error)
 	listAccounts         func(context.Context) ([]store.Account, error)
@@ -50,6 +58,7 @@ type fakeStore struct {
 	insertAPIKey         func(context.Context, store.APIKey) (uint64, error)
 	listAPIKeys          func(context.Context) ([]store.APIKey, error)
 	setAPIKeyEnabled     func(context.Context, uint64, bool) error
+	webUserByID          func(context.Context, uint64) (*store.WebUser, error)
 	insertBucket         func(context.Context, store.BucketRow) (uint64, error)
 	listBuckets          func(context.Context, uint64) ([]store.BucketRow, error)
 	insertProduct        func(context.Context, store.Product) (uint64, error)
@@ -99,6 +108,23 @@ func (f *fakeStore) SetMerchantStatus(ctx context.Context, id uint64, status str
 	f.record("SetMerchantStatus")
 	if f.setMerchantStatus != nil {
 		return f.setMerchantStatus(ctx, id, status)
+	}
+	return nil
+}
+
+func (f *fakeStore) MerchantByID(ctx context.Context, id uint64) (*store.Merchant, error) {
+	f.record("MerchantByID")
+	if f.merchantByID != nil {
+		return f.merchantByID(ctx, id)
+	}
+	// 缺省认为这一行存在：引用校验不是每个用例的关注点，需要不存在时由用例覆盖。
+	return &store.Merchant{}, nil
+}
+
+func (f *fakeStore) UpdateMerchant(ctx context.Context, id uint64, code, name string, kind store.MerchantKind) error {
+	f.record("UpdateMerchant")
+	if f.updateMerchant != nil {
+		return f.updateMerchant(ctx, id, code, name, kind)
 	}
 	return nil
 }
@@ -159,6 +185,22 @@ func (f *fakeStore) SetChannelEnabled(ctx context.Context, id uint64, enabled bo
 	return nil
 }
 
+func (f *fakeStore) ChannelByID(ctx context.Context, id uint64) (*store.Channel, error) {
+	f.record("ChannelByID")
+	if f.channelByID != nil {
+		return f.channelByID(ctx, id)
+	}
+	return &store.Channel{}, nil
+}
+
+func (f *fakeStore) UpdateChannel(ctx context.Context, c store.Channel) error {
+	f.record("UpdateChannel")
+	if f.updateChannel != nil {
+		return f.updateChannel(ctx, c)
+	}
+	return nil
+}
+
 func (f *fakeStore) InsertCredential(ctx context.Context, c store.CredentialRow) (uint64, error) {
 	f.record("InsertCredential")
 	if f.insertCredential != nil {
@@ -179,6 +221,22 @@ func (f *fakeStore) SetCredentialEnabled(ctx context.Context, id uint64, enabled
 	f.record("SetCredentialEnabled")
 	if f.setCredentialEnabled != nil {
 		return f.setCredentialEnabled(ctx, id, enabled)
+	}
+	return nil
+}
+
+func (f *fakeStore) CredentialByID(ctx context.Context, id uint64) (*store.CredentialRow, error) {
+	f.record("CredentialByID")
+	if f.credentialByID != nil {
+		return f.credentialByID(ctx, id)
+	}
+	return &store.CredentialRow{}, nil
+}
+
+func (f *fakeStore) UpdateCredential(ctx context.Context, c store.CredentialRow) error {
+	f.record("UpdateCredential")
+	if f.updateCredential != nil {
+		return f.updateCredential(ctx, c)
 	}
 	return nil
 }
@@ -211,6 +269,22 @@ func (f *fakeStore) SetModelMapEnabled(ctx context.Context, id uint64, enabled b
 	f.record("SetModelMapEnabled")
 	if f.setModelMapEnabled != nil {
 		return f.setModelMapEnabled(ctx, id, enabled)
+	}
+	return nil
+}
+
+func (f *fakeStore) ModelMapByID(ctx context.Context, id uint64) (*store.ModelMap, error) {
+	f.record("ModelMapByID")
+	if f.modelMapByID != nil {
+		return f.modelMapByID(ctx, id)
+	}
+	return &store.ModelMap{}, nil
+}
+
+func (f *fakeStore) UpdateModelMap(ctx context.Context, m store.ModelMap) error {
+	f.record("UpdateModelMap")
+	if f.updateModelMap != nil {
+		return f.updateModelMap(ctx, m)
 	}
 	return nil
 }
@@ -277,6 +351,14 @@ func (f *fakeStore) SetAPIKeyEnabled(ctx context.Context, id uint64, enabled boo
 		return f.setAPIKeyEnabled(ctx, id, enabled)
 	}
 	return nil
+}
+
+func (f *fakeStore) WebUserByID(ctx context.Context, id uint64) (*store.WebUser, error) {
+	f.record("WebUserByID")
+	if f.webUserByID != nil {
+		return f.webUserByID(ctx, id)
+	}
+	return &store.WebUser{}, nil
 }
 
 func (f *fakeStore) InsertBucket(ctx context.Context, b store.BucketRow) (uint64, error) {

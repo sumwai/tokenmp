@@ -171,6 +171,153 @@ func TestE2EWebAdminConfigActions(t *testing.T) {
 		t.Fatalf("商家归属 = %v，期望 %d", owner, userID)
 	}
 
+	// 修改动作：商家、渠道、凭据都能在网页上改，改完打开数据库回读。
+	t.Run("修改商家", func(t *testing.T) {
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.MerchantsPath, merchantID),
+			`{"code":"e2e-partner","name":"改过的商家名","kind":"platform"}`)
+		merchants, err := svc.ListMerchants(ctx)
+		e2eMust(t, err)
+		m := e2eWebMerchant(t, merchants, merchantID)
+		if m.Name != "改过的商家名" || m.Kind != store.MerchantKindPlatform {
+			t.Fatalf("商家未按请求更新：%+v", m)
+		}
+		// 改回入驻类型：kind 只是数据，但这批用例建立的语义是入驻商家。
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.MerchantsPath, merchantID),
+			`{"code":"e2e-partner","name":"端到端商家","kind":"partner"}`)
+	})
+
+	t.Run("商家停用后能启用", func(t *testing.T) {
+		e2eWebOK(t, base, token, http.MethodPost, fmt.Sprintf("%s/%d/disable", adminapi.MerchantsPath, merchantID), "")
+		e2eWebAssertMerchantStatus(t, svc, ctx, merchantID, store.StatusDisabled)
+		e2eWebOK(t, base, token, http.MethodPost, fmt.Sprintf("%s/%d/enable", adminapi.MerchantsPath, merchantID), "")
+		e2eWebAssertMerchantStatus(t, svc, ctx, merchantID, store.StatusActive)
+	})
+
+	t.Run("修改渠道", func(t *testing.T) {
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.ChannelsPath, channelID),
+			fmt.Sprintf(`{"merchant_id":%d,"name":"e2e-channel","vendor":"anthropic",`+
+				`"type":"anthropic_messages","cred_group":"e2e-group",`+
+				`"base_url":"https://up2.example.com","priority":9,`+
+				`"config":{"headers":{"X-Env":"next"}}}`, merchantID))
+		channels, err := svc.ListChannels(ctx)
+		e2eMust(t, err)
+		got := channels[0]
+		if got.BaseURL != "https://up2.example.com" || got.Vendor != "anthropic" ||
+			got.Type != store.ChannelTypeAnthropicMessages || got.Priority != 9 {
+			t.Fatalf("渠道未按请求更新：%+v", got)
+		}
+		// config 落在 JSON 列里，由 MySQL 重新序列化（键序与空白都会变），因此按结构比对。
+		var config struct {
+			Headers map[string]string `json:"headers"`
+		}
+		if err := json.Unmarshal(got.Config, &config); err != nil {
+			t.Fatalf("解析渠道 config 失败：%v（%s）", err, got.Config)
+		}
+		if config.Headers["X-Env"] != "next" {
+			t.Fatalf("渠道 config = %s", got.Config)
+		}
+	})
+
+	t.Run("修改凭据并轮换明文", func(t *testing.T) {
+		credentials, err := svc.ListCredentials(ctx)
+		e2eMust(t, err)
+		before := credentials[0].Prefix
+
+		// 不带 api-key：只改分组与名称，明文与行 id 都不动。
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.CredentialsPath, credentialID),
+			fmt.Sprintf(`{"merchant_id":%d,"cred_group":"e2e-group","name":"改名"}`, merchantID))
+		credentials, err = svc.ListCredentials(ctx)
+		e2eMust(t, err)
+		if credentials[0].Name != "改名" || credentials[0].Prefix != before {
+			t.Fatalf("不带 api-key 的修改不应改动明文：%+v", credentials[0])
+		}
+
+		// 带 api-key：在原行上轮换，凭据 id 不变，流水与凭据的对应关系不断。
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.CredentialsPath, credentialID),
+			fmt.Sprintf(`{"merchant_id":%d,"cred_group":"e2e-group","name":"primary",`+
+				`"api_key":"sk-e2e-rotated"}`, merchantID))
+		credentials, err = svc.ListCredentials(ctx)
+		e2eMust(t, err)
+		if len(credentials) != 1 || credentials[0].ID != credentialID {
+			t.Fatalf("轮换不应新增行：%+v", credentials)
+		}
+		if credentials[0].Prefix == before {
+			t.Fatalf("轮换后前缀未变：%q", credentials[0].Prefix)
+		}
+		if strings.Contains(credentials[0].Prefix, "sk-e2e-rotated") {
+			t.Fatalf("列表回显了轮换后的明文：%q", credentials[0].Prefix)
+		}
+	})
+
+	t.Run("修改模型映射", func(t *testing.T) {
+		// 按主键改行：模型名本身与转发取值都能改，这是覆盖写入做不到的。
+		e2eWebOK(t, base, token, http.MethodPut, fmt.Sprintf("%s/%d", adminapi.ModelMapsPath, maps[0].ID),
+			fmt.Sprintf(`{"channel_id":%d,"model":"e2e-alias-2","upstream_model":"e2e-up-3",`+
+				`"price_multiplier":"1.5"}`, channelID))
+		edited, err := svc.ListModelMaps(ctx)
+		e2eMust(t, err)
+		if len(edited) != 1 || edited[0].ID != maps[0].ID {
+			t.Fatalf("按主键修改不应新增行：%+v", edited)
+		}
+		if edited[0].Model != "e2e-alias-2" || edited[0].UpstreamModel != "e2e-up-3" ||
+			!e2eDecimalEqual(edited[0].PriceMultiplier, "1.5") {
+			t.Fatalf("模型映射未按请求更新：%+v", edited[0])
+		}
+	})
+
+	// 引用不存在属参数错误：请求体里指向一行不存在的记录。
+	t.Run("引用不存在回400", func(t *testing.T) {
+		cases := []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, adminapi.ChannelsPath,
+				`{"merchant_id":999999,"name":"c","type":"openai_chat","cred_group":"g","base_url":"https://u"}`},
+			{http.MethodPost, adminapi.CredentialsPath,
+				`{"merchant_id":999999,"cred_group":"g","name":"n","api_key":"sk-x"}`},
+			{http.MethodPut, adminapi.ModelMapsPath,
+				`{"channel_id":999999,"model":"m","upstream_model":"u"}`},
+			{http.MethodPost, fmt.Sprintf("%s/%d/owner", adminapi.MerchantsPath, merchantID),
+				`{"user_id":999999}`},
+		}
+		for _, tc := range cases {
+			status, env := e2eWebRequest(t, tc.method, base+tc.path, token, tc.body)
+			if status != http.StatusBadRequest || e2eWebCode(t, env) != 400 {
+				t.Errorf("%s %s 应 400: %d %s", tc.method, tc.path, status, env)
+			}
+		}
+	})
+
+	// 动作与修改目标不存在属 404：主键写错时不能回「已生效」。
+	t.Run("目标不存在回404", func(t *testing.T) {
+		channelBody := fmt.Sprintf(`{"merchant_id":%d,"name":"c","type":"openai_chat",`+
+			`"cred_group":"g","base_url":"https://u"}`, merchantID)
+		cases := []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPut, fmt.Sprintf("%s/999999", adminapi.ChannelsPath), channelBody},
+			{http.MethodPost, fmt.Sprintf("%s/999999/disable", adminapi.ChannelsPath), ""},
+			{http.MethodPut, fmt.Sprintf("%s/999999", adminapi.CredentialsPath),
+				fmt.Sprintf(`{"merchant_id":%d,"cred_group":"g","name":"n"}`, merchantID)},
+			{http.MethodPost, fmt.Sprintf("%s/999999/disable", adminapi.CredentialsPath), ""},
+			{http.MethodPost, fmt.Sprintf("%s/999999/disable", adminapi.ModelMapsPath), ""},
+			{http.MethodPut, fmt.Sprintf("%s/999999", adminapi.ModelMapsPath),
+				fmt.Sprintf(`{"channel_id":%d,"model":"m","upstream_model":"u"}`, channelID)},
+			{http.MethodPost, fmt.Sprintf("%s/999999/disable", adminapi.MerchantsPath), ""},
+			{http.MethodPut, fmt.Sprintf("%s/999999", adminapi.MerchantsPath),
+				`{"code":"x","name":"x","kind":"partner"}`},
+		}
+		for _, tc := range cases {
+			status, env := e2eWebRequest(t, tc.method, base+tc.path, token, tc.body)
+			if status != http.StatusNotFound || e2eWebCode(t, env) != 404 {
+				t.Errorf("%s %s 应 404: %d %s", tc.method, tc.path, status, env)
+			}
+		}
+	})
+
 	// 形状与枚举错误在落库之前被拦下，且文案是字段级提示。
 	for name, tc := range map[string]struct {
 		method string
@@ -403,6 +550,28 @@ func e2eWebAssertModelMapEnabled(t *testing.T, svc *admin.Service, ctx context.C
 		}
 	}
 	t.Fatalf("模型映射列表里没有 %d", id)
+}
+
+// e2eWebAssertMerchantStatus 断言商家状态。
+func e2eWebAssertMerchantStatus(t *testing.T, svc *admin.Service, ctx context.Context, id uint64, want string) {
+	t.Helper()
+	merchants, err := svc.ListMerchants(ctx)
+	e2eMust(t, err)
+	if got := e2eWebMerchant(t, merchants, id).Status; got != want {
+		t.Fatalf("商家 %d 状态 = %q，期望 %q", id, got, want)
+	}
+}
+
+// e2eWebMerchant 按主键取商家行。
+func e2eWebMerchant(t *testing.T, merchants []store.Merchant, id uint64) store.Merchant {
+	t.Helper()
+	for _, m := range merchants {
+		if m.ID == id {
+			return m
+		}
+	}
+	t.Fatalf("商家列表里没有 %d", id)
+	return store.Merchant{}
 }
 
 // e2eWebMerchantOwner 取商家的归属主体。

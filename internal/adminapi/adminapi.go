@@ -100,18 +100,23 @@ type Lister interface {
 // 同一个实例，页面与 CLI 因此走同一条业务路径。
 type Writer interface {
 	CreateMerchant(ctx context.Context, code, name string, kind store.MerchantKind) (uint64, error)
+	UpdateMerchant(ctx context.Context, id uint64, code, name string, kind store.MerchantKind) error
+	EnableMerchant(ctx context.Context, id uint64) error
 	DisableMerchant(ctx context.Context, id uint64) error
 	SetMerchantOwner(ctx context.Context, id, userID uint64) error
 
 	CreateChannel(ctx context.Context, in admin.ChannelInput) (uint64, error)
+	UpdateChannel(ctx context.Context, id uint64, in admin.ChannelInput) error
 	EnableChannel(ctx context.Context, id uint64) error
 	DisableChannel(ctx context.Context, id uint64) error
 
 	AddCredential(ctx context.Context, in admin.CredentialInput) (uint64, error)
+	UpdateCredential(ctx context.Context, id uint64, in admin.CredentialInput) error
 	EnableCredential(ctx context.Context, id uint64) error
 	DisableCredential(ctx context.Context, id uint64) error
 
 	SetModelMap(ctx context.Context, in admin.ModelMapInput) (uint64, error)
+	UpdateModelMap(ctx context.Context, id uint64, in admin.ModelMapInput) error
 	DisableModelMap(ctx context.Context, id uint64) error
 }
 

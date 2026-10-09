@@ -605,6 +605,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/merchants/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改商家
+         * @description 改一个商家的编码、名称与类型，字段与新建相同，整体替换。状态与归属不在本端点：
+         *     前者走 `/enable` 与 `/disable`，后者走 `/owner`，三者的写入条件不同。
+         *     编码是平台内唯一键，改成已占用的取值返回 `code=409`。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        put: operations["updateAdminMerchant"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/merchants/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用商家
+         * @description 按主键置启用位。动作幂等：重复调用返回成功，id 不存在返回 `code=404`。
+         *     与 `/disable` 成对：停用是运营动作，误停之后必须能原地恢复。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["enableAdminMerchant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/merchants/{id}/disable": {
         parameters: {
             query?: never;
@@ -616,8 +661,8 @@ export interface paths {
         put?: never;
         /**
          * 停用商家
-         * @description 按主键置停用位，与 `tokenmp admin merchant disable` 同一动作。动作幂等；
-         *     行不因此被删除，名下渠道、凭据与历史流水仍指向它。
+         * @description 按主键置停用位，与 `tokenmp admin merchant disable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。行不因此被删除，名下渠道、凭据与历史流水仍指向它。
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["disableAdminMerchant"];
@@ -640,7 +685,9 @@ export interface paths {
          * 绑定商家归属主体
          * @description 把商家绑定到一个登录主体，与 `tokenmp admin merchant set-owner` 同一动作。
          *     归属是商家域（`/api/v1/partner/*`）唯一的作用域来源：没有绑定的商家在页面上没有
-         *     主人，绑定后该登录主体才能自助管理它的上游账号。归属一对一，重复绑定返 `code=409`。
+         *     主人，绑定后该登录主体才能自助管理它的上游账号。归属一对一，重复绑定返 `code=409`；
+         *     `user_id` 不存在返回 `code=400`（绑到一个还不存在的 id 会在那个 id 被后来注册的人
+         *     拿到时把商家交给对方）。
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["setAdminMerchantOwner"];
@@ -674,10 +721,37 @@ export interface paths {
          *     `config` 是渠道级扩展配置原文（静态请求头与探针声明），必须是 JSON 对象；
          *     非对象、`headers` 不是字符串到字符串的对象、或占用了网关自身请求头的头名，
          *     都在写入时返回 `code=400`（读取侧对这些情况是宽容的，写入口是唯一能显式拦下的地方）。
+         *     归属 `merchant_id` 不存在同样返回 `code=400`。
          *
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["createAdminChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改渠道
+         * @description 改一条渠道的全部配置字段，字段与新建相同，整体替换。启用位不在本端点：启停是独立的
+         *     运营动作，改配置不应把一条已停用的渠道意外启用。
+         *
+         *     归属 `merchant_id` 不存在返回 `code=400`；同一商家下协议与渠道名重复返回 `code=409`
+         *     （唯一键是 `merchant_id`、`type`、`name` 三列）。
+         *
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        put: operations["updateAdminChannel"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -695,8 +769,8 @@ export interface paths {
         put?: never;
         /**
          * 启用渠道
-         * @description 按主键置启用位，与 `tokenmp admin channel enable` 同一动作。动作幂等：重复调用与
-         *     对不存在的 id 调用都返回成功。停用是运营动作，误停之后靠本端点原地恢复。
+         * @description 按主键置启用位，与 `tokenmp admin channel enable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。停用是运营动作，误停之后靠本端点原地恢复。
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["enableAdminChannel"];
@@ -717,8 +791,9 @@ export interface paths {
         put?: never;
         /**
          * 停用渠道
-         * @description 按主键置停用位，与 `tokenmp admin channel disable` 同一动作。动作幂等；行不因此
-         *     被删除，流水与历史映射仍指向它。请求方须持有管理面能力，越权返回 `code=403`。
+         * @description 按主键置停用位，与 `tokenmp admin channel disable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。行不因此被删除，流水与历史映射仍指向它。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["disableAdminChannel"];
         delete?: never;
@@ -749,11 +824,36 @@ export interface paths {
          *     路径出现；写入响应不回显明文，读取永远只有脱敏前缀。
          *
          *     订阅型上游的 OAuth 登录需要设备码轮询等交互过程，不是单次请求能完成的动作，
-         *     不在本端点：它仍走 `tokenmp admin credential oauth-login`。
+         *     不在本端点：它仍走 `tokenmp admin credential oauth-login`。归属 `merchant_id`
+         *     不存在返回 `code=400`。
          *
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["createAdminCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/credentials/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改上游凭据
+         * @description 改一行上游凭据的归属、分组与名称。`api_key` 可以省略，表示保持现有明文不变；
+         *     给出时在原行上覆盖，因此凭据 id 不变，历史流水与凭据的对应关系不断。
+         *
+         *     响应不回显明文，也不回行 id。归属 `merchant_id` 不存在返回 `code=400`。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        put: operations["updateAdminCredential"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -771,8 +871,9 @@ export interface paths {
         put?: never;
         /**
          * 启用上游凭据
-         * @description 按主键置启用位，与 `tokenmp admin credential enable` 同一动作。动作幂等；凭据轮换
-         *     与误停后的恢复都靠它，不重写一行（重写会让凭据 id 与历史流水脱钩）。
+         * @description 按主键置启用位，与 `tokenmp admin credential enable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。凭据轮换与误停后的恢复都靠它，不重写一行
+         *     （重写会让凭据 id 与历史流水脱钩）。
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["enableAdminCredential"];
@@ -793,8 +894,9 @@ export interface paths {
         put?: never;
         /**
          * 停用上游凭据
-         * @description 按主键置停用位，与 `tokenmp admin credential disable` 同一动作。动作幂等；
-         *     停用后的凭据不再被选路取用。请求方须持有管理面能力，越权返回 `code=403`。
+         * @description 按主键置停用位，与 `tokenmp admin credential disable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。停用后的凭据不再被选路取用。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["disableAdminCredential"];
         delete?: never;
@@ -821,12 +923,40 @@ export interface paths {
          * 写入渠道模型映射
          * @description 写入或覆盖一条渠道模型映射，与 `tokenmp admin model-map set` 调用同一份业务实现。
          *     写入按 `(channel_id, model)` 幂等：同一组合重复写入只覆盖取值，不新增行。
-         *     因此不返回行 id，写入后从清单取。
+         *     因此不返回行 id，写入后从清单取。改模型名本身或归属渠道走
+         *     `/api/v1/admin/modelmaps/{id}`。
          *
          *     `price_multiplier` 缺省取 1；`request_overrides` 必须是 JSON 对象，
-         *     转发时叠加到请求体上。请求方须持有管理面能力，越权返回 `code=403`。
+         *     转发时叠加到请求体上。`channel_id` 不存在返回 `code=400`。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         put: operations["setAdminModelMap"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/modelmaps/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 修改模型映射
+         * @description 改一条模型映射的归属渠道、模型名与转发取值。本端点按主键定位，因此模型名本身与
+         *     归属渠道都可以改；与 `/api/v1/admin/modelmaps` 的分工是：那个按 `(channel_id, model)`
+         *     这个自然键置位，用于「给这条渠道配上这个别名」，本端点用于改这一行。
+         *
+         *     启用位不在本端点：停用走 `/{id}/disable`，重新启用走覆盖写入。
+         *     改成已存在的 `(channel_id, model)` 组合返回 `code=409`。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        put: operations["updateAdminModelMap"];
         post?: never;
         delete?: never;
         options?: never;
@@ -845,8 +975,9 @@ export interface paths {
         put?: never;
         /**
          * 停用渠道模型映射
-         * @description 按主键置停用位，与 `tokenmp admin model-map disable` 同一动作。动作幂等；
-         *     停用后该模型名不再路由到这条渠道。请求方须持有管理面能力，越权返回 `code=403`。
+         * @description 按主键置停用位，与 `tokenmp admin model-map disable` 同一动作。动作幂等：重复调用返回成功，
+         *     id 不存在返回 `code=404`。停用后该模型名不再路由到这条渠道。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         post: operations["disableAdminModelMap"];
         delete?: never;
@@ -1964,6 +2095,32 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * @description 修改商家的请求体。字段与新建相同，整体替换：`code`、`name`、`kind` 三个都要给。
+         *     状态与归属不在请求体里，它们各自有端点。
+         */
+        UpdateAdminMerchantRequest: components["schemas"]["CreateAdminMerchantRequest"];
+        /**
+         * @description 修改渠道的请求体。字段与新建相同，整体替换：要保留的取值也要一并给出。
+         *     启用位不在请求体里，它由 `/enable` 与 `/disable` 置位。
+         */
+        UpdateAdminChannelRequest: components["schemas"]["CreateAdminChannelRequest"];
+        /**
+         * @description 修改上游凭据的请求体。`api_key` 可以省略，表示保持现有明文不变；
+         *     给出时在原行上覆盖。
+         */
+        UpdateAdminCredentialRequest: {
+            /**
+             * Format: int64
+             * @description 归属商家 id。
+             */
+            merchant_id: number;
+            /** @description 凭据分组，与渠道的 `cred_group` 对应。 */
+            cred_group: string;
+            name: string;
+            /** @description 新的上游凭据明文；省略表示不改动现有明文。 */
+            api_key?: string;
+        };
         /** @description 写入动作的结果：受影响行的主键。 */
         AdminResourceID: {
             /** Format: int64 */
@@ -2267,10 +2424,7 @@ export interface components {
         AdminScopeIDFilter: number;
         /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
         ResourceID: number;
-        /**
-         * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-         *     任何行。
-         */
+        /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
         AdminResourceID: number;
     };
     requestBodies: never;
@@ -3173,15 +3327,45 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    disableAdminMerchant: {
+    updateAdminMerchant: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdminMerchantRequest"];
+            };
+        };
+        responses: {
+            /** @description 已修改。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    enableAdminMerchant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3200,6 +3384,35 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disableAdminMerchant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3208,10 +3421,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3300,15 +3510,45 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    updateAdminChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdminChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description 已修改。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     enableAdminChannel: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3327,6 +3567,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3335,10 +3576,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3357,6 +3595,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3422,15 +3661,44 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    updateAdminCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAdminCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description 已修改。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     enableAdminCredential: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3449,6 +3717,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3457,10 +3726,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3479,6 +3745,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3542,15 +3809,45 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    updateAdminModelMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetAdminModelMapRequest"];
+            };
+        };
+        responses: {
+            /** @description 已修改。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     disableAdminModelMap: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
-                 *     任何行。
-                 */
+                /** @description 管理面对象主键。动作与修改都先确认这一行存在：id 不存在返回 `code=404`。 */
                 id: components["parameters"]["AdminResourceID"];
             };
             cookie?: never;
@@ -3569,6 +3866,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

@@ -29,6 +29,15 @@ func (e *invalidInput) Error() string { return e.message }
 // Is 让 errors.Is(err, admin.ErrInvalidInput) 命中。
 func (e *invalidInput) Is(target error) bool { return target == admin.ErrInvalidInput }
 
+// missingRow 复刻 internal/admin 目标缺失错误的形状。
+type missingRow struct{ message string }
+
+// Error 返回原样文案。
+func (e *missingRow) Error() string { return e.message }
+
+// Is 让 errors.Is(err, admin.ErrNotFound) 命中。
+func (e *missingRow) Is(target error) bool { return target == admin.ErrNotFound }
+
 // fakeWriter 记录动作调用与入参，并回放固定错误。
 type fakeWriter struct {
 	calls []string
@@ -69,6 +78,19 @@ func (f *fakeWriter) CreateMerchant(_ context.Context, code, name string, kind s
 	return f.id, f.err
 }
 
+func (f *fakeWriter) UpdateMerchant(_ context.Context, id uint64, code, name string, kind store.MerchantKind) error {
+	f.record("UpdateMerchant")
+	f.lastMerchantID = id
+	f.lastMerchantCode, f.lastMerchantName, f.lastMerchantKind = code, name, kind
+	return f.err
+}
+
+func (f *fakeWriter) EnableMerchant(_ context.Context, id uint64) error {
+	f.record("EnableMerchant")
+	f.lastMerchantID = id
+	return f.err
+}
+
 func (f *fakeWriter) DisableMerchant(_ context.Context, id uint64) error {
 	f.record("DisableMerchant")
 	f.lastMerchantID = id
@@ -85,6 +107,12 @@ func (f *fakeWriter) CreateChannel(_ context.Context, in admin.ChannelInput) (ui
 	f.record("CreateChannel")
 	f.lastChannel = in
 	return f.id, f.err
+}
+
+func (f *fakeWriter) UpdateChannel(_ context.Context, id uint64, in admin.ChannelInput) error {
+	f.record("UpdateChannel")
+	f.lastChannelID, f.lastChannel = id, in
+	return f.err
 }
 
 func (f *fakeWriter) EnableChannel(_ context.Context, id uint64) error {
@@ -105,6 +133,12 @@ func (f *fakeWriter) AddCredential(_ context.Context, in admin.CredentialInput) 
 	return f.id, f.err
 }
 
+func (f *fakeWriter) UpdateCredential(_ context.Context, id uint64, in admin.CredentialInput) error {
+	f.record("UpdateCredential")
+	f.lastCredentialID, f.lastCredential = id, in
+	return f.err
+}
+
 func (f *fakeWriter) EnableCredential(_ context.Context, id uint64) error {
 	f.record("EnableCredential")
 	f.lastCredentialID = id
@@ -121,6 +155,12 @@ func (f *fakeWriter) SetModelMap(_ context.Context, in admin.ModelMapInput) (uin
 	f.record("SetModelMap")
 	f.lastModelMap = in
 	return f.id, f.err
+}
+
+func (f *fakeWriter) UpdateModelMap(_ context.Context, id uint64, in admin.ModelMapInput) error {
+	f.record("UpdateModelMap")
+	f.lastModelMapID, f.lastModelMap = id, in
+	return f.err
 }
 
 func (f *fakeWriter) DisableModelMap(_ context.Context, id uint64) error {
@@ -285,6 +325,7 @@ func TestCreateChannelRejectsBadShape(t *testing.T) {
 // TestCreateCredentialDoesNotEchoSecret 断言凭据明文只进不出：入参进业务层，
 // 响应数据与文案都不得回显。
 func TestCreateCredentialDoesNotEchoSecret(t *testing.T) {
+	//nolint:gosec // G101：用例里的假凭据明文，不是真实凭据。
 	const secret = "sk-live-do-not-echo"
 	h, _, _, writer := newWriteEnv()
 	body := `{"merchant_id":2,"cred_group":"g","name":"n","api_key":"` + secret + `"}`
@@ -344,6 +385,7 @@ func TestActionRoutes(t *testing.T) {
 		{"启用凭据", CredentialsPath + "/7/enable", "EnableCredential", func(f *fakeWriter) uint64 { return f.lastCredentialID }},
 		{"停用凭据", CredentialsPath + "/7/disable", "DisableCredential", func(f *fakeWriter) uint64 { return f.lastCredentialID }},
 		{"停用模型映射", ModelMapsPath + "/7/disable", "DisableModelMap", func(f *fakeWriter) uint64 { return f.lastModelMapID }},
+		{"启用商家", MerchantsPath + "/7/enable", "EnableMerchant", func(f *fakeWriter) uint64 { return f.lastMerchantID }},
 		{"停用商家", MerchantsPath + "/7/disable", "DisableMerchant", func(f *fakeWriter) uint64 { return f.lastMerchantID }},
 	}
 	for _, tc := range cases {
@@ -375,7 +417,7 @@ func TestActionRouteShape(t *testing.T) {
 		{"未知尾段", http.MethodPost, ChannelsPath + "/7/remove", http.StatusNotFound},
 		{"主键为零", http.MethodPost, ChannelsPath + "/0/enable", http.StatusNotFound},
 		{"主键非数字", http.MethodPost, ChannelsPath + "/abc/enable", http.StatusNotFound},
-		{"缺少尾段", http.MethodPost, ChannelsPath + "/7", http.StatusNotFound},
+		{"条目路径用错方法", http.MethodPost, ChannelsPath + "/7", http.StatusBadRequest},
 		{"非 POST", http.MethodGet, ChannelsPath + "/7/enable", http.StatusBadRequest},
 		{"模型映射无启用", http.MethodPost, ModelMapsPath + "/7/enable", http.StatusNotFound},
 	}
@@ -480,7 +522,10 @@ func TestWriteRoutesAbsentWithoutWriter(t *testing.T) {
 		{http.MethodPost, MerchantsPath, `{"code":"c","name":"n","kind":"partner"}`},
 		{http.MethodPost, ChannelsPath, `{}`},
 		{http.MethodPost, ChannelsPath + "/7/enable", ""},
+		{http.MethodPut, ChannelsPath + "/7", `{}`},
 		{http.MethodPost, CredentialsPath, `{}`},
+		{http.MethodPut, CredentialsPath + "/7", `{}`},
+		{http.MethodPut, MerchantsPath + "/7", `{}`},
 		{http.MethodPut, ModelMapsPath, `{}`},
 	}
 	for _, tc := range writes {
@@ -505,6 +550,122 @@ func TestWriteRequiresAdmin(t *testing.T) {
 	}
 	if len(writer.calls) != 0 {
 		t.Fatalf("越权请求不应触达业务层：%v", writer.calls)
+	}
+}
+
+// TestUpdateChannelIsPutOnItem 断言渠道的修改是条目路径上的 PUT，入参完整透传。
+func TestUpdateChannelIsPutOnItem(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	body := `{"merchant_id":2,"name":"改过的名字","vendor":"openai","type":"openai_responses",` +
+		`"cred_group":"g","base_url":"https://u2","priority":3,"weight":4}`
+	status, env := doJSON(t, h, http.MethodPut, ChannelsPath+"/7", "token", body)
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	if !writer.called("UpdateChannel") || writer.lastChannelID != 7 {
+		t.Fatalf("动作 = %v，主键 = %d", writer.calls, writer.lastChannelID)
+	}
+	got := writer.lastChannel
+	if got.Name != "改过的名字" || got.Type != store.ChannelType("openai_responses") ||
+		got.Priority != 3 || got.Weight != 4 || got.BaseURL != "https://u2" {
+		t.Fatalf("入参 = %+v", got)
+	}
+	// 修改不回行 id：页面重新取清单即见最新取值。
+	if string(env["data"]) != "null" {
+		t.Fatalf("data = %s，期望 null", env["data"])
+	}
+	// 条目路径只接受 PUT。
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		if status, _ := doJSON(t, h, method, ChannelsPath+"/7", "token", body); status != http.StatusBadRequest {
+			t.Fatalf("%s 条目路径应 400，得到 %d", method, status)
+		}
+	}
+}
+
+// TestUpdateMerchant 断言商家修改透传三个字段。
+func TestUpdateMerchant(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	status, env := doJSON(t, h, http.MethodPut, MerchantsPath+"/7", "token",
+		`{"code":"acme-2","name":"改名","kind":"platform"}`)
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	if !writer.called("UpdateMerchant") || writer.lastMerchantID != 7 {
+		t.Fatalf("动作 = %v，主键 = %d", writer.calls, writer.lastMerchantID)
+	}
+	if writer.lastMerchantCode != "acme-2" || writer.lastMerchantKind != store.MerchantKindPlatform {
+		t.Fatalf("入参 = %s/%s", writer.lastMerchantCode, writer.lastMerchantKind)
+	}
+}
+
+// TestUpdateCredentialWithoutKeyKeepsSecret 断言修改凭据时省略 api-key 表示不轮换。
+func TestUpdateCredentialWithoutKeyKeepsSecret(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	status, env := doJSON(t, h, http.MethodPut, CredentialsPath+"/7", "token",
+		`{"merchant_id":2,"cred_group":"g2","name":"改名"}`)
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	if !writer.called("UpdateCredential") || writer.lastCredentialID != 7 {
+		t.Fatalf("动作 = %v，主键 = %d", writer.calls, writer.lastCredentialID)
+	}
+	if writer.lastCredential.APIKey != "" || writer.lastCredential.Group != "g2" {
+		t.Fatalf("入参 = %+v", writer.lastCredential)
+	}
+}
+
+// TestUpdateModelMapIsPutOnItem 断言模型映射的条目路径 PUT 能改模型名与归属渠道。
+func TestUpdateModelMapIsPutOnItem(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	status, env := doJSON(t, h, http.MethodPut, ModelMapsPath+"/7", "token",
+		`{"channel_id":3,"model":"改过的别名","upstream_model":"u2","price_multiplier":"1.5"}`)
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	if !writer.called("UpdateModelMap") || writer.lastModelMapID != 7 {
+		t.Fatalf("动作 = %v，主键 = %d", writer.calls, writer.lastModelMapID)
+	}
+	got := writer.lastModelMap
+	if got.Model != "改过的别名" || got.UpstreamModel != "u2" || got.PriceMultiplier != "1.5" {
+		t.Fatalf("入参 = %+v", got)
+	}
+	if string(env["data"]) != "null" {
+		t.Fatalf("data = %s，期望 null", env["data"])
+	}
+	if status, _ := doJSON(t, h, http.MethodPost, ModelMapsPath+"/7", "token", `{}`); status != http.StatusBadRequest {
+		t.Fatalf("条目路径用 POST 应 400，得到 %d", status)
+	}
+}
+
+// TestCreateCredentialRequiresKey 断言新增路径仍然要求 api-key：
+// 省略只对修改有意义，新增一行没有 secret 的凭据是无法使用的。
+func TestCreateCredentialRequiresKey(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	status, _ := doJSON(t, h, http.MethodPost, CredentialsPath, "token",
+		`{"merchant_id":2,"cred_group":"g","name":"n"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("应 400: %d", status)
+	}
+	if writer.called("AddCredential") {
+		t.Error("校验失败不应触达业务动作")
+	}
+}
+
+// TestMissingTargetMapsTo404 断言目标缺失回 404 且文案去掉包名前缀。
+func TestMissingTargetMapsTo404(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	writer.err = &missingRow{message: "admin: 渠道 7 不存在"}
+	status, env := doJSON(t, h, http.MethodPut, ChannelsPath+"/7", "token",
+		`{"merchant_id":2,"name":"c","type":"openai_chat","cred_group":"g","base_url":"https://u"}`)
+	if status != http.StatusNotFound || codeOf(t, env) != webapi.CodeNotFound {
+		t.Fatalf("应 404: %d %s", status, env)
+	}
+	var message string
+	if err := json.Unmarshal(env["message"], &message); err != nil {
+		t.Fatalf("解析 message: %v", err)
+	}
+	if message != "渠道 7 不存在" {
+		t.Fatalf("文案 = %q", message)
 	}
 }
 
