@@ -47,8 +47,9 @@ var consoleNavigation = []consoleEntry{
 // consoleSections 是首页段落目录。
 //
 // 放不占导航的实体入口：日志类实体走全屏列表页，首页只提供预览入口
-// （web/AGENTS.md 的移动端约定）。管理面段落的条目都指向 /api/v1/admin/* 的只读
-// 清单，整体以 ops 能力为门槛：不具备该能力的主体看不到，也不该取到那些端点。
+// （web/AGENTS.md 的移动端约定）。底部导航只放任务域且不超过 5 项，商家域与请求记录
+// 因此都落在段落里。管理面段落的条目都指向 /api/v1/admin/* 的只读清单，整体以 ops
+// 能力为门槛：不具备该能力的主体看不到，也不该取到那些端点。
 var consoleSections = []consoleSection{
 	{
 		Title:       "排障",
@@ -60,6 +61,19 @@ var consoleSections = []consoleSection{
 				Icon:        "scroll-text",
 				Path:        "/requests",
 				Capability:  identity.CapRequests,
+			},
+		},
+	},
+	{
+		Title:       "商家",
+		Description: "上游账号与名下调用量",
+		Entries: []consoleEntry{
+			{
+				Title:       "上游账号",
+				Description: "渠道与凭据的登记、启停与名下调用量",
+				Icon:        "store",
+				Path:        "/partner",
+				Capability:  identity.CapPartner,
 			},
 		},
 	},

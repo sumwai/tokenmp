@@ -756,6 +756,167 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/partner/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 上游渠道列表
+         * @description 列出本商家登记的上游渠道，按主键升序。只返回渠道自身的字段，不含渠道级扩展配置
+         *     （里面可能有上游请求头）。非本商家的渠道不出现。
+         */
+        get: operations["listPartnerChannels"];
+        put?: never;
+        /**
+         * 登记上游渠道
+         * @description 为本商家登记一条上游渠道，归属写死为会话推导出的商家，不接受归属参数。
+         *     同名（同协议方言下同名）的渠道返回 `code=409`。新建一律启用，停用是独立动作。
+         */
+        post: operations["createPartnerChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/channels/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用上游渠道
+         * @description 启用一条属于本商家的渠道；已启用的渠道再次启用同样返回成功。
+         *     不属于本商家的渠道返回 `code=404`，不以 403 区分存在性。
+         */
+        post: operations["enablePartnerChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/channels/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用上游渠道
+         * @description 停用一条属于本商家的渠道；已停用的渠道再次停用同样返回成功。停用不影响历史流水。
+         *     不属于本商家的渠道返回 `code=404`，不以 403 区分存在性。
+         */
+        post: operations["disablePartnerChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 上游凭据列表
+         * @description 列出本商家登记的上游凭据，按主键升序。只返回脱敏前缀，明文从不返回。
+         *     非本商家的凭据不出现。
+         */
+        get: operations["listPartnerCredentials"];
+        put?: never;
+        /**
+         * 登记上游凭据
+         * @description 为本商家登记一份上游凭据，归属写死为会话推导出的商家。明文只在本次响应出现一次，
+         *     之后任何端点都不再返回；列表只给出前缀。凭据按 `cred_group` 与渠道关联：
+         *     同分组的渠道共享这一份凭据。
+         */
+        post: operations["createPartnerCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/credentials/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用上游凭据
+         * @description 启用一份属于本商家的凭据；已启用的凭据再次启用同样返回成功。
+         *     不属于本商家的凭据返回 `code=404`，不以 403 区分存在性。
+         */
+        post: operations["enablePartnerCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/credentials/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用上游凭据
+         * @description 停用一份属于本商家的凭据；已停用的凭据再次停用同样返回成功。
+         *     不属于本商家的凭据返回 `code=404`，不以 403 区分存在性。
+         */
+        post: operations["disablePartnerCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/usage/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 名下调用量与应扣量聚合
+         * @description 按维度把区间内本商家名下渠道的调用量与应扣量合计起来。口径与账户面的用量聚合一致：
+         *     分组维度 `day` 取日期（`YYYY-MM-DD`，按写入时刻所在的自然日）、`model` 取客户端请求
+         *     的模型名、`api_key` 取密钥 id 的十进制文本；合计与流水同源，只是作用域换成商家。
+         *
+         *     它只回答合计，不返回单条流水。
+         */
+        get: operations["getPartnerUsageStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1065,6 +1226,83 @@ export interface components {
         };
         PageOfUsageStatsItem: {
             items: components["schemas"]["UsageStatsItem"][];
+        };
+        /** @description 一条上游渠道。不含商家标识与渠道级扩展配置。 */
+        PartnerChannel: {
+            /** Format: int64 */
+            id: number;
+            /** @description 渠道名，商家内用于区分同协议的多条渠道。 */
+            name: string;
+            /** @description 上游厂商标签，仅供展示与对账分组，不参与路由。 */
+            vendor: string;
+            /**
+             * @description 协议方言。
+             * @enum {string}
+             */
+            type: "openai_chat" | "openai_responses" | "anthropic_messages" | "gemini_generate";
+            /** @description 凭据分组，与上游凭据的 `cred_group` 对应。 */
+            cred_group: string;
+            /** @description 上游根地址，端点段由协议决定。 */
+            base_url: string;
+            /** @description 路由排序，值大者优先。 */
+            priority: number;
+            /** @description 同优先级内的加权随机权重。 */
+            weight: number;
+            enabled: boolean;
+        };
+        PageOfPartnerChannel: {
+            items: components["schemas"]["PartnerChannel"][];
+        };
+        /** @description 登记渠道的请求体；归属由会话推导，不接受商家参数。 */
+        CreatePartnerChannelRequest: {
+            name: string;
+            vendor?: string;
+            /** @enum {string} */
+            type: "openai_chat" | "openai_responses" | "anthropic_messages" | "gemini_generate";
+            cred_group: string;
+            /** @description 上游根地址，只填到端点段之前。 */
+            base_url: string;
+            /**
+             * @description 凭据注入形态；省略按协议现状。渠道级扩展配置（静态请求头等）属平台运维口径，
+             *     不由商家自助填写。
+             * @enum {string}
+             */
+            credential_style?: "authorization" | "x-api-key" | "x-goog-api-key" | "query";
+            /** @description 路由排序，值大者优先；省略取 100。 */
+            priority?: number;
+            /** @description 同优先级内的加权随机权重；省略取 100。 */
+            weight?: number;
+        };
+        /** @description 一份上游凭据。只有前缀，明文从不返回。 */
+        PartnerCredential: {
+            /** Format: int64 */
+            id: number;
+            cred_group: string;
+            name: string;
+            /** @description 脱敏前缀，足以区分凭据行、不足以还原明文。 */
+            prefix: string;
+            enabled: boolean;
+        };
+        /** @description 凭据的创建响应；`secret` 只在此处出现一次。 */
+        CreatedPartnerCredential: {
+            /** Format: int64 */
+            id: number;
+            cred_group: string;
+            name: string;
+            prefix: string;
+            enabled: boolean;
+            /** @description 凭据明文，仅本次响应返回；列表与后续读取只给前缀。 */
+            secret: string;
+        };
+        PageOfPartnerCredential: {
+            items: components["schemas"]["PartnerCredential"][];
+        };
+        /** @description 登记凭据的请求体；归属由会话推导，不接受商家参数。 */
+        CreatePartnerCredentialRequest: {
+            cred_group: string;
+            name: string;
+            /** @description 上游凭据明文，只在写入这一条路径出现。 */
+            api_key: string;
         };
         /** @description 一个当前账户可调用的模型。 */
         ModelInfo: {
@@ -1575,6 +1813,8 @@ export interface components {
         AdminScopeFilter: "account" | "api_key" | "channel" | "plan";
         /** @description 范围实体的 id，与 `scope` 成对使用。 */
         AdminScopeIDFilter: number;
+        /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
+        ResourceID: number;
     };
     requestBodies: never;
     headers: {
@@ -2678,6 +2918,285 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listPartnerChannels: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按启用状态过滤；缺省不过滤。 */
+                enabled?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 渠道列表。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfPartnerChannel"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createPartnerChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePartnerChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description 登记成功，返回新建的渠道。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PartnerChannel"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    enablePartnerChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
+                id: components["parameters"]["ResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 启用成功。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disablePartnerChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
+                id: components["parameters"]["ResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 停用成功。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listPartnerCredentials: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 凭据列表。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfPartnerCredential"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createPartnerCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePartnerCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description 登记成功，响应携带一次性明文。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["CreatedPartnerCredential"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    enablePartnerCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
+                id: components["parameters"]["ResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 启用成功。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disablePartnerCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
+                id: components["parameters"]["ResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 停用成功。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getPartnerUsageStats: {
+        parameters: {
+            query?: {
+                /** @description 起始时刻（含），RFC3339；缺省不限。 */
+                since?: components["parameters"]["Since"];
+                /** @description 结束时刻（含），RFC3339；缺省不限。 */
+                until?: components["parameters"]["Until"];
+                /** @description 分组维度；缺省 `day`。 */
+                group_by?: "day" | "model" | "api_key";
+                /** @description 按模型名精确匹配；缺省不过滤。 */
+                model?: components["parameters"]["ModelFilter"];
+                /** @description 按签发本次调用的密钥 id 过滤；缺省不过滤。 */
+                api_key_id?: components["parameters"]["ApiKeyFilter"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 聚合合计，按 `key` 升序。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfUsageStatsItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
         };
     };

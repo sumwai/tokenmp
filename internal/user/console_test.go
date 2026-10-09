@@ -95,18 +95,18 @@ func TestConsolePerIdentity(t *testing.T) {
 			name:       "商户",
 			role:       store.RolePartner,
 			wantRoles:  []string{store.RoleMember, store.RolePartner},
-			wantCaps:   dataCaps,
+			wantCaps:   append(slices.Clone(dataCaps), identity.CapPartner),
 			wantNav:    []string{"/", "/keys", "/usage", "/purchase", "/account"},
-			wantSectNo: 1,
+			wantSectNo: 2,
 		},
 		{
 			// 平台管理员另有管理面能力，因此多出管理面段落；导航与其余身份一致。
 			name:       "平台管理员",
 			role:       store.RoleAdmin,
 			wantRoles:  []string{store.RoleMember, store.RolePartner, store.RoleAdmin},
-			wantCaps:   append(slices.Clone(dataCaps), identity.CapOps),
+			wantCaps:   append(slices.Clone(dataCaps), identity.CapPartner, identity.CapOps),
 			wantNav:    []string{"/", "/keys", "/usage", "/purchase", "/account"},
-			wantSectNo: 2,
+			wantSectNo: 3,
 		},
 	}
 	for _, tt := range tests {
@@ -178,7 +178,8 @@ func TestConsoleCapabilitiesAreUnion(t *testing.T) {
 		t.Fatalf("应 200: %d %s", status, env)
 	}
 	data := consoleDataOf(t, env)
-	want := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount, identity.CapPurchase, identity.CapOps}
+	want := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage,
+		identity.CapAccount, identity.CapPurchase, identity.CapPartner, identity.CapOps}
 	if !slices.Equal(data.Capabilities, want) {
 		t.Fatalf("capabilities = %v，期望并集 %v", data.Capabilities, want)
 	}
@@ -192,12 +193,13 @@ func TestConsoleCapabilitiesAreUnion(t *testing.T) {
 // 该条目不出现，段落条目被过滤光时整段不返回。
 func TestConsoleFiltersByCapability(t *testing.T) {
 	// 缺少请求记录能力：唯一含该能力的段落整体消失，导航不含相关条目。
-	caps := []string{identity.CapConsole, identity.CapKeys, identity.CapUsage, identity.CapAccount, identity.CapPurchase}
+	caps := []string{identity.CapConsole, identity.CapKeys, identity.CapUsage, identity.CapAccount, identity.CapPurchase, identity.CapPartner}
 	if nav := filterEntries(consoleNavigation, caps); len(nav) != len(consoleNavigation) {
 		t.Fatalf("导航项都不需要 %s，应全部保留，得到 %d 项", identity.CapRequests, len(nav))
 	}
-	if sections := filterSections(consoleSections, caps); len(sections) != 0 {
-		t.Fatalf("缺少 %s 时应没有段落，得到 %d 段", identity.CapRequests, len(sections))
+	// 段落按能力逐个过滤：只有请求记录那一段整体消失，商家段落保留。
+	if sections := filterSections(consoleSections, caps); len(sections) != 1 || sections[0].Title != "商家" {
+		t.Fatalf("缺少 %s 时应只剩商家段落，得到 %+v", identity.CapRequests, sections)
 	}
 
 	// 只剩首页能力：导航只剩首页项，段落同样为空。

@@ -64,7 +64,9 @@ info:
     - `/api/v1/user/*`：用户级业务数据。作用域由会话推导，不接受账户 id 参数；
       一个登录主体拥有一个账户（`account.owner_user_id`），密钥、用量与请求记录
       都挂在该账户上。列表端点用偏移分页，分页信息在信封的 `page` / `size` / `total`。
-    - `/api/v1/merchant/*`：商家面，尚未定义。
+    - `/api/v1/partner/*`：商家面。作用域由会话推导出的商家给定（`merchant.owner_user_id`），
+      不接受商家 id 参数；上游账号（渠道与凭据）的自助登记、启停与列表，以及名下渠道的
+      调用量与应扣量都挂在这里。非本商家的资源一律 `404`，不以 403 区分存在性。
     - `/api/v1/admin/*`：管理面。已定义平台管理员的只读清单（渠道、凭据、模型映射、
       账户、价格、限额、调账与流水），字段与 `tokenmp admin <组> list --json` 的行一致；
       动作类端点尚未定义。请求方须持有管理面能力，越权返回 `code=403`。
@@ -81,6 +83,8 @@ tags:
     description: 用户级业务数据：账户概览、密钥、用量、请求记录与模型目录
   - name: admin
     description: 管理面只读清单：渠道、凭据、模型映射、账户、价格、限额、调账与流水
+  - name: partner
+    description: 商家域：上游账号（渠道与凭据）的自助管理与名下调用量
 
 # 默认端点需要会话令牌；公开端点逐个置空。
 security:
@@ -1315,6 +1319,311 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/partner/channels:
+    get:
+      tags: [partner]
+      summary: 上游渠道列表
+      description: |
+        列出本商家登记的上游渠道，按主键升序。只返回渠道自身的字段，不含渠道级扩展配置
+        （里面可能有上游请求头）。非本商家的渠道不出现。
+      operationId: listPartnerChannels
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: enabled
+          in: query
+          required: false
+          description: 按启用状态过滤；缺省不过滤。
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: 渠道列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfPartnerChannel"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [partner]
+      summary: 登记上游渠道
+      description: |
+        为本商家登记一条上游渠道，归属写死为会话推导出的商家，不接受归属参数。
+        同名（同协议方言下同名）的渠道返回 `code=409`。新建一律启用，停用是独立动作。
+      operationId: createPartnerChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePartnerChannelRequest"
+      responses:
+        "200":
+          description: 登记成功，返回新建的渠道。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PartnerChannel"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/channels/{id}/enable:
+    post:
+      tags: [partner]
+      summary: 启用上游渠道
+      description: |
+        启用一条属于本商家的渠道；已启用的渠道再次启用同样返回成功。
+        不属于本商家的渠道返回 `code=404`，不以 403 区分存在性。
+      operationId: enablePartnerChannel
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: 启用成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/channels/{id}/disable:
+    post:
+      tags: [partner]
+      summary: 停用上游渠道
+      description: |
+        停用一条属于本商家的渠道；已停用的渠道再次停用同样返回成功。停用不影响历史流水。
+        不属于本商家的渠道返回 `code=404`，不以 403 区分存在性。
+      operationId: disablePartnerChannel
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: 停用成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/credentials:
+    get:
+      tags: [partner]
+      summary: 上游凭据列表
+      description: |
+        列出本商家登记的上游凭据，按主键升序。只返回脱敏前缀，明文从不返回。
+        非本商家的凭据不出现。
+      operationId: listPartnerCredentials
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 凭据列表。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfPartnerCredential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [partner]
+      summary: 登记上游凭据
+      description: |
+        为本商家登记一份上游凭据，归属写死为会话推导出的商家。明文只在本次响应出现一次，
+        之后任何端点都不再返回；列表只给出前缀。凭据按 `cred_group` 与渠道关联：
+        同分组的渠道共享这一份凭据。
+      operationId: createPartnerCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePartnerCredentialRequest"
+      responses:
+        "200":
+          description: 登记成功，响应携带一次性明文。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CreatedPartnerCredential"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/credentials/{id}/enable:
+    post:
+      tags: [partner]
+      summary: 启用上游凭据
+      description: |
+        启用一份属于本商家的凭据；已启用的凭据再次启用同样返回成功。
+        不属于本商家的凭据返回 `code=404`，不以 403 区分存在性。
+      operationId: enablePartnerCredential
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: 启用成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/credentials/{id}/disable:
+    post:
+      tags: [partner]
+      summary: 停用上游凭据
+      description: |
+        停用一份属于本商家的凭据；已停用的凭据再次停用同样返回成功。
+        不属于本商家的凭据返回 `code=404`，不以 403 区分存在性。
+      operationId: disablePartnerCredential
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: 停用成功。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/partner/usage/stats:
+    get:
+      tags: [partner]
+      summary: 名下调用量与应扣量聚合
+      description: |
+        按维度把区间内本商家名下渠道的调用量与应扣量合计起来。口径与账户面的用量聚合一致：
+        分组维度 `day` 取日期（`YYYY-MM-DD`，按写入时刻所在的自然日）、`model` 取客户端请求
+        的模型名、`api_key` 取密钥 id 的十进制文本；合计与流水同源，只是作用域换成商家。
+
+        它只回答合计，不返回单条流水。
+      operationId: getPartnerUsageStats
+      parameters:
+        - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Until"
+        - name: group_by
+          in: query
+          required: false
+          description: 分组维度；缺省 `day`。
+          schema:
+            type: string
+            enum: [day, model, api_key]
+        - $ref: "#/components/parameters/ModelFilter"
+        - $ref: "#/components/parameters/ApiKeyFilter"
+      responses:
+        "200":
+          description: 聚合合计，按 `key` 升序。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfUsageStatsItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     webSession:
@@ -1903,6 +2212,159 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UsageStatsItem"
+      additionalProperties: false
+
+    PartnerChannel:
+      type: object
+      description: 一条上游渠道。不含商家标识与渠道级扩展配置。
+      required: [id, name, vendor, type, cred_group, base_url, priority, weight, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+          description: 渠道名，商家内用于区分同协议的多条渠道。
+        vendor:
+          type: string
+          description: 上游厂商标签，仅供展示与对账分组，不参与路由。
+        type:
+          type: string
+          description: 协议方言。
+          enum: [openai_chat, openai_responses, anthropic_messages, gemini_generate]
+        cred_group:
+          type: string
+          description: 凭据分组，与上游凭据的 `cred_group` 对应。
+        base_url:
+          type: string
+          description: 上游根地址，端点段由协议决定。
+        priority:
+          type: integer
+          description: 路由排序，值大者优先。
+        weight:
+          type: integer
+          description: 同优先级内的加权随机权重。
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    PageOfPartnerChannel:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PartnerChannel"
+      additionalProperties: false
+
+    CreatePartnerChannelRequest:
+      type: object
+      description: 登记渠道的请求体；归属由会话推导，不接受商家参数。
+      required: [name, type, cred_group, base_url]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        vendor:
+          type: string
+          maxLength: 64
+        type:
+          type: string
+          enum: [openai_chat, openai_responses, anthropic_messages, gemini_generate]
+        cred_group:
+          type: string
+          minLength: 1
+          maxLength: 64
+        base_url:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: 上游根地址，只填到端点段之前。
+        credential_style:
+          type: string
+          description: |
+            凭据注入形态；省略按协议现状。渠道级扩展配置（静态请求头等）属平台运维口径，
+            不由商家自助填写。
+          enum: [authorization, x-api-key, x-goog-api-key, query]
+        priority:
+          type: integer
+          minimum: 1
+          description: 路由排序，值大者优先；省略取 100。
+        weight:
+          type: integer
+          minimum: 1
+          description: 同优先级内的加权随机权重；省略取 100。
+      additionalProperties: false
+
+    PartnerCredential:
+      type: object
+      description: 一份上游凭据。只有前缀，明文从不返回。
+      required: [id, cred_group, name, prefix, enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+        cred_group:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+          description: 脱敏前缀，足以区分凭据行、不足以还原明文。
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    CreatedPartnerCredential:
+      type: object
+      description: 凭据的创建响应；`secret` 只在此处出现一次。
+      required: [id, cred_group, name, prefix, enabled, secret]
+      properties:
+        id:
+          type: integer
+          format: int64
+        cred_group:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+        enabled:
+          type: boolean
+        secret:
+          type: string
+          description: 凭据明文，仅本次响应返回；列表与后续读取只给前缀。
+      additionalProperties: false
+
+    PageOfPartnerCredential:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PartnerCredential"
+      additionalProperties: false
+
+    CreatePartnerCredentialRequest:
+      type: object
+      description: 登记凭据的请求体；归属由会话推导，不接受商家参数。
+      required: [cred_group, name, api_key]
+      properties:
+        cred_group:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        api_key:
+          type: string
+          minLength: 1
+          description: 上游凭据明文，只在写入这一条路径出现。
       additionalProperties: false
 
     ModelInfo:
@@ -2662,6 +3124,16 @@ components:
       in: query
       required: false
       description: 范围实体的 id，与 `scope` 成对使用。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
+    ResourceID:
+      name: id
+      in: path
+      required: true
+      description: 资源主键；不属于本商家的取值一律按不存在处理。
       schema:
         type: integer
         format: int64

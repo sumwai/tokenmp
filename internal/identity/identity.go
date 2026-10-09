@@ -26,6 +26,8 @@ const (
 	CapAccount = "account"
 	// CapPurchase 是充值 / 购买：商品目录、下单与订单查看。
 	CapPurchase = "purchase"
+	// CapPartner 是商家域能力：上游账号（渠道与凭据）的自助管理与名下用量查看。
+	CapPartner = "partner"
 	// CapOps 是管理面能力：平台运营对象的只读清单页面。
 	CapOps = "ops"
 )
@@ -43,12 +45,12 @@ var stacks = map[string][]string{
 // roleCapabilities 是「身份 → 能力」的唯一出处：改谁能看到什么只动本表。
 //
 // 三种身份都拥有自己的账户、都能签发密钥并调用模型，因此数据面能力对三者相同；
-// 平台管理员另有管理面能力。商家面是否进控制台尚未定论（见 issue #143），
-// 定论只落在本表。
+// 商家身份另有商家域能力（上游账号与名下用量），平台管理员另有管理面能力。
+// 谁能看到什么只落在本表，契约与前端都不必跟着改。
 var roleCapabilities = map[string][]string{
 	store.RoleMember:  {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase},
-	store.RolePartner: {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase},
-	store.RoleAdmin:   {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase, CapOps},
+	store.RolePartner: {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase, CapPartner},
+	store.RoleAdmin:   {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase, CapPartner, CapOps},
 }
 
 // Roles 把账号已授予的最高身份展开成叠加后的身份集合。
