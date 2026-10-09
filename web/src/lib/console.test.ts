@@ -5,7 +5,7 @@ import type { ConsoleData } from './console';
 
 /** 清单夹具：持有首页与密钥能力，段落里另有一个请求记录入口。 */
 const manifest: ConsoleData = {
-  role: 'member',
+  roles: ['member'],
   capabilities: ['console', 'keys'],
   navigation: [
     { title: '首页', description: '', icon: 'house', path: '/', capability: 'console' },
@@ -55,9 +55,18 @@ describe('entryForPath', () => {
 });
 
 describe('allows', () => {
-  it('按能力集合判定，不按角色取值', () => {
+  it('按能力集合判定，不按身份取值', () => {
     expect(allows(manifest, 'keys')).toBe(true);
     expect(allows(manifest, 'ops')).toBe(false);
+  });
+
+  it('渲染只看能力：身份不同而能力相同，判定一致', () => {
+    // 身份叠加后 admin 也能是普通调用方：能不能进页面取决于服务端下发的能力集合，
+    // 与身份集合无关（能力里没有 ops 就进不去管理面）。
+    const admin = { ...manifest, roles: ['member', 'partner', 'admin'] };
+    expect(allows(admin, 'keys')).toBe(true);
+    expect(allows(admin, 'ops')).toBe(false);
+    expect(entryForPath(admin, '/keys')?.title).toBe('密钥');
   });
 });
 
@@ -73,7 +82,7 @@ describe('前端零角色分支', () => {
   it('web/src 里没有角色取值字面量', () => {
     const offenders = Object.entries(sources)
       .filter(([path]) => !path.includes('.test.'))
-      // 生成物镜像契约，必然出现角色取值（SessionUser.role 的 enum）；红线针对手写代码。
+      // 生成物镜像契约，必然出现身份取值（SessionUser.roles 的 enum）；红线针对手写代码。
       .filter(([path]) => !path.includes('/generated/'))
       .filter(([, text]) => roleLiteral.test(text))
       .map(([path]) => path);

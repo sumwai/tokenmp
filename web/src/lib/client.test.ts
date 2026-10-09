@@ -41,11 +41,12 @@ afterEach(() => {
 
 describe('apiRequest', () => {
   it('业务码 200 时返回解包后的 data', async () => {
-    stubFetch(() => ok({ id: 1, username: 'demo', role: 'member', identities: ['password'] }));
+    stubFetch(() => ok({ id: 1, username: 'demo', roles: ['member'], capabilities: ['console'], identities: ['password'] }));
     await expect(api.getAuthSession()).resolves.toEqual({
       id: 1,
       username: 'demo',
-      role: 'member',
+      roles: ['member'],
+      capabilities: ['console'],
       identities: ['password'],
     });
   });
@@ -141,7 +142,7 @@ describe('apiRequest', () => {
       }
       return seen.filter((line) => line.startsWith('/api/v1/auth/session')).length === 1
         ? failure(Code.Unauthorized, '登录状态已失效')
-        : ok({ id: 1, username: 'demo', role: 'member', identities: [] });
+        : ok({ id: 1, username: 'demo', roles: ['member'], capabilities: [], identities: [] });
     });
 
     await expect(api.getAuthSession()).resolves.toMatchObject({ username: 'demo' });

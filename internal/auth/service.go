@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/sumwai/tokenmp/internal/identity"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -75,11 +76,15 @@ type accessTokenData struct {
 //
 // 不含商家标识：商家是结算内部概念，账户的结算归属由 account.default_merchant_id
 // 决定，不对登录主体暴露。页面作用域由账户归属（account.owner_user_id）推导。
+//
+// 身份是叠加的（internal/identity）：roles 是主体持有的全部身份，capabilities 是
+// 各身份能力的并集，两者都由库里存的最高身份推导，前端只按 capabilities 渲染。
 type sessionUser struct {
-	ID         uint64   `json:"id"`
-	Username   string   `json:"username"`
-	Role       string   `json:"role"`
-	Identities []string `json:"identities"`
+	ID           uint64   `json:"id"`
+	Username     string   `json:"username"`
+	Roles        []string `json:"roles"`
+	Capabilities []string `json:"capabilities"`
+	Identities   []string `json:"identities"`
 }
 
 // Challenge 签发一次性加密公钥。
@@ -168,18 +173,21 @@ func (s *Service) Signup(ctx context.Context, addr, email, username, passwordCip
 	})
 }
 
-// SessionSubject 解析页面会话令牌并返回登录主体 id 与角色；令牌无效、会话已撤销
+// SessionSubject 解析页面会话令牌并返回登录主体 id 与身份集合；令牌无效、会话已撤销
 // 或过期一律返回 ErrUnauthorized。
 //
 // 供同属页面面的业务包按会话推导作用域与生成控制台清单：页面端点不接受账户 id
-// 参数，归属只能来自令牌；清单按角色下发能力集合。两件事共用一次会话读取，
+// 参数，归属只能来自令牌；清单按身份下发能力集合。两件事共用一次会话读取，
 // 同一请求不会读两遍会话。
-func (s *Service) SessionSubject(ctx context.Context, accessToken string) (uint64, string, error) {
+//
+// 身份集合由库里存的最高身份展开（member 是基线，partner 与 admin 在其上），
+// 控制台清单按各身份取能力并集。
+func (s *Service) SessionSubject(ctx context.Context, accessToken string) (uint64, []string, error) {
 	row, err := s.store.WebSessionByAccess(ctx, hashToken(accessToken))
 	if err != nil || !sessionUsable(row, s.opts.Now()) {
-		return 0, "", ErrUnauthorized
+		return 0, nil, ErrUnauthorized
 	}
-	return row.User.ID, row.User.Role, nil
+	return row.User.ID, identity.Roles(row.User.Role), nil
 }
 
 // SessionByAccess 按访问令牌读当前身份；未登录、已撤销或已过期一律 ErrUnauthorized。
@@ -188,16 +196,7 @@ func (s *Service) SessionByAccess(ctx context.Context, accessToken string) (*ses
 	if err != nil || !sessionUsable(row, s.opts.Now()) {
 		return nil, ErrUnauthorized
 	}
-	identities, err := s.identities(ctx, &row.User)
-	if err != nil {
-		return nil, err
-	}
-	return &sessionUser{
-		ID:         row.User.ID,
-		Username:   row.User.Username,
-		Role:       row.User.Role,
-		Identities: identities,
-	}, nil
+	return s.sessionUserOf(ctx, &row.User)
 }
 
 // Refresh 用刷新令牌换发访问令牌，轮换在一次 CAS 更新里完成。
@@ -298,7 +297,7 @@ func (s *Service) issueSession(ctx context.Context, user *store.WebUser) (*sessi
 	}); insertErr != nil {
 		return nil, insertErr
 	}
-	identities, err := s.identities(ctx, user)
+	who, err := s.sessionUserOf(ctx, user)
 	if err != nil {
 		return nil, err
 	}
@@ -306,12 +305,24 @@ func (s *Service) issueSession(ctx context.Context, user *store.WebUser) (*sessi
 		AccessToken:  access.plain,
 		RefreshToken: refresh.plain,
 		ExpiresIn:    int(s.opts.AccessTTL / time.Second),
-		User: sessionUser{
-			ID:         user.ID,
-			Username:   user.Username,
-			Role:       user.Role,
-			Identities: identities,
-		},
+		User:         *who,
+	}, nil
+}
+
+// sessionUserOf 由账号构造会话身份：身份集合与能力都由 internal/identity 从库里
+// 存的最高身份推导，登录响应与会话查询共用同一口径。
+func (s *Service) sessionUserOf(ctx context.Context, user *store.WebUser) (*sessionUser, error) {
+	identities, err := s.identities(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	roles := identity.Roles(user.Role)
+	return &sessionUser{
+		ID:           user.ID,
+		Username:     user.Username,
+		Roles:        roles,
+		Capabilities: identity.Capabilities(roles),
+		Identities:   identities,
 	}, nil
 }
 

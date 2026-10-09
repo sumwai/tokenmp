@@ -598,12 +598,17 @@ export interface components {
             id: number;
             username: string;
             /**
-             * @description 角色标识：`member` 调用方（注册默认）、`partner` 商户、`admin` 平台管理员。
-             *     三者都是用户，都拥有自己的账户，都能签发密钥并调用模型；角色只决定控制台与
-             *     管理能力范围。取值由服务端下发，前端按值渲染导航与权限，不硬编码。
-             * @enum {string}
+             * @description 主体持有的身份集合，叠加而非互斥：`member` 是所有主体的基线（注册默认），
+             *     `partner` 是申请制的商家身份，`admin` 是平台管理员且同时持有前两者。
+             *     顺序固定为基线在前。取值由服务端下发，前端按 `capabilities` 渲染导航与
+             *     权限，不按身份取值分支，也不硬编码。
              */
-            role: "member" | "partner" | "admin";
+            roles: ("member" | "partner" | "admin")[];
+            /**
+             * @description 主体持有的能力标识，为各身份能力的并集，与 `ConsoleData.capabilities`
+             *     同取值域；同样只增不改语义，未识别的取值一律忽略。
+             */
+            capabilities: string[];
             /** @description 已绑定的登录身份，`password` 表示已设密码，其余为第三方提供方标识。 */
             identities: string[];
         };
@@ -643,11 +648,14 @@ export interface components {
         /** @description 控制台清单：当前主体的导航项、首页段落与能力集合。 */
         ConsoleData: {
             /**
-             * @description 当前主体角色，与 `SessionUser.role` 同取值域。它只用于展示与排障：
-             *     前端按 `capabilities` 与清单条目渲染，不按角色取值分支。
+             * @description 当前主体持有的身份集合，与 `SessionUser.roles` 同取值域。它只用于展示与
+             *     排障：前端按 `capabilities` 与清单条目渲染，不按身份取值分支。
              */
-            role: string;
-            /** @description 当前主体持有的能力标识；取值只增不改语义，未识别的取值一律忽略。 */
+            roles: string[];
+            /**
+             * @description 当前主体持有的能力标识，为各身份能力的并集；取值只增不改语义，
+             *     未识别的取值一律忽略。
+             */
             capabilities: string[];
             /** @description 底部导航项，按顺序渲染；数量不超过 5。 */
             navigation: components["schemas"]["ConsoleEntry"][];

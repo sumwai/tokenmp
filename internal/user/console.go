@@ -3,46 +3,19 @@ package user
 import (
 	"net/http"
 
-	"github.com/sumwai/tokenmp/internal/store"
+	"github.com/sumwai/tokenmp/internal/identity"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
 
 // 本文件实现控制台清单端点：当前登录主体可用的导航项、首页段落与能力集合。
 //
-// 角色与权限的真相在服务端（web/AGENTS.md「多角色」）：前端按清单渲染，不硬编码
-// 角色取值。清单因此由两张表生成 —— 「角色 → 能力」与「能力 → 条目」：改谁能看到
-// 什么只动第一张表，改条目的位置与图标只动第二张表。
+// 身份与权限的真相在服务端（web/AGENTS.md「多角色」）：前端按清单渲染，不硬编码
+// 身份取值。清单因此由三张表生成 —— internal/identity 的「身份 → 能力」与
+// 「身份 → 全部身份」，以及本文件的「能力 → 条目」：改谁能看到什么只动第一张表，
+// 改条目的位置与图标只动第二张表。
 
-// 控制台能力标识。取值与 docs/openapi-web.yaml 的 ConsoleData.capabilities 一致，
-// 改动须同步契约。
-//
-// 取值只增不改语义：清单随页面增加而增长，前端对未识别的标识与未登记的图标名都
-// 不作错误处理。
-const (
-	// CapConsole 是控制台首页。
-	CapConsole = "console"
-	// CapKeys 是密钥自助管理。
-	CapKeys = "keys"
-	// CapRequests 是请求记录查看。
-	CapRequests = "requests"
-	// CapUsage 是用量与应扣量查看。
-	CapUsage = "usage"
-	// CapAccount 是账户概览查看。
-	CapAccount = "account"
-	// CapOps 是管理面能力；管理面页面尚未定义，当前只作为能力出现。
-	CapOps = "ops"
-)
-
-// roleCapabilities 是「角色 → 能力」的唯一出处。
-//
-// 三种角色都拥有自己的账户、都能签发密钥并调用模型，因此数据面能力对三者相同；
-// 平台管理员另有管理面能力。商家面是否进控制台尚未定论（见 #143）：定论只落在
-// 本表，契约与前端都不必跟着改。
-var roleCapabilities = map[string][]string{
-	store.RoleMember:  {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
-	store.RolePartner: {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
-	store.RoleAdmin:   {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapOps},
-}
+// 控制台条目所需的能力标识由 internal/identity 定义；清单的条目按这些标识声明
+// 依赖，能力集合则由服务端按身份取并集下发。
 
 // consoleEntry 是一条控制台条目，字段与契约 ConsoleEntry 对齐。
 type consoleEntry struct {
@@ -64,10 +37,10 @@ type consoleSection struct {
 //
 // 只放任务域，数量不超过 5（web/AGENTS.md 的移动端约定）；图标取 Lucide 名。
 var consoleNavigation = []consoleEntry{
-	{Title: "首页", Icon: "house", Path: "/", Capability: CapConsole},
-	{Title: "密钥", Description: "签发与吊销调用密钥", Icon: "key-round", Path: "/keys", Capability: CapKeys},
-	{Title: "用量", Description: "token 与应扣量", Icon: "chart-line", Path: "/usage", Capability: CapUsage},
-	{Title: "我的", Description: "包存量与窗口限额", Icon: "user-round", Path: "/account", Capability: CapAccount},
+	{Title: "首页", Icon: "house", Path: "/", Capability: identity.CapConsole},
+	{Title: "密钥", Description: "签发与吊销调用密钥", Icon: "key-round", Path: "/keys", Capability: identity.CapKeys},
+	{Title: "用量", Description: "token 与应扣量", Icon: "chart-line", Path: "/usage", Capability: identity.CapUsage},
+	{Title: "我的", Description: "包存量与窗口限额", Icon: "user-round", Path: "/account", Capability: identity.CapAccount},
 }
 
 // consoleSections 是首页段落目录。
@@ -84,7 +57,7 @@ var consoleSections = []consoleSection{
 				Description: "脱敏报文与尝试时间线",
 				Icon:        "scroll-text",
 				Path:        "/requests",
-				Capability:  CapRequests,
+				Capability:  identity.CapRequests,
 			},
 		},
 	},
@@ -92,7 +65,7 @@ var consoleSections = []consoleSection{
 
 // consoleView 是清单的响应体，字段与契约 ConsoleData 对齐。
 type consoleView struct {
-	Role         string           `json:"role"`
+	Roles        []string         `json:"roles"`
 	Capabilities []string         `json:"capabilities"`
 	Navigation   []consoleEntry   `json:"navigation"`
 	Sections     []consoleSection `json:"sections"`
@@ -113,18 +86,19 @@ func (h *Handler) handleConsole(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.ownedAccount(w, r, subject.userID); !ok {
 		return
 	}
-	webapi.WriteOK(w, consoleFor(subject.role))
+	webapi.WriteOK(w, consoleFor(subject.roles))
 }
 
-// consoleFor 按角色生成控制台清单。
+// consoleFor 按主体的身份集合生成控制台清单：能力取各身份的并集，条目再按能力过滤。
 //
-// 未知角色（写入侧有白名单，正常不会出现）得到空清单：按无权处理，而不是回落到
-// 某个角色的清单 —— 回落会让越权在配置出错时静默生效。
-func consoleFor(role string) consoleView {
-	caps := roleCapabilities[role]
+// 未登记身份（写入侧有白名单，正常不会出现）得到空清单：按无权处理，而不是回落到
+// 基线身份的清单 —— 回落会让越权在配置出错时静默生效。
+func consoleFor(roles []string) consoleView {
+	held := identity.Held(roles)
+	caps := identity.Capabilities(held)
 	return consoleView{
-		Role:         role,
-		Capabilities: append(make([]string, 0, len(caps)), caps...),
+		Roles:        held,
+		Capabilities: caps,
 		Navigation:   filterEntries(consoleNavigation, caps),
 		Sections:     filterSections(consoleSections, caps),
 	}

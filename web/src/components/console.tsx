@@ -120,7 +120,7 @@ export function ConsoleLayout() {
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{user.username}</div>
             <div className="truncate text-xs text-muted">
-              角色 {user.role} · 登录方式 {user.identities.join('、')}
+              身份 {user.roles.join('、')} · 登录方式 {user.identities.join('、')}
             </div>
           </div>
           <button

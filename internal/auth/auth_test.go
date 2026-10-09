@@ -418,8 +418,12 @@ func (e *testEnv) signup(t *testing.T, fingerprint string) (access, refresh stri
 	if err := json.Unmarshal(env["data"], &tokens); err != nil {
 		t.Fatalf("解析令牌: %v", err)
 	}
-	if tokens.User.Role != "member" || tokens.User.Username != "tester" {
+	// 注册默认身份是 member 基线：身份集合是叠加展开后的结果，能力集合随之下发。
+	if len(tokens.User.Roles) != 1 || tokens.User.Roles[0] != store.RoleMember {
 		t.Fatalf("注册响应身份不符: %+v", tokens.User)
+	}
+	if len(tokens.User.Capabilities) == 0 {
+		t.Fatalf("注册响应应下发能力集合: %+v", tokens.User)
 	}
 	if len(tokens.User.Identities) != 1 || tokens.User.Identities[0] != "password" {
 		t.Fatalf("登录方式应只含 password: %v", tokens.User.Identities)
@@ -444,8 +448,12 @@ func TestSignupSigninSessionRefreshSignout(t *testing.T) {
 	if err := json.Unmarshal(env["data"], &user); err != nil {
 		t.Fatalf("解析身份: %v", err)
 	}
-	if user.ID == 0 || user.Role != "member" {
+	// 会话查询返回身份与身份集合：身份集合由库里存的最高身份展开。
+	if user.ID == 0 || len(user.Roles) != 1 || user.Roles[0] != store.RoleMember {
 		t.Fatalf("身份不符: %+v", user)
+	}
+	if len(user.Capabilities) == 0 {
+		t.Fatalf("会话查询应下发能力集合: %+v", user)
 	}
 
 	// 刷新：拿到新访问令牌，旧刷新令牌作废。
