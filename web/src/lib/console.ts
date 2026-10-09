@@ -1,4 +1,5 @@
-import { request } from './client';
+import { api } from './generated/api';
+import type { components } from './generated/schema';
 
 /**
  * 控制台清单：导航项、首页段落与能力集合，与 docs/openapi-web.yaml 的 ConsoleData 对齐。
@@ -7,32 +8,17 @@ import { request } from './client';
  */
 
 /** ConsoleEntry 是一条控制台条目：导航项与首页段落条目同一形状。 */
-export interface ConsoleEntry {
-  title: string;
-  description: string;
-  icon: string;
-  path: string;
-  capability: string;
-}
+export type ConsoleEntry = components['schemas']['ConsoleEntry'];
 
 /** ConsoleSection 是首页的一个段落。 */
-export interface ConsoleSection {
-  title: string;
-  description: string;
-  entries: ConsoleEntry[];
-}
+export type ConsoleSection = components['schemas']['ConsoleSection'];
 
 /** ConsoleData 是控制台清单。 */
-export interface ConsoleData {
-  role: string;
-  capabilities: string[];
-  navigation: ConsoleEntry[];
-  sections: ConsoleSection[];
-}
+export type ConsoleData = components['schemas']['ConsoleData'];
 
 /** loadConsole 取当前主体的控制台清单。 */
 export async function loadConsole(): Promise<ConsoleData> {
-  return request<ConsoleData>('/api/v1/user/console', { method: 'GET' });
+  return api.getUserConsole();
 }
 
 /**

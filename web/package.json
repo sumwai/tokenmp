@@ -7,7 +7,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "eslint src",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gen": "node scripts/gen.mjs",
+    "gen:check": "node scripts/gen.mjs --check"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.1",

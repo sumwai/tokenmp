@@ -1,4 +1,5 @@
-import { request } from './client';
+import type { Payload } from './client';
+import { api } from './generated/api';
 
 /**
  * 客户端指纹与密码类字段的公钥加密，与 docs/openapi-web.yaml 的
@@ -8,13 +9,8 @@ import { request } from './client';
 /** 指纹是公钥的索引而不是凭据，可持久化在 localStorage。 */
 const FINGERPRINT_KEY = 'tokenmp_fingerprint';
 
-/** challenge 端点的响应数据。 */
-export interface ChallengeData {
-  algorithm: 'RSA-OAEP';
-  hash: 'SHA-256';
-  public_key: string;
-  expires_in: number;
-}
+/** challenge 端点的响应数据，取自契约生成物。 */
+export type ChallengeData = Payload<'/api/v1/auth/challenge', 'get'>;
 
 /** fingerprint 读取或生成本地指纹。 */
 export function fingerprint(): string {
@@ -28,10 +24,10 @@ export function fingerprint(): string {
 
 /** fetchChallenge 取一枚一次性公钥。 */
 export async function fetchChallenge(): Promise<ChallengeData> {
-  const data = await request<ChallengeData>(
-    `/api/v1/auth/challenge?fingerprint=${encodeURIComponent(fingerprint())}`,
-    { method: 'GET', skipRefresh: true },
-  );
+  const data = await api.getAuthChallenge({
+    params: { query: { fingerprint: fingerprint() } },
+    skipRefresh: true,
+  });
   if (!data) {
     throw new Error('challenge 无响应数据');
   }
