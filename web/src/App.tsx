@@ -11,6 +11,7 @@ import { RequestDetail } from './pages/RequestDetail';
 import { Requests } from './pages/Requests';
 import { ResetPassword } from './pages/ResetPassword';
 import { Signup } from './pages/Signup';
+import { Usage } from './pages/Usage';
 
 /**
  * 路由表：认证五页公开，其余路径都落在控制台骨架内。
@@ -31,6 +32,7 @@ export function App() {
         <Route path="account" element={<Account />} />
         <Route path="keys" element={<Keys />} />
         <Route path="requests" element={<Requests />} />
+        <Route path="usage" element={<Usage />} />
         <Route path="requests/:requestID" element={<RequestDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
