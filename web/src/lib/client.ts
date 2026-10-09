@@ -109,11 +109,8 @@ interface Params {
   path?: Record<string, unknown>;
 }
 
-/** 发送选项：请求体按契约类型给出，其余字段原样交给 fetch。 */
-type SendInit = Omit<RequestInit, 'method' | 'body' | 'headers'> & {
-  body?: unknown;
-  headers?: HeadersInit;
-};
+/** 发送选项：请求体已是 fetch 可用的形态（对象请求体由契约形态的入口先序列化）。 */
+type SendInit = Omit<RequestInit, 'method'>;
 
 /** 请求选项：契约声明的参数与请求体，加上本层特有的「跳过刷新」。 */
 export type ApiInit<P extends PathKey, M extends MethodKey<P>> = MaybeOptionalInit<paths[P], M> & {
@@ -132,12 +129,16 @@ export async function apiRequest<P extends PathKey, M extends MethodKey<P>>(
     params?: Params;
   };
   const url = buildURL(path, params);
-  const sent = await send<Payload<P, M>>(url, method, rest);
+  // 契约形态的请求体是对象：这里序列化一次，send 只负责原样交给 fetch。
+  // 请求体是否存在由契约的 operation 类型决定，取值处按 unknown 读。
+  const rawBody = (rest as { body?: unknown }).body;
+  const body = rawBody === undefined ? undefined : JSON.stringify(rawBody);
+  const sent = await send<Payload<P, M>>(url, method, { ...rest, body });
 
   // 会话过期：先尝试用刷新令牌换发一次，成功则重放原请求，失败清会话回登录。
   if (sent.env.code === Code.Unauthorized && !skipRefresh && path !== REFRESH_PATH) {
     if (await refreshOnce()) {
-      return unwrap(await send<Payload<P, M>>(url, method, rest));
+      return unwrap(await send<Payload<P, M>>(url, method, { ...rest, body }));
     }
     clearSession();
   }
@@ -184,7 +185,7 @@ async function send<T>(url: string, method: string, init: SendInit): Promise<Sen
       ...init,
       method: method.toUpperCase(),
       headers,
-      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      body: init.body ?? undefined,
     });
   } catch {
     throw new ApiError(Code.InternalError, '网络异常，请稍后重试');

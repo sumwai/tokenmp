@@ -118,7 +118,7 @@ export function Account() {
         if (cancelled) {
           return;
         }
-        const code = err instanceof ApiError ? err.code : Code.Internal;
+        const code = err instanceof ApiError ? err.code : Code.InternalError;
         const message = err instanceof ApiError ? err.message : '网络异常，请稍后重试';
         if (code === Code.Unauthorized) {
           // 会话失效回登录页；回跳地址带本页路径与参数，登录后回到同一视图。

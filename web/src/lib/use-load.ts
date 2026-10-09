@@ -53,7 +53,7 @@ export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiError) {
     return error;
   }
-  return new ApiError(Code.Internal, '网络异常，请稍后重试');
+  return new ApiError(Code.InternalError, '网络异常，请稍后重试');
 }
 
 /** useUnauthorizedRedirect 在会话失效（401）时跳登录页并携带来源地址。 */

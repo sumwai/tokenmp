@@ -39,7 +39,7 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 | `make build-binary` | 产出 `bin/tokenmp` 并注入版本号 | 无 |
 | `make check-integration` | 对真实 MySQL 验证迁移 | `TOKENMP_TEST_MYSQL_DSN` |
 | `make e2e` | 端到端运营剧本：入驻到对账 | `TOKENMP_TEST_MYSQL_DSN` |
-| `make web-install` / `web-lint` / `web-test` / `web-build` | 前端四件套，产物在 `web/dist` | node |
+| `make web-install` / `web-gen` / `web-gen-check` / `web-lint` / `web-test` / `web-build` | 前端依赖、契约生成与漂移核对、静态检查、单测、构建，产物在 `web/dist` | node |
 
 `make check` 的契约是无外部依赖。`check-integration` 与 `e2e` 的 DSN 须指向可丢弃的库，
 未设置时测试跳过而不是失败。前端产物由部署侧取用，不进入二进制。开发门禁与提交规范见

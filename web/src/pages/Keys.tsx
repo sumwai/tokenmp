@@ -539,7 +539,7 @@ function ErrorState({
   onRetry: () => void;
   busy?: boolean;
 }) {
-  const code = error instanceof ApiError ? error.code : Code.Internal;
+  const code = error instanceof ApiError ? error.code : Code.InternalError;
   return (
     <div className="rounded-2xl border border-edge bg-surface p-6">
       {code === Code.Forbidden ? (
@@ -575,7 +575,7 @@ function ErrorNote({ error }: { error: ApiError }) {
   const text =
     error.code === Code.TooManyRequests
       ? `${error.message}（请求过于频繁，请稍后再试）`
-      : error.code >= Code.Internal
+      : error.code >= Code.InternalError
         ? '服务端错误，请稍后重试。'
         : error.message;
   return (

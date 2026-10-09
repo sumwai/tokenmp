@@ -223,7 +223,7 @@ export async function getRequestDetail(requestID: string): Promise<RequestDetail
     `/api/v1/user/requests/${encodeURIComponent(requestID)}`,
   );
   if (!data) {
-    throw new ApiError(Code.Internal, '服务端错误');
+    throw new ApiError(Code.InternalError, '服务端错误');
   }
   return data;
 }
