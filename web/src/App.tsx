@@ -5,6 +5,8 @@ import { Callback } from './pages/Callback';
 import { ForgotPassword } from './pages/ForgotPassword';
 import { Home } from './pages/Home';
 import { Login } from './pages/Login';
+import { RequestDetail } from './pages/RequestDetail';
+import { Requests } from './pages/Requests';
 import { ResetPassword } from './pages/ResetPassword';
 import { Signup } from './pages/Signup';
 
@@ -24,6 +26,8 @@ export function App() {
       <Route path="/auth/callback" element={<Callback />} />
       <Route element={<ConsoleLayout />}>
         <Route index element={<Home />} />
+        <Route path="requests" element={<Requests />} />
+        <Route path="requests/:requestID" element={<RequestDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

@@ -10,17 +10,30 @@ export async function request<T>(
   path: string,
   init: RequestInit & { skipRefresh?: boolean } = {},
 ): Promise<T> {
+  return unwrap(await requestEnvelope<T>(path, init));
+}
+
+/**
+ * requestEnvelope 返回完整信封。
+ *
+ * 列表端点要按契约的信封字段分页（page / size / total），只取 data 会把分页信息丢掉，
+ * 页面就得自行推算 —— 那正是 web/AGENTS.md 禁止的「自造分页形态」。
+ */
+export async function requestEnvelope<T>(
+  path: string,
+  init: RequestInit & { skipRefresh?: boolean } = {},
+): Promise<Envelope<T>> {
   const env = await send<T>(path, init);
 
   // 会话过期：先尝试用刷新令牌换发一次，成功则重放原请求，失败清会话回登录。
   // 刷新端点自身不重放，避免递归。
   if (env.code === Code.Unauthorized && !init.skipRefresh && path !== REFRESH_PATH) {
     if (await refreshOnce()) {
-      return unwrap(await send<T>(path, init));
+      return send<T>(path, init);
     }
     clearSession();
   }
-  return unwrap(env);
+  return env;
 }
 
 /** send 执行 fetch 并解析信封；非 JSON 响应（如反代错误页）按 500 处理。 */
