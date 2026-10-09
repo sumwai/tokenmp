@@ -68,6 +68,10 @@ export const api = {
   getAuthSession: (init?: ApiInit<"/api/v1/auth/session", "get">) =>
     apiRequest("/api/v1/auth/session", "get", init),
 
+  /** 分账对账单 */
+  getPartnerSettlement: (init?: ApiInit<"/api/v1/partner/settlement", "get">) =>
+    apiRequest("/api/v1/partner/settlement", "get", init),
+
   /** 名下调用量与应扣量聚合 */
   getPartnerUsageStats: (init?: ApiInit<"/api/v1/partner/usage/stats", "get">) =>
     apiRequest("/api/v1/partner/usage/stats", "get", init),
@@ -119,6 +123,10 @@ export const api = {
   /** 窗口限额清单 */
   listAdminQuotas: (init?: ApiInit<"/api/v1/admin/quotas", "get">) =>
     apiRequest("/api/v1/admin/quotas", "get", init),
+
+  /** 全平台结算对账单 */
+  listAdminSettlements: (init?: ApiInit<"/api/v1/admin/settlements", "get">) =>
+    apiRequest("/api/v1/admin/settlements", "get", init),
 
   /** 全平台用量流水 */
   listAdminUsage: (init?: ApiInit<"/api/v1/admin/usage", "get">) =>

@@ -19,6 +19,7 @@ import type { UsageQuery } from './usageUrl';
 export const PartnerChannelsPath = '/api/v1/partner/channels';
 export const PartnerCredentialsPath = '/api/v1/partner/credentials';
 export const PartnerUsageStatsPath = '/api/v1/partner/usage/stats';
+export const PartnerSettlementPath = '/api/v1/partner/settlement';
 
 /** PartnerChannel 是一条上游渠道；不含商家标识与渠道级扩展配置。 */
 export type PartnerChannel = components['schemas']['PartnerChannel'];
@@ -34,6 +35,27 @@ export type CreatePartnerChannelInput = components['schemas']['CreatePartnerChan
 
 /** CreatePartnerCredentialInput 是登记凭据的请求体。 */
 export type CreatePartnerCredentialInput = components['schemas']['CreatePartnerCredentialRequest'];
+
+/**
+ * PartnerSettlement 是本商家一个账期的分账对账单。
+ *
+ * 金额与抽成率是十进制字符串（金额 8 位小数、抽成率 4 位）：web/AGENTS.md 禁止金额
+ * 经 Number 参与计算，展示层只做补零与千分位。
+ */
+export type PartnerSettlement = components['schemas']['PartnerSettlement'];
+
+/** SETTLEMENT_PERIOD_LABELS 是结算账期的展示名，取值与契约 period 枚举一致。 */
+export const SETTLEMENT_PERIOD_LABELS: Record<string, string> = {
+  day: '日',
+  week: '周',
+  month: '月',
+};
+
+/** SettlementWindow 是账期条件；两侧都为空表示由服务端按本商家账期取上一个完整自然周期。 */
+export interface SettlementWindow {
+  from: string;
+  to: string;
+}
 
 export type { UsageStatsItem };
 
@@ -87,6 +109,25 @@ export async function setCredentialEnabled(id: number, enabled: boolean): Promis
     return;
   }
   await api.disablePartnerCredential({ params: { path: { id } } });
+}
+
+/** settlementQuery 把账期序列化为查询参数；空值不下发，缺省由服务端按商家账期取上一期。 */
+export function settlementQuery(window: SettlementWindow): { from?: string; to?: string } {
+  const query: { from?: string; to?: string } = {};
+  if (window.from !== '') query.from = window.from;
+  if (window.to !== '') query.to = window.to;
+  return query;
+}
+
+/** loadSettlement 取本商家一个账期的分账对账单；作用域由服务端按会话推导。 */
+export async function loadSettlement(window: SettlementWindow): Promise<PartnerSettlement> {
+  const data = await api.getPartnerSettlement({ params: { query: settlementQuery(window) } });
+  if (!data) {
+    // 单对象端点没有 data 就是服务端违约：契约把该端点的 data 声明为必有，
+    // 回落到空对账单会让页面把「没查出来」显示成「这个账期没有成交」。
+    throw new Error('对账单响应缺少 data');
+  }
+  return data;
 }
 
 /** loadUsageStats 取本商家名下渠道的用量聚合；端点不分页，一次返回全部维度分组。 */

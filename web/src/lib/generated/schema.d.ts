@@ -756,6 +756,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/settlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 全平台结算对账单
+         * @description 按商家逐行列出结算对账单，字段与 `tokenmp admin settlement list --json` 的行一致。
+         *     `merchant_id` 限定单个商家；账期缺省时按各商家自己的账期取上一个完整自然周期 ——
+         *     账期是商家自己的口径，同一批里各家的账期可以不同。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminSettlements"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/partner/channels": {
         parameters: {
             query?: never;
@@ -909,6 +932,31 @@ export interface paths {
          *     它只回答合计，不返回单条流水。
          */
         get: operations["getPartnerUsageStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/partner/settlement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 分账对账单
+         * @description 返回本商家一个账期的分账对账单：账期、成交笔数与四处金额（卖出总额、平台抽成、
+         *     上游成本、商家收益）。作用域由会话推导，不接受商家参数；非本商家的数据不出现。
+         *
+         *     账期是左闭右开区间：`from` 与 `to` 一起给出时按该区间出账，都不给时按本商家的
+         *     账期取上一个完整自然周期。金额是十进制字符串（金额 8 位小数、抽成率 4 位），
+         *     口径见 `docs/compatibility.md` 的「分佣与结算口径」。
+         */
+        get: operations["getPartnerSettlement"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1303,6 +1351,40 @@ export interface components {
             name: string;
             /** @description 上游凭据明文，只在写入这一条路径出现。 */
             api_key: string;
+        };
+        /**
+         * @description 一个商家一个账期的分账对账单，字段与 `settlement.BillView` 一致，只去掉商家标识 ——
+         *     它就是会话本身。金额与抽成率是十进制字符串（金额 8 位小数、抽成率 4 位），
+         *     口径见 `docs/compatibility.md` 的「分佣与结算口径」。
+         */
+        PartnerSettlement: {
+            /**
+             * @description 结算账期。
+             * @enum {string}
+             */
+            period: "day" | "week" | "month";
+            /**
+             * Format: date-time
+             * @description 账期起点（含）。
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description 账期终点（不含）。
+             */
+            to: string;
+            /** @description 平台抽成率，十进制字符串，最多 4 位小数。 */
+            commission_rate: string;
+            /** @description 账期内的成交笔数。 */
+            trades: number;
+            /** @description 卖出总额（本商家名下账户的实付合计），十进制字符串。 */
+            gross_sales: string;
+            /** @description 平台抽成（卖出总额 × 抽成率），十进制字符串。 */
+            commission: string;
+            /** @description 上游成本（本商家名下渠道用量的牌价基础价合计），十进制字符串。 */
+            upstream_cost: string;
+            /** @description 商家收益（卖出总额 − 平台抽成 − 上游成本），十进制字符串。 */
+            payout: string;
         };
         /** @description 一个当前账户可调用的模型。 */
         ModelInfo: {
@@ -1700,6 +1782,47 @@ export interface components {
         PageOfAdminUsageItem: {
             items: components["schemas"]["AdminUsageItem"][];
         };
+        /**
+         * @description 一个商家的结算对账单，字段与 `tokenmp admin settlement list --json` 的行一致；
+         *     比 PartnerSettlement 多 `merchant_id`：管理面是跨商家的清单，没有它分行无从归属。
+         */
+        AdminSettlementItem: {
+            /**
+             * Format: int64
+             * @description 结算归属的商家 id。
+             */
+            merchant_id: number;
+            /**
+             * @description 结算账期。
+             * @enum {string}
+             */
+            period: "day" | "week" | "month";
+            /**
+             * Format: date-time
+             * @description 账期起点（含）。
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description 账期终点（不含）。
+             */
+            to: string;
+            /** @description 平台抽成率，十进制字符串，最多 4 位小数。 */
+            commission_rate: string;
+            /** @description 账期内的成交笔数。 */
+            trades: number;
+            /** @description 卖出总额，十进制字符串。 */
+            gross_sales: string;
+            /** @description 平台抽成，十进制字符串。 */
+            commission: string;
+            /** @description 上游成本，十进制字符串。 */
+            upstream_cost: string;
+            /** @description 商家收益，十进制字符串。 */
+            payout: string;
+        };
+        PageOfAdminSettlementItem: {
+            items: components["schemas"]["AdminSettlementItem"][];
+        };
     };
     responses: {
         /** @description 参数缺失或非法，`code=400`。 */
@@ -1798,6 +1921,13 @@ export interface components {
         Since: string;
         /** @description 结束时刻（含），RFC3339；缺省不限。 */
         Until: string;
+        /**
+         * @description 账期起点（含），RFC3339。与 `to` 一起给出即按该区间出账；都不给时按商家的账期
+         *     取上一个完整自然周期。只给一侧返回 `code=400`。
+         */
+        WindowFrom: string;
+        /** @description 账期终点（不含），RFC3339。与 `from` 一起给出。 */
+        WindowTo: string;
         /** @description 按模型名精确匹配；缺省不过滤。 */
         ModelFilter: string;
         /** @description 按签发本次调用的密钥 id 过滤；缺省不过滤。 */
@@ -2921,6 +3051,46 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listAdminSettlements: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按商家过滤；缺省列出全部商家。 */
+                merchant_id?: number;
+                /**
+                 * @description 账期起点（含），RFC3339。与 `to` 一起给出即按该区间出账；都不给时按商家的账期
+                 *     取上一个完整自然周期。只给一侧返回 `code=400`。
+                 */
+                from?: components["parameters"]["WindowFrom"];
+                /** @description 账期终点（不含），RFC3339。与 `from` 一起给出。 */
+                to?: components["parameters"]["WindowTo"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 对账单清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminSettlementItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listPartnerChannels: {
         parameters: {
             query?: {
@@ -3190,6 +3360,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["PageOfUsageStatsItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getPartnerSettlement: {
+        parameters: {
+            query?: {
+                /**
+                 * @description 账期起点（含），RFC3339。与 `to` 一起给出即按该区间出账；都不给时按商家的账期
+                 *     取上一个完整自然周期。只给一侧返回 `code=400`。
+                 */
+                from?: components["parameters"]["WindowFrom"];
+                /** @description 账期终点（不含），RFC3339。与 `from` 一起给出。 */
+                to?: components["parameters"]["WindowTo"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 该账期的对账单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PartnerSettlement"];
                     };
                 };
             };

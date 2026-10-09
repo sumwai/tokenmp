@@ -13,7 +13,7 @@ Go 单模块（`github.com/sumwai/tokenmp`），发布产物是一个二进制�
 | 协议互转 | 同一份内部请求/响应格式在四种方言之间转换，一条渠道因此可以承接任一方言的请求；含参数处理、模型名替换、跨协议降级与流式用量帧 | [docs/compatibility.md](docs/compatibility.md) |
 | 鉴权与限额 | Bearer 鉴权、账户额度预检，以及账户与 API key 两个维度的窗口限额处置 | [docs/compatibility.md](docs/compatibility.md) 的错误码表 |
 | 上游调度 | 候选链选路、同渠道换凭据重试与按类冷却、渠道级限流与熔断、上游套餐配额探针 | [docs/deploy.md](docs/deploy.md) |
-| 商家分佣 | 按 `merchant.settle_info` 的抽成率与账期给入驻商家出账，对账单由卖出总额、平台抽成与上游成本构成 | [docs/compatibility.md](docs/compatibility.md) |
+| 商家分佣 | 按 `merchant.settle_info` 的抽成率与账期给入驻商家出账，对账单由卖出总额、平台抽成与上游成本构成；管理面与商家域各有一个读路径 | [docs/compatibility.md](docs/compatibility.md) |
 | 网关中间件 | 本机可配置插件在四个时机改写请求体、流式内容事件与响应体，注册与启停用 `tokenmp admin plugin` | [docs/compatibility.md](docs/compatibility.md)、[examples/](examples/) |
 | 页面通信 | `/api/v1/*` 供浏览器控制台调用，前端的响应类型与客户端由契约生成 | [docs/openapi-web.yaml](docs/openapi-web.yaml)、[web/AGENTS.md](web/AGENTS.md) |
 | 日志 | 每次请求与每次上游尝试各写一条 JSON 日志到标准输出，凭据与密钥不进入日志 | [docs/deploy.md](docs/deploy.md) |
@@ -111,8 +111,9 @@ internal/apikey/        客户端 API 密钥的生成、展示前缀与存储哈
 internal/auth/          页面账号体系：注册、登录、会话签发与销毁
 internal/identity/      页面身份与能力的唯一出处：身份叠加展开与能力并集
 internal/me/            账户自助查询端点：摘要、包存量、限额窗口与最近流水
-internal/user/          /api/v1/user/* 用户级业务端点
-internal/partner/       /api/v1/partner/* 商家域端点：上游账号与名下用量
+internal/user/          /api/v1/user/* 用户级业务端点与控制台清单
+internal/partner/       /api/v1/partner/* 商家域端点：上游账号、名下用量与分账对账单
+internal/adminapi/      /api/v1/admin/* 管理面只读清单端点
 internal/webapi/        页面通信的公共部分：六字段信封与会话令牌解析
 internal/route/         选路候选链：加权随机首选与同协议／跨协议分段拼链
 internal/failure/       上游失败处理的唯一出处：诊断、处置与动作

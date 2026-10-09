@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { createColumnHelper, tableFeatures, useTable } from '@tanstack/react-table';
+import { createColumnHelper, tableFeatures, useTable, type RowData } from '@tanstack/react-table';
 import { Check, RotateCw, X } from 'lucide-react';
 
 import { EmptyState, ErrorPanel, Pager } from './requests';
@@ -62,7 +62,7 @@ export interface AdminListPageProps<T> {
 const features = tableFeatures({});
 
 /** buildColumns 把列声明转成表格列定义；窄屏档位随列定义走，页面不写断点分支。 */
-function buildColumns<T extends { id: number }>(columns: AdminColumn<T>[]) {
+function buildColumns<T extends RowData>(columns: AdminColumn<T>[]) {
   const helper = createColumnHelper<typeof features, T>();
   return helper.columns(
     columns.map((column) =>
@@ -77,7 +77,7 @@ function buildColumns<T extends { id: number }>(columns: AdminColumn<T>[]) {
 }
 
 /** AdminListPage 是清单页：URL 状态、三态与表格。 */
-export function AdminListPage<T extends { id: number }>({
+export function AdminListPage<T extends RowData>({
   title,
   description,
   columns,

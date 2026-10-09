@@ -9,6 +9,7 @@ import { AdminCredentials } from './pages/AdminCredentials';
 import { AdminModelMaps } from './pages/AdminModelMaps';
 import { AdminPricing } from './pages/AdminPricing';
 import { AdminQuotas } from './pages/AdminQuotas';
+import { AdminSettlements } from './pages/AdminSettlements';
 import { AdminUsage } from './pages/AdminUsage';
 import { Callback } from './pages/Callback';
 import { ForgotPassword } from './pages/ForgotPassword';
@@ -16,6 +17,7 @@ import { Home } from './pages/Home';
 import { Keys } from './pages/Keys';
 import { Login } from './pages/Login';
 import { Partner } from './pages/Partner';
+import { PartnerSettlement } from './pages/PartnerSettlement';
 import { PartnerUsage } from './pages/PartnerUsage';
 import { Purchase } from './pages/Purchase';
 import { RequestDetail } from './pages/RequestDetail';
@@ -44,6 +46,7 @@ export function App() {
         <Route path="keys" element={<Keys />} />
         <Route path="partner" element={<Partner />} />
         <Route path="partner/usage" element={<PartnerUsage />} />
+        <Route path="partner/settlement" element={<PartnerSettlement />} />
         <Route path="purchase" element={<Purchase />} />
         <Route path="requests" element={<Requests />} />
         <Route path="usage" element={<Usage />} />
@@ -56,6 +59,7 @@ export function App() {
         <Route path="admin/quotas" element={<AdminQuotas />} />
         <Route path="admin/adjustments" element={<AdminAdjustments />} />
         <Route path="admin/usage" element={<AdminUsage />} />
+        <Route path="admin/settlements" element={<AdminSettlements />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

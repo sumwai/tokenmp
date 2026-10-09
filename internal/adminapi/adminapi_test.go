@@ -13,6 +13,7 @@ import (
 	"github.com/sumwai/tokenmp/internal/admin"
 	"github.com/sumwai/tokenmp/internal/billing"
 	"github.com/sumwai/tokenmp/internal/identity"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
@@ -47,6 +48,7 @@ type fakeLister struct {
 	quotas        []admin.QuotaView
 	adjustments   []store.Adjustment
 	usage         []store.UsageListRow
+	settlements   []settlement.BillView
 	err           error
 	lastMerchant  uint64
 	lastModel     string
@@ -54,6 +56,8 @@ type fakeLister struct {
 	lastScopeID   uint64
 	lastAccountID uint64
 	lastSince     time.Time
+	// lastSettlement 保存最后一次出账查询，供账期与作用域断言。
+	lastSettlement admin.SettlementQuery
 }
 
 func (f *fakeLister) ListChannels(context.Context) ([]store.Channel, error) {
@@ -90,6 +94,11 @@ func (f *fakeLister) ListAdjustments(_ context.Context, accountID uint64) ([]sto
 func (f *fakeLister) ListUsage(_ context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error) {
 	f.lastAccountID, f.lastSince = accountID, since
 	return f.usage, f.err
+}
+
+func (f *fakeLister) SettlementBills(_ context.Context, q admin.SettlementQuery) ([]settlement.BillView, error) {
+	f.lastSettlement = q
+	return f.settlements, f.err
 }
 
 // newEnv 构造「管理员 + 固定行」的测试环境。
@@ -154,8 +163,13 @@ func metaOf(t *testing.T, env map[string]json.RawMessage) (page, size, total int
 // listPaths 是全部只读清单路径，按契约顺序排列。
 var listPaths = []string{
 	ChannelsPath, CredentialsPath, ModelMapsPath, AccountsPath,
-	PricingPath, QuotasPath, AdjustmentsPath, UsagePath,
+	PricingPath, QuotasPath, AdjustmentsPath, UsagePath, SettlementsPath,
 }
+
+// listItemKeys 是各清单里「一行」的标识字段名，供数条目用。
+//
+// 结算对账单按商家一行、行里没有 id：商家的归属就是 merchant_id。
+var listItemKeys = map[string]string{SettlementsPath: `"merchant_id"`}
 
 // TestUnauthorized 断言缺少令牌与令牌无效都回 401。
 func TestUnauthorized(t *testing.T) {
@@ -199,6 +213,11 @@ func TestAdminListsReturnItems(t *testing.T) {
 	lister.quotas = []admin.QuotaView{{ID: 7, Scope: billing.ScopeAccount, ScopeID: 5, LimitAmount: "10"}}
 	lister.adjustments = []store.Adjustment{{ID: 8, AccountID: 5, DeltaAmount: "-1", Reason: "退费"}}
 	lister.usage = []store.UsageListRow{{ID: 9, AccountID: 5, Model: "m", GrossAmount: "0.5", Multiplier: "1"}}
+	lister.settlements = []settlement.BillView{{
+		MerchantID: 2, Period: "month", From: "2026-09-01T00:00:00Z", To: "2026-10-01T00:00:00Z",
+		CommissionRate: "0.1000", Trades: 3,
+		GrossSales: "100.00000000", Commission: "10.00000000", UpstreamCost: "30.00000000", Payout: "60.00000000",
+	}}
 
 	for _, path := range listPaths {
 		status, env := do(t, h, http.MethodGet, path, "token")
@@ -209,7 +228,11 @@ func TestAdminListsReturnItems(t *testing.T) {
 		if string(items) == "[]" || string(items) == "null" {
 			t.Errorf("%s 应返回 items: %s", path, items)
 		}
-		itemsCount := strings.Count(string(items), `"id"`)
+		key := `"id"`
+		if listed, ok := listItemKeys[path]; ok {
+			key = listed
+		}
+		itemsCount := strings.Count(string(items), key)
 		if itemsCount != 1 {
 			t.Errorf("%s items = %s，期望 1 条", path, items)
 		}
@@ -394,5 +417,102 @@ func TestListErrorIsInternal(t *testing.T) {
 	}
 	if strings.Contains(message, "table doesn't exist") {
 		t.Fatalf("错误文案泄漏了底层细节: %q", message)
+	}
+}
+
+// TestSettlementFilters 断言商家与账期过滤透传，且账期必须成对、有序。
+func TestSettlementFilters(t *testing.T) {
+	h, _, lister := newEnv()
+	const from = "2026-09-01T00:00:00Z"
+	const to = "2026-10-01T00:00:00Z"
+	status, env := do(t, h, http.MethodGet, SettlementsPath+"?merchant_id=2&from="+from+"&to="+to, "token")
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	wantFrom, err := time.Parse(time.RFC3339, from)
+	if err != nil {
+		t.Fatalf("解析夹具时刻: %v", err)
+	}
+	wantTo, err := time.Parse(time.RFC3339, to)
+	if err != nil {
+		t.Fatalf("解析夹具时刻: %v", err)
+	}
+	got := lister.lastSettlement
+	if got.MerchantID != 2 || !got.From.Equal(wantFrom) || !got.To.Equal(wantTo) {
+		t.Fatalf("出账查询 = %+v，期望 商家 2 / %s ~ %s", got, from, to)
+	}
+
+	// 缺省账期（两侧都不给）由出账侧按各商家口径取上一期，本层原样透传零值。
+	lister.lastSettlement = admin.SettlementQuery{}
+	if _, env := do(t, h, http.MethodGet, SettlementsPath, "token"); codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("不带账期应 200: %s", env)
+	}
+	if !lister.lastSettlement.From.IsZero() || !lister.lastSettlement.To.IsZero() {
+		t.Fatalf("账期缺省应透传零值，得到 %+v", lister.lastSettlement)
+	}
+
+	bad := []struct {
+		name  string
+		query string
+	}{
+		{name: "只给起点", query: "?from=" + from},
+		{name: "只给终点", query: "?to=" + to},
+		{name: "终点不晚于起点", query: "?from=" + to + "&to=" + from},
+		{name: "时刻不可解析", query: "?from=昨天&to=" + to},
+		{name: "商家不是正整数", query: "?merchant_id=0"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			status, env := do(t, h, http.MethodGet, SettlementsPath+tc.query, "token")
+			if status != http.StatusBadRequest || codeOf(t, env) != webapi.CodeBadRequest {
+				t.Fatalf("应 400: %d %s", status, env)
+			}
+		})
+	}
+}
+
+// TestSettlementViewKeepsMoneyAsStrings 断言对账单的金额是 JSON 字符串、且带商家归属。
+//
+// 解析进 string 字段本身就是断言：金额若被写成 JSON 数字，浏览器侧会按双精度浮点丢精度。
+func TestSettlementViewKeepsMoneyAsStrings(t *testing.T) {
+	h, _, lister := newEnv()
+	lister.settlements = []settlement.BillView{{
+		MerchantID: 2, Period: "week",
+		From: "2026-09-28T00:00:00Z", To: "2026-10-05T00:00:00Z",
+		CommissionRate: "0.1000", Trades: 1,
+		GrossSales: "100.00000000", Commission: "10.00000000",
+		UpstreamCost: "30.00000000", Payout: "60.00000000",
+	}}
+	status, env := do(t, h, http.MethodGet, SettlementsPath, "token")
+	if status != http.StatusOK {
+		t.Fatalf("应 200: %d", status)
+	}
+	var items []struct {
+		MerchantID     uint64 `json:"merchant_id"`
+		Period         string `json:"period"`
+		CommissionRate string `json:"commission_rate"`
+		Trades         int64  `json:"trades"`
+		GrossSales     string `json:"gross_sales"`
+		Commission     string `json:"commission"`
+		UpstreamCost   string `json:"upstream_cost"`
+		Payout         string `json:"payout"`
+	}
+	if err := json.Unmarshal(itemsOf(t, env), &items); err != nil {
+		t.Fatalf("解析结算条目: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("条目数 = %d，期望 1", len(items))
+	}
+	item := items[0]
+	if item.MerchantID != 2 || item.Period != "week" || item.Trades != 1 || item.CommissionRate != "0.1000" {
+		t.Errorf("条目字段不符：%+v", item)
+	}
+	for name, value := range map[string]string{
+		"卖出总额": item.GrossSales, "平台抽成": item.Commission,
+		"上游成本": item.UpstreamCost, "商家收益": item.Payout,
+	} {
+		if strings.TrimSpace(value) == "" {
+			t.Errorf("%s 为空", name)
+		}
 	}
 }

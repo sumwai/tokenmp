@@ -1,3 +1,5 @@
+import { parseMoment } from './usageUrl';
+
 /**
  * 商家域上游账号列表的 URL 状态：筛选与分页全部进 query，刷新与分享保持
  * （web/AGENTS.md 的表格约定）。
@@ -8,6 +10,44 @@
  * 名下调用量的聚合条件走用量页同一份 URL 状态（./usageUrl）：两条入口的区间与维度口径
  * 只有一处，页面之间不会漂开。
  */
+
+/** SettlementWindowQuery 是分账对账单页进 URL 的账期条件，键名与契约参数名一致。 */
+export interface SettlementWindowQuery {
+  /** 账期起点（含），RFC3339；空串表示由服务端按本商家账期取上一个完整自然周期。 */
+  from: string;
+  /** 账期终点（不含），RFC3339；与 from 一起给出。 */
+  to: string;
+}
+
+/** EMPTY_SETTLEMENT_WINDOW 是缺省账期：两侧都不给，由服务端按本商家账期取上一期。 */
+export const EMPTY_SETTLEMENT_WINDOW: SettlementWindowQuery = { from: '', to: '' };
+
+/**
+ * parseSettlementWindow 从 URL query 读出账期。
+ *
+ * 只给一侧是用法错误（服务端回 400），因此缺一半就等于没有账期，回落成「按商家账期
+ * 取上一期」；非法时刻同样回落 —— URL 是用户可手改的输入，原样透传只会把 400 变成页面常态。
+ */
+export function parseSettlementWindow(search: URLSearchParams): SettlementWindowQuery {
+  const from = parseMoment(search.get('from'));
+  const to = parseMoment(search.get('to'));
+  if (from === '' || to === '') {
+    return EMPTY_SETTLEMENT_WINDOW;
+  }
+  return { from, to };
+}
+
+/** settlementWindowSearch 把账期序列化为 query；空账期不写出。 */
+export function settlementWindowSearch(window: SettlementWindowQuery): URLSearchParams {
+  const params = new URLSearchParams();
+  if (window.from !== '') {
+    params.set('from', window.from);
+  }
+  if (window.to !== '') {
+    params.set('to', window.to);
+  }
+  return params;
+}
 
 /** 每页条数缺省值，与契约 Size 的 default 一致。 */
 export const DEFAULT_PAGE_SIZE = 20;

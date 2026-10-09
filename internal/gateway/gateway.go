@@ -477,17 +477,24 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 	// 管理面只读清单与用户面同一套会话令牌，差别只在权限判定（要求管理面身份）。
 	// 清单的派生与脱敏复用 internal/admin 的 Service，因此需要存储层满足整张管理面
 	// 数据面：真实存储层满足（见上面的编译期断言），测试替身不满足时不挂载该子树。
+	// 同一个服务实例也供商家域出账使用：出账口径只有一处实现，页面与 CLI 看的是同一份逻辑。
+	// 注意声明成接口类型再赋值：装了 nil 指针的接口不等于 nil，nil 判据会失效。
+	var settlements partner.Settlements
 	if adminStore, ok := st.(admin.Store); ok {
+		service := admin.New(adminStore)
+		settlements = service
 		mux.Handle(adminapi.PathPrefix, adminapi.NewHandler(adminapi.Options{
 			Sessions: webAuth,
-			Lister:   admin.New(adminStore),
+			Lister:   service,
 		}))
 	}
 	// 商家域挂在同一页面会话之上：归属由会话推导出的商家给定，读与写都按商家收敛，
-	// 页面登记出来的行与管理面登记出来的行写同一张表。
+	// 页面登记出来的行与管理面登记出来的行写同一张表。存储层不满足管理面数据面时
+	// 出账依赖为 nil，只有对账单端点回 500，其余商家域端点不受影响。
 	mux.Handle(partner.PathPrefix, partner.NewHandler(partner.Options{
-		Sessions: webAuth,
-		Store:    st,
+		Sessions:    webAuth,
+		Store:       st,
+		Settlements: settlements,
 	}))
 	mux.HandleFunc("/", notFoundJSON)
 

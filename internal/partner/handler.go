@@ -169,6 +169,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleCredentialAction(w, r)
 	case r.URL.Path == UsageStatsPath:
 		h.handleUsageStats(w, r)
+	case r.URL.Path == SettlementPath:
+		h.handleSettlement(w, r)
 	default:
 		webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
 	}
