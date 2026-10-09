@@ -54,4 +54,45 @@ describe('request', () => {
       (err: unknown) => err instanceof ApiError && err.code === Code.Internal,
     );
   });
+
+  it('429 时把 Retry-After 秒数带进 ApiError', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      headers: new Headers({ 'Retry-After': '30' }),
+      json: async () => ({
+        code: Code.TooManyRequests,
+        data: null,
+        message: '请求过于频繁',
+        page: null,
+        size: null,
+        total: null,
+      }),
+    }));
+    await expect(request('/api/v1/user/account?recent=10')).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof ApiError && err.code === Code.TooManyRequests && err.retryAfter === 30,
+    );
+  });
+
+  it('Retry-After 不是秒数（HTTP-date）或缺失时为 null', async () => {
+    const cases: (Headers | undefined)[] = [
+      new Headers({ 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' }),
+      undefined,
+    ];
+    for (const headers of cases) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        headers,
+        json: async () => ({
+          code: Code.TooManyRequests,
+          data: null,
+          message: '请求过于频繁',
+          page: null,
+          size: null,
+          total: null,
+        }),
+      }));
+      await expect(request('/api/v1/user/account?recent=10')).rejects.toSatisfy(
+        (err: unknown) => err instanceof ApiError && err.retryAfter === null,
+      );
+    }
+  });
 });

@@ -31,9 +31,17 @@ export const Code = {
 export class ApiError extends Error {
   readonly code: number;
 
-  constructor(code: number, message: string) {
+  /**
+   * Retry-After 秒数；服务端没给出该头时为 null。
+   *
+   * 限流（429）的等待时间由它推算，页面据此提示，不做自动重试。
+   */
+  readonly retryAfter: number | null;
+
+  constructor(code: number, message: string, retryAfter: number | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.retryAfter = retryAfter;
   }
 }

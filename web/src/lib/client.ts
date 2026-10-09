@@ -1,3 +1,4 @@
+import { parseUnsignedInt } from './decimal';
 import { ApiError, Code, type Envelope } from './envelope';
 import { accessToken, clearSession, refreshToken, saveAccess } from './session';
 
@@ -10,7 +11,7 @@ export async function request<T>(
   path: string,
   init: RequestInit & { skipRefresh?: boolean } = {},
 ): Promise<T> {
-  return unwrap(await requestEnvelope<T>(path, init));
+  return unwrap(await sendWithRefresh<T>(path, init));
 }
 
 /**
@@ -23,21 +24,35 @@ export async function requestEnvelope<T>(
   path: string,
   init: RequestInit & { skipRefresh?: boolean } = {},
 ): Promise<Envelope<T>> {
-  const env = await send<T>(path, init);
+  return (await sendWithRefresh<T>(path, init)).env;
+}
+
+/** sendWithRefresh 发一次请求，并在会话过期时用刷新令牌换发一次后重放原请求。 */
+async function sendWithRefresh<T>(
+  path: string,
+  init: RequestInit & { skipRefresh?: boolean },
+): Promise<Sent<T>> {
+  const sent = await send<T>(path, init);
 
   // 会话过期：先尝试用刷新令牌换发一次，成功则重放原请求，失败清会话回登录。
   // 刷新端点自身不重放，避免递归。
-  if (env.code === Code.Unauthorized && !init.skipRefresh && path !== REFRESH_PATH) {
+  if (sent.env.code === Code.Unauthorized && !init.skipRefresh && path !== REFRESH_PATH) {
     if (await refreshOnce()) {
       return send<T>(path, init);
     }
     clearSession();
   }
-  return env;
+  return sent;
+}
+
+/** Sent 是一次请求的结果：信封，外加响应头里可用的重试提示。 */
+interface Sent<T> {
+  env: Envelope<T>;
+  retryAfter: number | null;
 }
 
 /** send 执行 fetch 并解析信封；非 JSON 响应（如反代错误页）按 500 处理。 */
-async function send<T>(path: string, init: RequestInit): Promise<Envelope<T>> {
+async function send<T>(path: string, init: RequestInit): Promise<Sent<T>> {
   const headers = new Headers(init.headers);
   headers.set('Accept', 'application/json');
   if (init.body !== undefined && !headers.has('Content-Type')) {
@@ -54,19 +69,34 @@ async function send<T>(path: string, init: RequestInit): Promise<Envelope<T>> {
   } catch {
     throw new ApiError(Code.Internal, '网络异常，请稍后重试');
   }
+  const retryAfter = readRetryAfter(res);
   try {
-    return (await res.json()) as Envelope<T>;
+    return { env: (await res.json()) as Envelope<T>, retryAfter };
   } catch {
     throw new ApiError(Code.Internal, '服务端错误');
   }
 }
 
-/** unwrap 按业务码返回 data 或抛错。 */
-function unwrap<T>(env: Envelope<T>): T {
-  if (env.code !== Code.OK) {
-    throw new ApiError(env.code, env.message);
+/**
+ * readRetryAfter 取响应头里的 Retry-After 秒数。
+ *
+ * 只认秒数形态：HTTP-date 形态的取值不落成等待时长，交回页面按「稍后重试」提示，
+ * 避免把一个解析不了的头显示成一个具体秒数。
+ */
+function readRetryAfter(res: Response): number | null {
+  const raw = res.headers?.get('Retry-After');
+  if (raw === undefined || raw === null) {
+    return null;
   }
-  return env.data as T;
+  return parseUnsignedInt(raw);
+}
+
+/** unwrap 按业务码返回 data 或抛错。 */
+function unwrap<T>(sent: Sent<T>): T {
+  if (sent.env.code !== Code.OK) {
+    throw new ApiError(sent.env.code, sent.env.message, sent.retryAfter);
+  }
+  return sent.env.data as T;
 }
 
 /** refreshOnce 用刷新令牌换发访问令牌；返回是否成功。 */
