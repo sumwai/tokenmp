@@ -45,8 +45,8 @@ var ErrInvalidOTP = errors.New("auth: 验证码无效")
 // mailer 未配置时在任何查询之前返回 ErrMailerNotConfigured：
 // 先查后判会让「邮箱存在与否」通过 500 与 200 的差异泄漏出去。
 func (s *Service) SendOtp(ctx context.Context, addr, email, purpose string) error {
-	if !s.limiter.allow("otp:" + addr) {
-		return ErrRateLimited
+	if err := s.limit("otp:" + addr); err != nil {
+		return err
 	}
 	if purpose != otpPurposeReset && purpose != otpPurposeErase {
 		return ErrInvalidParams
@@ -92,8 +92,8 @@ func (s *Service) SendOtp(ctx context.Context, addr, email, purpose string) erro
 
 // Reset 用 OTP 校验后重置密码，并撤销该账号全部会话。
 func (s *Service) Reset(ctx context.Context, addr, email, otp, passwordCipher, fingerprint string) error {
-	if !s.limiter.allow("reset:" + addr) {
-		return ErrRateLimited
+	if err := s.limit("reset:" + addr); err != nil {
+		return err
 	}
 	email = strings.TrimSpace(email)
 	if err := validateEmail(email); err != nil {
@@ -165,8 +165,8 @@ func (s *Service) ChangePassword(ctx context.Context, accessToken,
 
 // Erase 用 OTP 校验后注销账号：抹除密码与第三方绑定、撤销全部会话。
 func (s *Service) Erase(ctx context.Context, addr, accessToken, otp string) error {
-	if !s.limiter.allow("erase:" + addr) {
-		return ErrRateLimited
+	if err := s.limit("erase:" + addr); err != nil {
+		return err
 	}
 	row, err := s.store.WebSessionByAccess(ctx, hashToken(accessToken))
 	if err != nil || !sessionUsable(row, s.opts.Now()) {

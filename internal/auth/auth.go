@@ -55,6 +55,20 @@ var (
 	ErrRateLimited = errors.New("auth: 触发频率限制")
 )
 
+// rateLimitError 是带退避提示的限频错误。
+//
+// 哨兵仍是 ErrRateLimited：错误映射只关心「是不是限频」，提示的有无由 HTTP 层用
+// errors.As 单独取，写进 Retry-After 响应头（契约在 429 上声明了该头）。
+type rateLimitError struct {
+	retryAfter time.Duration
+}
+
+// Error 与 Unwrap 都指向哨兵，errors.Is(err, ErrRateLimited) 不受包装影响。
+func (e *rateLimitError) Error() string { return ErrRateLimited.Error() }
+
+// Unwrap 让 errors.Is / errors.As 能穿过本类型看到哨兵。
+func (e *rateLimitError) Unwrap() error { return ErrRateLimited }
+
 // Store 是页面认证依赖的数据访问面。
 //
 // 只列本包真正用到的动作；行类型由 internal/store 定义，本包不重复声明。

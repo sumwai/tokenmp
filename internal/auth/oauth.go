@@ -172,8 +172,8 @@ func (s *Service) OAuthAuthorizeURL(providerID string) (*oauthAuthorizeData, err
 
 // OAuthExchange 用授权码换取会话：校验 state、换 token、取用户信息、归并账号。
 func (s *Service) OAuthExchange(ctx context.Context, addr, providerID, code, state string) (*sessionTokens, error) {
-	if !s.limiter.allow("oauth:" + addr) {
-		return nil, ErrRateLimited
+	if err := s.limit("oauth:" + addr); err != nil {
+		return nil, err
 	}
 	p := s.oauthProvider(providerID)
 	if p == nil {
