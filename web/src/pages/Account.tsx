@@ -215,7 +215,7 @@ export function Account() {
                     {formatUnitAmount(bucket.unit, bucket.remaining)}
                   </Td>
                   <Td>{label(FALLBACK_LABEL, bucket.fallback)}</Td>
-                  <Td align="right">
+                  <Td align="right" numeric>
                     {bucket.expires_at === null ? '不过期' : formatTimestamp(bucket.expires_at)}
                   </Td>
                 </tr>
@@ -257,7 +257,7 @@ export function Account() {
                     {formatDecimal(quota.limit, QUOTA_SCALE)}
                   </Td>
                   <Td>{label(ACTION_LABEL, quota.action)}</Td>
-                  <Td align="right">
+                  <Td align="right" numeric>
                     {quota.resets_at === null ? '不重置' : formatTimestamp(quota.resets_at)}
                   </Td>
                 </tr>
@@ -411,7 +411,7 @@ function Th({ children, align = 'left' }: { children: ReactNode; align?: 'left' 
   );
 }
 
-/** Td 是数据单元格；numeric 打开等宽数字，使数字列按位对齐。 */
+/** Td 是数据单元格；numeric 打开等宽数字，使数字与时间列按位对齐。 */
 function Td({
   children,
   align = 'left',
