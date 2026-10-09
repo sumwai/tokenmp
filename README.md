@@ -113,7 +113,7 @@ internal/identity/      页面身份与能力的唯一出处：身份叠加展�
 internal/me/            账户自助查询端点：摘要、包存量、限额窗口与最近流水
 internal/user/          /api/v1/user/* 用户级业务端点与控制台清单
 internal/partner/       /api/v1/partner/* 商家域端点：上游账号、名下用量与分账对账单
-internal/adminapi/      /api/v1/admin/* 管理面只读清单端点
+internal/adminapi/      /api/v1/admin/* 管理面端点：只读清单与上游账号配置动作
 internal/webapi/        页面通信的公共部分：六字段信封与会话令牌解析
 internal/route/         选路候选链：加权随机首选与同协议／跨协议分段拼链
 internal/failure/       上游失败处理的唯一出处：诊断、处置与动作

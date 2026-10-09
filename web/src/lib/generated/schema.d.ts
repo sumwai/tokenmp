@@ -577,6 +577,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/merchants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 商家清单
+         * @description 列出全部商家，与 `tokenmp admin merchant list --json` 同一份行数据。
+         *     渠道与凭据的写入都要给出归属商家，页面据此取候选；平台自营与入驻商家
+         *     都是这里的行，`kind` 只是数据。请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminMerchants"];
+        put?: never;
+        /**
+         * 新建商家
+         * @description 新建一个商家，与 `tokenmp admin merchant create` 调用同一份业务实现。新建一律
+         *     `active`，停用是独立动作。平台自营与入驻商家走同一条路径，`kind` 只是数据。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["createAdminMerchant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/merchants/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用商家
+         * @description 按主键置停用位，与 `tokenmp admin merchant disable` 同一动作。动作幂等；
+         *     行不因此被删除，名下渠道、凭据与历史流水仍指向它。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["disableAdminMerchant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/merchants/{id}/owner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 绑定商家归属主体
+         * @description 把商家绑定到一个登录主体，与 `tokenmp admin merchant set-owner` 同一动作。
+         *     归属是商家域（`/api/v1/partner/*`）唯一的作用域来源：没有绑定的商家在页面上没有
+         *     主人，绑定后该登录主体才能自助管理它的上游账号。归属一对一，重复绑定返 `code=409`。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["setAdminMerchantOwner"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/channels": {
         parameters: {
             query?: never;
@@ -592,7 +665,62 @@ export interface paths {
          */
         get: operations["listAdminChannels"];
         put?: never;
-        post?: never;
+        /**
+         * 新建渠道
+         * @description 新建一条上游渠道，与 `tokenmp admin channel create` 调用同一份业务实现。
+         *     新建一律启用，启用位由后续动作改动。`priority` / `weight` 缺省取 100：0 会让渠道
+         *     永远排在最后，因此不作为「未配置」的取值。`cred_group` 只是分组名，凭据要另行写入。
+         *
+         *     `config` 是渠道级扩展配置原文（静态请求头与探针声明），必须是 JSON 对象；
+         *     非对象、`headers` 不是字符串到字符串的对象、或占用了网关自身请求头的头名，
+         *     都在写入时返回 `code=400`（读取侧对这些情况是宽容的，写入口是唯一能显式拦下的地方）。
+         *
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["createAdminChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/channels/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用渠道
+         * @description 按主键置启用位，与 `tokenmp admin channel enable` 同一动作。动作幂等：重复调用与
+         *     对不存在的 id 调用都返回成功。停用是运营动作，误停之后靠本端点原地恢复。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["enableAdminChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/channels/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用渠道
+         * @description 按主键置停用位，与 `tokenmp admin channel disable` 同一动作。动作幂等；行不因此
+         *     被删除，流水与历史映射仍指向它。请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["disableAdminChannel"];
         delete?: never;
         options?: never;
         head?: never;
@@ -614,7 +742,61 @@ export interface paths {
          */
         get: operations["listAdminCredentials"];
         put?: never;
-        post?: never;
+        /**
+         * 写入上游凭据
+         * @description 写入一行上游凭据，与 `tokenmp admin credential add` 调用同一份业务实现，
+         *     secret 以 `{"api_key": …}` 承载。请求体里的 `api_key` 是明文，只在写入这一条
+         *     路径出现；写入响应不回显明文，读取永远只有脱敏前缀。
+         *
+         *     订阅型上游的 OAuth 登录需要设备码轮询等交互过程，不是单次请求能完成的动作，
+         *     不在本端点：它仍走 `tokenmp admin credential oauth-login`。
+         *
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["createAdminCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/credentials/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启用上游凭据
+         * @description 按主键置启用位，与 `tokenmp admin credential enable` 同一动作。动作幂等；凭据轮换
+         *     与误停后的恢复都靠它，不重写一行（重写会让凭据 id 与历史流水脱钩）。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["enableAdminCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/credentials/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用上游凭据
+         * @description 按主键置停用位，与 `tokenmp admin credential disable` 同一动作。动作幂等；
+         *     停用后的凭据不再被选路取用。请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["disableAdminCredential"];
         delete?: never;
         options?: never;
         head?: never;
@@ -635,8 +817,38 @@ export interface paths {
          *     请求方须持有管理面能力，越权返回 `code=403`。
          */
         get: operations["listAdminModelMaps"];
-        put?: never;
+        /**
+         * 写入渠道模型映射
+         * @description 写入或覆盖一条渠道模型映射，与 `tokenmp admin model-map set` 调用同一份业务实现。
+         *     写入按 `(channel_id, model)` 幂等：同一组合重复写入只覆盖取值，不新增行。
+         *     因此不返回行 id，写入后从清单取。
+         *
+         *     `price_multiplier` 缺省取 1；`request_overrides` 必须是 JSON 对象，
+         *     转发时叠加到请求体上。请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        put: operations["setAdminModelMap"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/modelmaps/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停用渠道模型映射
+         * @description 按主键置停用位，与 `tokenmp admin model-map disable` 同一动作。动作幂等；
+         *     停用后该模型名不再路由到这条渠道。请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        post: operations["disableAdminModelMap"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1647,6 +1859,116 @@ export interface components {
         PageOfAdminModelMap: {
             items: components["schemas"]["AdminModelMap"][];
         };
+        /** @description 一个商家，字段与 `tokenmp admin merchant list --json` 的行一致。 */
+        AdminMerchant: {
+            /** Format: int64 */
+            id: number;
+            /** @description 商家编码，平台内唯一。 */
+            code: string;
+            name: string;
+            /**
+             * @description 商家类型：`platform` 平台自营，`partner` 入驻商家。
+             * @enum {string}
+             */
+            kind: "platform" | "partner";
+            /** @description 商家状态：`active` / `disabled`。 */
+            status: string;
+            /**
+             * Format: int64
+             * @description 绑定的登录主体 id；未绑定时为 `null`（平台自营或尚未绑定）。
+             */
+            owner_user_id?: number | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        PageOfAdminMerchant: {
+            items: components["schemas"]["AdminMerchant"][];
+        };
+        /** @description 新建商家的请求体。 */
+        CreateAdminMerchantRequest: {
+            /** @description 商家编码，平台内唯一；重复返 `code=409`。 */
+            code: string;
+            name: string;
+            /** @enum {string} */
+            kind: "platform" | "partner";
+        };
+        /** @description 绑定商家归属的请求体。 */
+        SetAdminMerchantOwnerRequest: {
+            /**
+             * Format: int64
+             * @description 登录主体 id；归属一对一，已被其它商家占用时返 `code=409`。
+             */
+            user_id: number;
+        };
+        /** @description 新建渠道的请求体。 */
+        CreateAdminChannelRequest: {
+            /**
+             * Format: int64
+             * @description 归属商家 id，取自商家清单。
+             */
+            merchant_id: number;
+            name: string;
+            /** @description 厂商标识，如 `openai` / `anthropic` / `gemini`；仅供展示与对账分组。 */
+            vendor?: string;
+            /**
+             * @description 渠道的线协议类型。
+             * @enum {string}
+             */
+            type: "openai_chat" | "openai_responses" | "anthropic_messages" | "gemini_generate";
+            /** @description 凭据分组名；本端点只建立分组名，凭据另行写入。 */
+            cred_group: string;
+            /** @description 上游基地址，只填到端点段之前。 */
+            base_url: string;
+            /**
+             * @description 凭据注入形态；省略时按协议现状注入。
+             * @enum {string}
+             */
+            credential_style?: "authorization" | "x-api-key" | "x-goog-api-key" | "query";
+            /**
+             * @description 渠道级扩展配置原文：`headers` 是静态请求头（字符串到字符串的对象，不得占用
+             *     网关自身的头名），其余键供探针声明。省略时无扩展配置。
+             */
+            config?: {
+                [key: string]: unknown;
+            };
+            /** @description 选路优先级，值小者优先；省略取 100。 */
+            priority?: number;
+            /** @description 同优先级内的加权轮询权重；省略取 100。 */
+            weight?: number;
+        };
+        /** @description 写入上游凭据的请求体。 */
+        CreateAdminCredentialRequest: {
+            /**
+             * Format: int64
+             * @description 归属商家 id。
+             */
+            merchant_id: number;
+            /** @description 凭据分组，与渠道的 `cred_group` 对应。 */
+            cred_group: string;
+            name: string;
+            /** @description 上游凭据明文，只在写入这一条路径出现；响应不回显。 */
+            api_key: string;
+        };
+        /** @description 写入渠道模型映射的请求体；按 `(channel_id, model)` 幂等。 */
+        SetAdminModelMapRequest: {
+            /** Format: int64 */
+            channel_id: number;
+            /** @description 客户端请求的模型名。 */
+            model: string;
+            /** @description 转发给该渠道时替换成的模型名。 */
+            upstream_model: string;
+            /** @description 该映射的价格倍率，十进制字符串；省略取 1。 */
+            price_multiplier?: string;
+            /** @description 转发时叠加到请求体上的字段；省略时不叠加。 */
+            request_overrides?: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description 写入动作的结果：受影响行的主键。 */
+        AdminResourceID: {
+            /** Format: int64 */
+            id: number;
+        };
         /** @description 一个账户，字段与 `tokenmp admin account list --json` 的行一致。 */
         AdminAccount: {
             /** Format: int64 */
@@ -1945,6 +2267,11 @@ export interface components {
         AdminScopeIDFilter: number;
         /** @description 资源主键；不属于本商家的取值一律按不存在处理。 */
         ResourceID: number;
+        /**
+         * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+         *     任何行。
+         */
+        AdminResourceID: number;
     };
     requestBodies: never;
     headers: {
@@ -2784,6 +3111,133 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listAdminMerchants: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 商家清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminMerchant"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAdminMerchant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdminMerchantRequest"];
+            };
+        };
+        responses: {
+            /** @description 新建成功，`data.id` 是新行主键。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["AdminResourceID"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disableAdminMerchant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    setAdminMerchantOwner: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetAdminMerchantOwnerRequest"];
+            };
+        };
+        responses: {
+            /** @description 已绑定。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listAdminChannels: {
         parameters: {
             query?: {
@@ -2807,6 +3261,97 @@ export interface operations {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["PageOfAdminChannel"];
                     };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createAdminChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdminChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description 新建成功，`data.id` 是新行主键。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["AdminResourceID"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    enableAdminChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disableAdminChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2846,6 +3391,97 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    createAdminCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAdminCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description 写入成功，`data.id` 是新行主键。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["AdminResourceID"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    enableAdminCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disableAdminCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listAdminModelMaps: {
         parameters: {
             query?: {
@@ -2869,6 +3505,65 @@ export interface operations {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["PageOfAdminModelMap"];
                     };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    setAdminModelMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetAdminModelMapRequest"];
+            };
+        };
+        responses: {
+            /** @description 已写入。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    disableAdminModelMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description 管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+                 *     任何行。
+                 */
+                id: components["parameters"]["AdminResourceID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已置位。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
                 };
             };
             400: components["responses"]["BadRequest"];

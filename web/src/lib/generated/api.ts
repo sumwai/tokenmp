@@ -16,6 +16,18 @@ export const api = {
   changePassword: (init: ApiInit<"/api/v1/auth/password", "put">) =>
     apiRequest("/api/v1/auth/password", "put", init),
 
+  /** 新建渠道 */
+  createAdminChannel: (init: ApiInit<"/api/v1/admin/channels", "post">) =>
+    apiRequest("/api/v1/admin/channels", "post", init),
+
+  /** 写入上游凭据 */
+  createAdminCredential: (init: ApiInit<"/api/v1/admin/credentials", "post">) =>
+    apiRequest("/api/v1/admin/credentials", "post", init),
+
+  /** 新建商家 */
+  createAdminMerchant: (init: ApiInit<"/api/v1/admin/merchants", "post">) =>
+    apiRequest("/api/v1/admin/merchants", "post", init),
+
   /** 登记上游渠道 */
   createPartnerChannel: (init: ApiInit<"/api/v1/partner/channels", "post">) =>
     apiRequest("/api/v1/partner/channels", "post", init),
@@ -32,6 +44,22 @@ export const api = {
   createUserOrder: (init: ApiInit<"/api/v1/user/orders", "post">) =>
     apiRequest("/api/v1/user/orders", "post", init),
 
+  /** 停用渠道 */
+  disableAdminChannel: (init: ApiInit<"/api/v1/admin/channels/{id}/disable", "post">) =>
+    apiRequest("/api/v1/admin/channels/{id}/disable", "post", init),
+
+  /** 停用上游凭据 */
+  disableAdminCredential: (init: ApiInit<"/api/v1/admin/credentials/{id}/disable", "post">) =>
+    apiRequest("/api/v1/admin/credentials/{id}/disable", "post", init),
+
+  /** 停用商家 */
+  disableAdminMerchant: (init: ApiInit<"/api/v1/admin/merchants/{id}/disable", "post">) =>
+    apiRequest("/api/v1/admin/merchants/{id}/disable", "post", init),
+
+  /** 停用渠道模型映射 */
+  disableAdminModelMap: (init: ApiInit<"/api/v1/admin/modelmaps/{id}/disable", "post">) =>
+    apiRequest("/api/v1/admin/modelmaps/{id}/disable", "post", init),
+
   /** 停用上游渠道 */
   disablePartnerChannel: (init: ApiInit<"/api/v1/partner/channels/{id}/disable", "post">) =>
     apiRequest("/api/v1/partner/channels/{id}/disable", "post", init),
@@ -39,6 +67,14 @@ export const api = {
   /** 停用上游凭据 */
   disablePartnerCredential: (init: ApiInit<"/api/v1/partner/credentials/{id}/disable", "post">) =>
     apiRequest("/api/v1/partner/credentials/{id}/disable", "post", init),
+
+  /** 启用渠道 */
+  enableAdminChannel: (init: ApiInit<"/api/v1/admin/channels/{id}/enable", "post">) =>
+    apiRequest("/api/v1/admin/channels/{id}/enable", "post", init),
+
+  /** 启用上游凭据 */
+  enableAdminCredential: (init: ApiInit<"/api/v1/admin/credentials/{id}/enable", "post">) =>
+    apiRequest("/api/v1/admin/credentials/{id}/enable", "post", init),
 
   /** 启用上游渠道 */
   enablePartnerChannel: (init: ApiInit<"/api/v1/partner/channels/{id}/enable", "post">) =>
@@ -112,6 +148,10 @@ export const api = {
   listAdminCredentials: (init?: ApiInit<"/api/v1/admin/credentials", "get">) =>
     apiRequest("/api/v1/admin/credentials", "get", init),
 
+  /** 商家清单 */
+  listAdminMerchants: (init?: ApiInit<"/api/v1/admin/merchants", "get">) =>
+    apiRequest("/api/v1/admin/merchants", "get", init),
+
   /** 渠道模型映射清单 */
   listAdminModelMaps: (init?: ApiInit<"/api/v1/admin/modelmaps", "get">) =>
     apiRequest("/api/v1/admin/modelmaps", "get", init),
@@ -183,6 +223,14 @@ export const api = {
   /** 发送一次性验证码 */
   sendAuthOtp: (init: ApiInit<"/api/v1/auth/otp", "post">) =>
     apiRequest("/api/v1/auth/otp", "post", init),
+
+  /** 绑定商家归属主体 */
+  setAdminMerchantOwner: (init: ApiInit<"/api/v1/admin/merchants/{id}/owner", "post">) =>
+    apiRequest("/api/v1/admin/merchants/{id}/owner", "post", init),
+
+  /** 写入渠道模型映射 */
+  setAdminModelMap: (init: ApiInit<"/api/v1/admin/modelmaps", "put">) =>
+    apiRequest("/api/v1/admin/modelmaps", "put", init),
 
   /** 登录 */
   signin: (init: ApiInit<"/api/v1/auth/signin", "post">) =>

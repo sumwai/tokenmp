@@ -40,6 +40,7 @@ func (f *fakeSessions) SessionSubject(_ context.Context, token string) (uint64, 
 
 // fakeLister 记录最后一次调用的过滤参数，并返回固定行。
 type fakeLister struct {
+	merchants     []store.Merchant
 	channels      []store.Channel
 	credentials   []admin.CredentialView
 	modelMaps     []store.ModelMap
@@ -58,6 +59,10 @@ type fakeLister struct {
 	lastSince     time.Time
 	// lastSettlement 保存最后一次出账查询，供账期与作用域断言。
 	lastSettlement admin.SettlementQuery
+}
+
+func (f *fakeLister) ListMerchants(context.Context) ([]store.Merchant, error) {
+	return f.merchants, f.err
 }
 
 func (f *fakeLister) ListChannels(context.Context) ([]store.Channel, error) {
@@ -162,8 +167,14 @@ func metaOf(t *testing.T, env map[string]json.RawMessage) (page, size, total int
 
 // listPaths 是全部只读清单路径，按契约顺序排列。
 var listPaths = []string{
-	ChannelsPath, CredentialsPath, ModelMapsPath, AccountsPath,
+	MerchantsPath, ChannelsPath, CredentialsPath, ModelMapsPath, AccountsPath,
 	PricingPath, QuotasPath, AdjustmentsPath, UsagePath, SettlementsPath,
+}
+
+// readOnlyPaths 是没有写入口的清单路径。渠道、凭据、模型映射与商家各自有配置动作，
+// 对它们发写方法得到的是动作分派的结果，不在此列。
+var readOnlyPaths = []string{
+	AccountsPath, PricingPath, QuotasPath, AdjustmentsPath, UsagePath, SettlementsPath,
 }
 
 // listItemKeys 是各清单里「一行」的标识字段名，供数条目用。
@@ -202,9 +213,10 @@ func TestForbiddenForNonAdmin(t *testing.T) {
 	}
 }
 
-// TestAdminListsReturnItems 断言管理员对八组清单都得到 200 与 items 数组。
+// TestAdminListsReturnItems 断言管理员对每组清单都得到 200 与 items 数组。
 func TestAdminListsReturnItems(t *testing.T) {
 	h, _, lister := newEnv()
+	lister.merchants = []store.Merchant{{ID: 10, Code: "m", Name: "n", Kind: store.MerchantKindPlatform, Status: store.StatusActive}}
 	lister.channels = []store.Channel{{ID: 1, MerchantID: 2, Name: "c", Type: store.ChannelType("openai-chat")}}
 	lister.credentials = []admin.CredentialView{{ID: 3, MerchantID: 2, CredGroup: "g", Kind: "api", Prefix: "sk-…"}}
 	lister.modelMaps = []store.ModelMap{{ID: 4, ChannelID: 1, Model: "m", UpstreamModel: "u", PriceMultiplier: "1"}}
@@ -300,10 +312,10 @@ func TestBadPaging(t *testing.T) {
 	}
 }
 
-// TestRejectsNonGet 断言写方法回 400：只读清单没有写入口。
+// TestRejectsNonGet 断言没有写入口的清单回 400。
 func TestRejectsNonGet(t *testing.T) {
 	h, _, _ := newEnv()
-	for _, path := range listPaths {
+	for _, path := range readOnlyPaths {
 		status, env := do(t, h, http.MethodPost, path, "token")
 		if status != http.StatusBadRequest || codeOf(t, env) != webapi.CodeBadRequest {
 			t.Errorf("POST %s 应 400: %d %s", path, status, env)
@@ -314,7 +326,7 @@ func TestRejectsNonGet(t *testing.T) {
 // TestUnknownPath 断言子树内未声明的路径回 404。
 func TestUnknownPath(t *testing.T) {
 	h, _, _ := newEnv()
-	status, env := do(t, h, http.MethodGet, "/api/v1/admin/merchants", "token")
+	status, env := do(t, h, http.MethodGet, "/api/v1/admin/nope", "token")
 	if status != http.StatusNotFound || codeOf(t, env) != webapi.CodeNotFound {
 		t.Fatalf("未声明路径应 404: %d %s", status, env)
 	}

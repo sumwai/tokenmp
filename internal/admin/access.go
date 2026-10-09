@@ -130,7 +130,7 @@ func (s *Service) SetModelMap(ctx context.Context, in ModelMapInput) (uint64, er
 	if len(overrides) > 0 {
 		var patch map[string]json.RawMessage
 		if err := json.Unmarshal(overrides, &patch); err != nil || patch == nil {
-			return 0, fmt.Errorf("admin: 模型映射 overrides 必须是 JSON 对象")
+			return 0, invalidf("admin: 模型映射 overrides 必须是 JSON 对象")
 		}
 	}
 	return s.store.UpsertModelMap(ctx, store.ModelMap{

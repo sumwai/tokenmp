@@ -257,10 +257,10 @@ func requirePositiveDecimal(field, value string) error {
 	}
 	parsed, err := parseDecimal(value)
 	if err != nil {
-		return fmt.Errorf("admin: %s 不是合法数字 %q", field, value)
+		return invalidf("admin: %s 不是合法数字 %q", field, value)
 	}
 	if !parsed.GreaterThan(decimal.Zero) {
-		return fmt.Errorf("admin: %s 必须为正数，得到 %s: %w", field, value, errNotPositive)
+		return invalidf("admin: %s 必须为正数，得到 %s: %s", field, value, errNotPositive)
 	}
 	return nil
 }

@@ -67,9 +67,11 @@ info:
     - `/api/v1/partner/*`：商家面。作用域由会话推导出的商家给定（`merchant.owner_user_id`），
       不接受商家 id 参数；上游账号（渠道与凭据）的自助登记、启停与列表，以及名下渠道的
       调用量与应扣量都挂在这里。非本商家的资源一律 `404`，不以 403 区分存在性。
-    - `/api/v1/admin/*`：管理面。已定义平台管理员的只读清单（渠道、凭据、模型映射、
-      账户、价格、限额、调账与流水），字段与 `tokenmp admin <组> list --json` 的行一致；
-      动作类端点尚未定义。请求方须持有管理面能力，越权返回 `code=403`。
+    - `/api/v1/admin/*`：管理面。平台管理员的只读清单（渠道、凭据、模型映射、商家、
+      账户、价格、限额、调账与流水）与上游账号的配置动作（商家、渠道、凭据、模型映射）。
+      清单字段与 `tokenmp admin <组> list --json` 的行一致；配置动作与 `tokenmp admin`
+      的同名子命令调用同一份业务实现，页面与 CLI 不会各算一套。请求方须持有管理面能力，
+      越权返回 `code=403`。
 servers:
   - url: http://localhost:8080
     description: 默认监听地址来自 `TOKENMP_LISTEN`，未配置时为 `:8080`。
@@ -82,7 +84,7 @@ tags:
   - name: user
     description: 用户级业务数据：账户概览、密钥、用量、请求记录与模型目录
   - name: admin
-    description: 管理面只读清单：渠道、凭据、模型映射、账户、价格、限额、调账与流水
+    description: 管理面：清单与上游账号的配置动作（商家、渠道、凭据、模型映射）
   - name: partner
     description: 商家域：上游账号（渠道与凭据）的自助管理与名下调用量
 
@@ -1044,6 +1046,138 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/admin/merchants:
+    get:
+      tags: [admin]
+      summary: 商家清单
+      description: |
+        列出全部商家，与 `tokenmp admin merchant list --json` 同一份行数据。
+        渠道与凭据的写入都要给出归属商家，页面据此取候选；平台自营与入驻商家
+        都是这里的行，`kind` 只是数据。请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: listAdminMerchants
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: 商家清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PageOfAdminMerchant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [admin]
+      summary: 新建商家
+      description: |
+        新建一个商家，与 `tokenmp admin merchant create` 调用同一份业务实现。新建一律
+        `active`，停用是独立动作。平台自营与入驻商家走同一条路径，`kind` 只是数据。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: createAdminMerchant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdminMerchantRequest"
+      responses:
+        "200":
+          description: 新建成功，`data.id` 是新行主键。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AdminResourceID"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/merchants/{id}/disable:
+    post:
+      tags: [admin]
+      summary: 停用商家
+      description: |
+        按主键置停用位，与 `tokenmp admin merchant disable` 同一动作。动作幂等；
+        行不因此被删除，名下渠道、凭据与历史流水仍指向它。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: disableAdminMerchant
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/merchants/{id}/owner:
+    post:
+      tags: [admin]
+      summary: 绑定商家归属主体
+      description: |
+        把商家绑定到一个登录主体，与 `tokenmp admin merchant set-owner` 同一动作。
+        归属是商家域（`/api/v1/partner/*`）唯一的作用域来源：没有绑定的商家在页面上没有
+        主人，绑定后该登录主体才能自助管理它的上游账号。归属一对一，重复绑定返 `code=409`。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: setAdminMerchantOwner
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetAdminMerchantOwnerRequest"
+      responses:
+        "200":
+          description: 已绑定。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/admin/channels:
     get:
       tags: [admin]
@@ -1068,6 +1202,101 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/PageOfAdminChannel"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [admin]
+      summary: 新建渠道
+      description: |
+        新建一条上游渠道，与 `tokenmp admin channel create` 调用同一份业务实现。
+        新建一律启用，启用位由后续动作改动。`priority` / `weight` 缺省取 100：0 会让渠道
+        永远排在最后，因此不作为「未配置」的取值。`cred_group` 只是分组名，凭据要另行写入。
+
+        `config` 是渠道级扩展配置原文（静态请求头与探针声明），必须是 JSON 对象；
+        非对象、`headers` 不是字符串到字符串的对象、或占用了网关自身请求头的头名，
+        都在写入时返回 `code=400`（读取侧对这些情况是宽容的，写入口是唯一能显式拦下的地方）。
+
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: createAdminChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdminChannelRequest"
+      responses:
+        "200":
+          description: 新建成功，`data.id` 是新行主键。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AdminResourceID"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/channels/{id}/enable:
+    post:
+      tags: [admin]
+      summary: 启用渠道
+      description: |
+        按主键置启用位，与 `tokenmp admin channel enable` 同一动作。动作幂等：重复调用与
+        对不存在的 id 调用都返回成功。停用是运营动作，误停之后靠本端点原地恢复。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: enableAdminChannel
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/channels/{id}/disable:
+    post:
+      tags: [admin]
+      summary: 停用渠道
+      description: |
+        按主键置停用位，与 `tokenmp admin channel disable` 同一动作。动作幂等；行不因此
+        被删除，流水与历史映射仍指向它。请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: disableAdminChannel
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1109,6 +1338,100 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+    post:
+      tags: [admin]
+      summary: 写入上游凭据
+      description: |
+        写入一行上游凭据，与 `tokenmp admin credential add` 调用同一份业务实现，
+        secret 以 `{"api_key": …}` 承载。请求体里的 `api_key` 是明文，只在写入这一条
+        路径出现；写入响应不回显明文，读取永远只有脱敏前缀。
+
+        订阅型上游的 OAuth 登录需要设备码轮询等交互过程，不是单次请求能完成的动作，
+        不在本端点：它仍走 `tokenmp admin credential oauth-login`。
+
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: createAdminCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdminCredentialRequest"
+      responses:
+        "200":
+          description: 写入成功，`data.id` 是新行主键。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AdminResourceID"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/credentials/{id}/enable:
+    post:
+      tags: [admin]
+      summary: 启用上游凭据
+      description: |
+        按主键置启用位，与 `tokenmp admin credential enable` 同一动作。动作幂等；凭据轮换
+        与误停后的恢复都靠它，不重写一行（重写会让凭据 id 与历史流水脱钩）。
+        请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: enableAdminCredential
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/credentials/{id}/disable:
+    post:
+      tags: [admin]
+      summary: 停用上游凭据
+      description: |
+        按主键置停用位，与 `tokenmp admin credential disable` 同一动作。动作幂等；
+        停用后的凭据不再被选路取用。请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: disableAdminCredential
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/admin/modelmaps:
     get:
@@ -1134,6 +1457,66 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/PageOfAdminModelMap"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      tags: [admin]
+      summary: 写入渠道模型映射
+      description: |
+        写入或覆盖一条渠道模型映射，与 `tokenmp admin model-map set` 调用同一份业务实现。
+        写入按 `(channel_id, model)` 幂等：同一组合重复写入只覆盖取值，不新增行。
+        因此不返回行 id，写入后从清单取。
+
+        `price_multiplier` 缺省取 1；`request_overrides` 必须是 JSON 对象，
+        转发时叠加到请求体上。请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: setAdminModelMap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetAdminModelMapRequest"
+      responses:
+        "200":
+          description: 已写入。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/admin/modelmaps/{id}/disable:
+    post:
+      tags: [admin]
+      summary: 停用渠道模型映射
+      description: |
+        按主键置停用位，与 `tokenmp admin model-map disable` 同一动作。动作幂等；
+        停用后该模型名不再路由到这条渠道。请求方须持有管理面能力，越权返回 `code=403`。
+      operationId: disableAdminModelMap
+      parameters:
+        - $ref: "#/components/parameters/AdminResourceID"
+      responses:
+        "200":
+          description: 已置位。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2948,6 +3331,191 @@ components:
             $ref: "#/components/schemas/AdminModelMap"
       additionalProperties: false
 
+    AdminMerchant:
+      type: object
+      description: 一个商家，字段与 `tokenmp admin merchant list --json` 的行一致。
+      required: [id, code, name, kind, status, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        code:
+          type: string
+          description: 商家编码，平台内唯一。
+        name:
+          type: string
+        kind:
+          type: string
+          description: 商家类型：`platform` 平台自营，`partner` 入驻商家。
+          enum: [platform, partner]
+        status:
+          type: string
+          description: 商家状态：`active` / `disabled`。
+        owner_user_id:
+          type: [integer, "null"]
+          format: int64
+          description: 绑定的登录主体 id；未绑定时为 `null`（平台自营或尚未绑定）。
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PageOfAdminMerchant:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminMerchant"
+      additionalProperties: false
+
+    CreateAdminMerchantRequest:
+      type: object
+      description: 新建商家的请求体。
+      required: [code, name, kind]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 商家编码，平台内唯一；重复返 `code=409`。
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        kind:
+          type: string
+          enum: [platform, partner]
+      additionalProperties: false
+
+    SetAdminMerchantOwnerRequest:
+      type: object
+      description: 绑定商家归属的请求体。
+      required: [user_id]
+      properties:
+        user_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 登录主体 id；归属一对一，已被其它商家占用时返 `code=409`。
+      additionalProperties: false
+
+    CreateAdminChannelRequest:
+      type: object
+      description: 新建渠道的请求体。
+      required: [merchant_id, name, type, cred_group, base_url]
+      properties:
+        merchant_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 归属商家 id，取自商家清单。
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        vendor:
+          type: string
+          maxLength: 64
+          description: 厂商标识，如 `openai` / `anthropic` / `gemini`；仅供展示与对账分组。
+        type:
+          type: string
+          description: 渠道的线协议类型。
+          enum: [openai_chat, openai_responses, anthropic_messages, gemini_generate]
+        cred_group:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 凭据分组名；本端点只建立分组名，凭据另行写入。
+        base_url:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: 上游基地址，只填到端点段之前。
+        credential_style:
+          type: string
+          description: 凭据注入形态；省略时按协议现状注入。
+          enum: [authorization, x-api-key, x-goog-api-key, query]
+        config:
+          type: object
+          additionalProperties: true
+          description: |
+            渠道级扩展配置原文：`headers` 是静态请求头（字符串到字符串的对象，不得占用
+            网关自身的头名），其余键供探针声明。省略时无扩展配置。
+        priority:
+          type: integer
+          minimum: 1
+          description: 选路优先级，值小者优先；省略取 100。
+        weight:
+          type: integer
+          minimum: 1
+          description: 同优先级内的加权轮询权重；省略取 100。
+      additionalProperties: false
+
+    CreateAdminCredentialRequest:
+      type: object
+      description: 写入上游凭据的请求体。
+      required: [merchant_id, cred_group, name, api_key]
+      properties:
+        merchant_id:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 归属商家 id。
+        cred_group:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 凭据分组，与渠道的 `cred_group` 对应。
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        api_key:
+          type: string
+          minLength: 1
+          description: 上游凭据明文，只在写入这一条路径出现；响应不回显。
+      additionalProperties: false
+
+    SetAdminModelMapRequest:
+      type: object
+      description: 写入渠道模型映射的请求体；按 `(channel_id, model)` 幂等。
+      required: [channel_id, model, upstream_model]
+      properties:
+        channel_id:
+          type: integer
+          format: int64
+          minimum: 1
+        model:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 客户端请求的模型名。
+        upstream_model:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 转发给该渠道时替换成的模型名。
+        price_multiplier:
+          type: string
+          description: 该映射的价格倍率，十进制字符串；省略取 1。
+        request_overrides:
+          type: object
+          additionalProperties: true
+          description: 转发时叠加到请求体上的字段；省略时不叠加。
+      additionalProperties: false
+
+    AdminResourceID:
+      type: object
+      description: 写入动作的结果：受影响行的主键。
+      required: [id]
+      properties:
+        id:
+          type: integer
+          format: int64
+      additionalProperties: false
+
     AdminAccount:
       type: object
       description: 一个账户，字段与 `tokenmp admin account list --json` 的行一致。
@@ -3327,6 +3895,18 @@ components:
       in: path
       required: true
       description: 资源主键；不属于本商家的取值一律按不存在处理。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+
+    AdminResourceID:
+      name: id
+      in: path
+      required: true
+      description: |
+        管理面对象主键。动作按主键置位，不区分行是否存在：不存在的 id 不报错，也不影响
+        任何行。
       schema:
         type: integer
         format: int64

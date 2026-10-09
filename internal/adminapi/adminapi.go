@@ -1,4 +1,4 @@
-// Package adminapi 实现 /api/v1/admin/* 管理面只读清单端点。
+// Package adminapi 实现 /api/v1/admin/* 管理面端点：只读清单与上游账号的配置动作。
 //
 // 与 internal/user 的分工：user 端点的作用域由会话推导，只回答「这个主体自己的
 // 账户」；本包面向平台管理员，列的是跨主体、跨商家的运营对象，因此清单里的行带
@@ -7,9 +7,12 @@
 //
 // 读路径不自己拼 SQL：清单来自 internal/admin 的业务读取，字段与
 // `tokenmp admin <组> list --json` 的行一一对应，页面与 CLI 不会各算一套。
+// 配置动作同理：新增商家、渠道、凭据与模型映射调用 internal/admin 的同名业务动作，
+// 校验、默认值与派生计算只在那一处，本包只做请求解析、错误码翻译与响应写出。
 //
-// 本包只读：动作类端点（启停、发 key、调账、上架、调价）与需要交互过程的动作
-// 另批定义，见 docs/openapi-web.yaml 的路径分区说明。
+// 动作类端点的规模与读路径不同：启动上游需要交互过程（OAuth 设备码轮询）或
+// 属于别的运营域（定价、限额、调账、商品、账户）的动作仍只在 `tokenmp admin` 里，
+// 未在本包开 HTTP 入口。
 package adminapi
 
 import (
@@ -34,12 +37,14 @@ import (
 const (
 	// PathPrefix 是管理面子树前缀，装配层按它挂载。
 	PathPrefix = "/api/v1/admin/"
-	// ChannelsPath 是渠道清单的固定路径。
+	// ChannelsPath 是渠道清单与新建渠道的固定路径。
 	ChannelsPath = "/api/v1/admin/channels"
-	// CredentialsPath 是上游凭据清单的固定路径。
+	// CredentialsPath 是上游凭据清单与写入凭据的固定路径。
 	CredentialsPath = "/api/v1/admin/credentials" //nolint:gosec // G101：这是 URL 路径，不是凭据
-	// ModelMapsPath 是渠道模型映射清单的固定路径。
+	// ModelMapsPath 是渠道模型映射清单与写入映射的固定路径。
 	ModelMapsPath = "/api/v1/admin/modelmaps"
+	// MerchantsPath 是商家清单与新建商家的固定路径。
+	MerchantsPath = "/api/v1/admin/merchants"
 	// AccountsPath 是账户清单的固定路径。
 	AccountsPath = "/api/v1/admin/accounts"
 	// PricingPath 是定价版本清单的固定路径。
@@ -74,8 +79,9 @@ type Sessions interface {
 
 // Lister 是管理面只读清单依赖的业务读取面，由 internal/admin 的 Service 满足。
 //
-// 只列清单用到的读取动作：本包不写库，因此接口里不出现任何写入方法。
+// 只列清单用到的读取动作：本包不写库，写入一律经 Writer 的业务动作。
 type Lister interface {
+	ListMerchants(ctx context.Context) ([]store.Merchant, error)
 	ListChannels(ctx context.Context) ([]store.Channel, error)
 	ListCredentials(ctx context.Context) ([]admin.CredentialView, error)
 	ListModelMaps(ctx context.Context) ([]store.ModelMap, error)
@@ -88,47 +94,81 @@ type Lister interface {
 	SettlementBills(ctx context.Context, q admin.SettlementQuery) ([]settlement.BillView, error)
 }
 
-// Options 是装配参数；两个字段都必填。
+// Writer 是管理面配置动作依赖的业务写入面，由 internal/admin 的 Service 满足。
+//
+// 与 Lister 分开：只读清单的测试替身不必把写入方法也实现一遍。生产装配里两者是
+// 同一个实例，页面与 CLI 因此走同一条业务路径。
+type Writer interface {
+	CreateMerchant(ctx context.Context, code, name string, kind store.MerchantKind) (uint64, error)
+	DisableMerchant(ctx context.Context, id uint64) error
+	SetMerchantOwner(ctx context.Context, id, userID uint64) error
+
+	CreateChannel(ctx context.Context, in admin.ChannelInput) (uint64, error)
+	EnableChannel(ctx context.Context, id uint64) error
+	DisableChannel(ctx context.Context, id uint64) error
+
+	AddCredential(ctx context.Context, in admin.CredentialInput) (uint64, error)
+	EnableCredential(ctx context.Context, id uint64) error
+	DisableCredential(ctx context.Context, id uint64) error
+
+	SetModelMap(ctx context.Context, in admin.ModelMapInput) (uint64, error)
+	DisableModelMap(ctx context.Context, id uint64) error
+}
+
+// Options 是装配参数；Sessions 与 Lister 必填，Writer 缺失时配置动作端点不挂载。
 type Options struct {
 	Sessions Sessions
 	Lister   Lister
+	// Writer 是配置动作的业务写入面；为 nil 时写端点回 404，只读清单不受影响。
+	Writer Writer
 }
 
-// Handler 是管理面端点的 HTTP 入口，按路径分发到各清单动作。
+// Handler 是管理面端点的 HTTP 入口，按路径分发到各清单与配置动作。
 type Handler struct {
 	sessions Sessions
 	lister   Lister
+	writer   Writer
 }
 
 // NewHandler 构造管理面端点处理器。
 func NewHandler(opts Options) *Handler {
-	return &Handler{sessions: opts.Sessions, lister: opts.Lister}
+	return &Handler{sessions: opts.Sessions, lister: opts.Lister, writer: opts.Writer}
 }
 
-// ServeHTTP 按路径分发到各清单动作；子树内未声明的路径回页面信封 404。
+// ServeHTTP 按路径分发到各动作；子树内未声明的路径回页面信封 404。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 权限判定先于路径分派：未持有管理面身份时不透露子树里有哪些端点。
 	if _, ok := h.currentAdmin(w, r); !ok {
 		return
 	}
-	switch r.URL.Path {
-	case ChannelsPath:
+	switch {
+	case r.URL.Path == MerchantsPath:
+		h.handleMerchants(w, r)
+	case strings.HasPrefix(r.URL.Path, MerchantsPath+"/"):
+		h.handleMerchantAction(w, r)
+	case r.URL.Path == ChannelsPath:
 		h.handleChannels(w, r)
-	case CredentialsPath:
+	case strings.HasPrefix(r.URL.Path, ChannelsPath+"/"):
+		h.handleChannelAction(w, r)
+	case r.URL.Path == CredentialsPath:
 		h.handleCredentials(w, r)
-	case ModelMapsPath:
+	case strings.HasPrefix(r.URL.Path, CredentialsPath+"/"):
+		h.handleCredentialAction(w, r)
+	case r.URL.Path == ModelMapsPath:
 		h.handleModelMaps(w, r)
-	case AccountsPath:
+	case strings.HasPrefix(r.URL.Path, ModelMapsPath+"/"):
+		h.handleModelMapAction(w, r)
+	case r.URL.Path == AccountsPath:
 		h.handleAccounts(w, r)
-	case PricingPath:
+	case r.URL.Path == PricingPath:
 		h.handlePricing(w, r)
-	case QuotasPath:
+	case r.URL.Path == QuotasPath:
 		h.handleQuotas(w, r)
-	case AdjustmentsPath:
+	case r.URL.Path == AdjustmentsPath:
 		h.handleAdjustments(w, r)
-	case UsagePath:
+	case r.URL.Path == UsagePath:
 		h.handleUsage(w, r)
-	case SettlementsPath:
+	case r.URL.Path == SettlementsPath:
 		h.handleSettlements(w, r)
 	default:
 		webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
@@ -238,10 +278,22 @@ func writeItems[T any](w http.ResponseWriter, items []T, page pageQuery, total i
 	webapi.WritePage(w, map[string]any{itemsKey: items}, page.page, page.size, total)
 }
 
-// requireGet 只接受 GET：只读清单没有写入口。
+// requireGet 只接受 GET：没有写入口的清单只有读方法。
 func requireGet(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "只支持 GET 方法")
+		return false
+	}
+	return true
+}
+
+// requireWriter 确认配置动作的业务面已挂载；未挂载时按端点不存在处理。
+//
+// 生产装配里 Writer 恒非 nil（存储层满足管理面数据面才挂载整个子树）；
+// 只读清单的测试替身不实现写入，此时写端点应当像没声明过一样回 404。
+func (h *Handler) requireWriter(w http.ResponseWriter) bool {
+	if h.writer == nil {
+		webapi.WriteError(w, http.StatusNotFound, webapi.CodeNotFound, "端点不存在")
 		return false
 	}
 	return true

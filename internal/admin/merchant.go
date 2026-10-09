@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -102,12 +101,12 @@ func channelConfigJSON(raw string, style domain.CredentialHeaderStyle) (json.Raw
 		return config, nil
 	}
 	if !style.Valid() {
-		return nil, fmt.Errorf("admin: 凭据注入形态 %q 不受支持", string(style))
+		return nil, invalidf("admin: 凭据注入形态 %q 不受支持", string(style))
 	}
 	object := map[string]json.RawMessage{}
 	if len(config) > 0 {
 		if uerr := json.Unmarshal(config, &object); uerr != nil {
-			return nil, errors.New("渠道 config 必须是 JSON 对象")
+			return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 		}
 	}
 	encoded, err := json.Marshal(string(style))
@@ -173,10 +172,10 @@ func channelConfigArg(raw string) (json.RawMessage, error) {
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
-		return nil, errors.New("渠道 config 必须是 JSON 对象")
+		return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 	}
 	if object == nil {
-		return nil, errors.New("渠道 config 必须是 JSON 对象")
+		return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 	}
 	if err := validateConfigHeaders(object); err != nil {
 		return nil, err
@@ -199,11 +198,11 @@ func validateConfigHeaders(object map[string]json.RawMessage) error {
 	}
 	var headers map[string]string
 	if err := json.Unmarshal(raw, &headers); err != nil {
-		return errors.New("渠道 config 的 headers 必须是字符串到字符串的 JSON 对象")
+		return invalidf("admin: 渠道 config 的 headers 必须是字符串到字符串的 JSON 对象")
 	}
 	for name := range headers {
 		if domain.IsReservedUpstreamHeader(name) {
-			return fmt.Errorf("admin: 渠道静态请求头 %q 由网关自身占用，不能配置", name)
+			return invalidf("admin: 渠道静态请求头 %q 由网关自身占用，不能配置", name)
 		}
 	}
 	return nil

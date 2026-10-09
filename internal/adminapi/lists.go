@@ -91,11 +91,31 @@ type usageView struct {
 	CreatedAt  time.Time       `json:"created_at"`
 }
 
-// handleChannels 列出全部渠道。
+// merchantView 是商家的对外形状，字段与契约 AdminMerchant 对齐。
+type merchantView struct {
+	ID          uint64    `json:"id"`
+	Code        string    `json:"code"`
+	Name        string    `json:"name"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status"`
+	OwnerUserID *uint64   `json:"owner_user_id"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// handleChannels 处理渠道集合：GET 清单，POST 新建。
 func (h *Handler) handleChannels(w http.ResponseWriter, r *http.Request) {
-	if !requireGet(w, r) {
-		return
+	switch r.Method {
+	case http.MethodGet:
+		h.listChannels(w, r)
+	case http.MethodPost:
+		h.createChannel(w, r)
+	default:
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "只支持 GET 与 POST 方法")
 	}
+}
+
+// listChannels 列出全部渠道。
+func (h *Handler) listChannels(w http.ResponseWriter, r *http.Request) {
 	page, ok := pageOf(w, r)
 	if !ok {
 		return
@@ -124,11 +144,20 @@ func (h *Handler) handleChannels(w http.ResponseWriter, r *http.Request) {
 	writeItems(w, items, page, total)
 }
 
-// handleCredentials 列出全部上游凭据（只给脱敏前缀）。
+// handleCredentials 处理凭据集合：GET 清单，POST 写入。
 func (h *Handler) handleCredentials(w http.ResponseWriter, r *http.Request) {
-	if !requireGet(w, r) {
-		return
+	switch r.Method {
+	case http.MethodGet:
+		h.listCredentials(w, r)
+	case http.MethodPost:
+		h.createCredential(w, r)
+	default:
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "只支持 GET 与 POST 方法")
 	}
+}
+
+// listCredentials 列出全部上游凭据（只给脱敏前缀）。
+func (h *Handler) listCredentials(w http.ResponseWriter, r *http.Request) {
 	page, ok := pageOf(w, r)
 	if !ok {
 		return
@@ -142,11 +171,23 @@ func (h *Handler) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	writeItems(w, items, page, total)
 }
 
-// handleModelMaps 列出全部渠道模型映射。
+// handleModelMaps 处理模型映射集合：GET 清单，PUT 写入。
+//
+// 写入用 PUT：动作按 `(channel_id, model)` 幂等，语义上是「置为这个取值」而不是
+// 「新建一条」。
 func (h *Handler) handleModelMaps(w http.ResponseWriter, r *http.Request) {
-	if !requireGet(w, r) {
-		return
+	switch r.Method {
+	case http.MethodGet:
+		h.listModelMaps(w, r)
+	case http.MethodPut:
+		h.setModelMap(w, r)
+	default:
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, "只支持 GET 与 PUT 方法")
 	}
+}
+
+// listModelMaps 列出全部渠道模型映射。
+func (h *Handler) listModelMaps(w http.ResponseWriter, r *http.Request) {
 	page, ok := pageOf(w, r)
 	if !ok {
 		return
@@ -196,6 +237,36 @@ func (h *Handler) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			DefaultMerchantID: row.DefaultMerchantID,
 			PriceMultiplier:   row.PriceMultiplier,
 			Status:            row.Status,
+		})
+	}
+	items, total := pageSlice(views, page)
+	writeItems(w, items, page, total)
+}
+
+// listMerchants 列出全部商家。
+//
+// 渠道与凭据的写入都要给出归属商家，页面据此取候选；这里的行同时也是商家域
+// 归属绑定的对象。
+func (h *Handler) listMerchants(w http.ResponseWriter, r *http.Request) {
+	page, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.lister.ListMerchants(r.Context())
+	if err != nil {
+		writeInternal(w)
+		return
+	}
+	views := make([]merchantView, 0, len(rows))
+	for _, row := range rows {
+		views = append(views, merchantView{
+			ID:          row.ID,
+			Code:        row.Code,
+			Name:        row.Name,
+			Kind:        string(row.Kind),
+			Status:      row.Status,
+			OwnerUserID: row.OwnerUserID,
+			CreatedAt:   row.CreatedAt,
 		})
 	}
 	items, total := pageSlice(views, page)
