@@ -98,17 +98,24 @@ func isDuplicateKey(err error) bool {
 
 // Merchant 是 merchant 的一行。
 type Merchant struct {
-	ID        uint64       `json:"id"`
-	Code      string       `json:"code"`
-	Name      string       `json:"name"`
-	Kind      MerchantKind `json:"kind"`
-	Status    string       `json:"status"`
-	CreatedAt time.Time    `json:"created_at"`
+	ID     uint64       `json:"id"`
+	Code   string       `json:"code"`
+	Name   string       `json:"name"`
+	Kind   MerchantKind `json:"kind"`
+	Status string       `json:"status"`
+	// OwnerUserID 是商家归属的登录主体；nil 表示平台自营或尚未绑定。
+	// 商家域（/api/v1/partner/*）的作用域就由它推导，故用指针区分「没有归属」。
+	OwnerUserID *uint64   `json:"owner_user_id"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
-const insertMerchantSQL = `INSERT INTO merchant (code, name, kind, status) VALUES (?, ?, ?, ?)`
+const insertMerchantSQL = `INSERT INTO merchant (code, name, kind, status, owner_user_id)
+VALUES (?, ?, ?, ?, ?)`
 
 // insertMerchant 写一个商家；状态由调用方给出，create 路径一律 active。
+//
+// OwnerUserID 为 nil 时不写归属（平台自营与尚未绑定的入驻商家）；非 nil 时该登录主体
+// 已在别处校验存在，这里只落值 —— 归属是商家域的作用域来源，唯一键拦住重复绑定。
 func insertMerchant(ctx context.Context, ex executor, m Merchant) (uint64, error) {
 	if strings.TrimSpace(m.Code) == "" {
 		return 0, errors.New("store: merchant.code 不能为空")
@@ -123,7 +130,14 @@ func insertMerchant(ctx context.Context, ex executor, m Merchant) (uint64, error
 	if status == "" {
 		status = StatusActive
 	}
-	res, err := ex.ExecContext(ctx, insertMerchantSQL, m.Code, m.Name, m.Kind, status)
+	var owner any
+	if m.OwnerUserID != nil {
+		if *m.OwnerUserID == 0 {
+			return 0, errors.New("store: merchant.owner_user_id 不能为 0")
+		}
+		owner = *m.OwnerUserID
+	}
+	res, err := ex.ExecContext(ctx, insertMerchantSQL, m.Code, m.Name, m.Kind, status, owner)
 	if err != nil {
 		return 0, describeWriteError("merchant", err)
 	}
@@ -135,7 +149,8 @@ func (s *Store) InsertMerchant(ctx context.Context, m Merchant) (uint64, error) 
 	return insertMerchant(ctx, s.db, m)
 }
 
-const listMerchantsSQL = `SELECT id, code, name, kind, status, created_at FROM merchant ORDER BY id`
+const listMerchantsSQL = `SELECT id, code, name, kind, status, owner_user_id, created_at
+FROM merchant ORDER BY id`
 
 // listMerchants 列出全部商家。
 func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
@@ -150,12 +165,17 @@ func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
 		var (
 			m         Merchant
 			kindRaw   string
+			owner     sql.NullInt64
 			createdAt scanTime
 		)
-		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &kindRaw, &m.Status, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &kindRaw, &m.Status, &owner, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: 解析 merchant 行失败: %w", err)
 		}
 		m.Kind = MerchantKindFromDB(kindRaw)
+		if owner.Valid {
+			id := uint64(owner.Int64)
+			m.OwnerUserID = &id
+		}
 		m.CreatedAt = createdAt.Time
 		merchants = append(merchants, m)
 	}

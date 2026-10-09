@@ -32,6 +32,8 @@ type Store interface {
 	MerchantSettleInfo(ctx context.Context, id uint64) ([]byte, error)
 	SetMerchantSettleInfo(ctx context.Context, id uint64, raw []byte) error
 	MerchantSettlementFacts(ctx context.Context, merchantID uint64, from, to time.Time) (store.SettlementFacts, error)
+	// SetMerchantOwner 把商家绑定到登录主体，商家域的作用域由此推导。
+	SetMerchantOwner(ctx context.Context, id, userID uint64) error
 
 	// 渠道。
 	InsertChannel(ctx context.Context, c store.Channel) (uint64, error)

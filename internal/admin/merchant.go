@@ -45,6 +45,20 @@ func (s *Service) DisableMerchant(ctx context.Context, id uint64) error {
 	return s.store.SetMerchantStatus(ctx, id, store.StatusDisabled)
 }
 
+// SetMerchantOwner 把商家绑定到一个登录主体，商家域的作用域由此推导。
+//
+// 归属是商家域（页面 /api/v1/partner/*）唯一的作用域来源：没有绑定的商家在页面上
+// 没有主人，绑定后该登录主体才能在控制台里自助管理它的上游账号。
+func (s *Service) SetMerchantOwner(ctx context.Context, id, userID uint64) error {
+	if err := requireID("商家 id", id); err != nil {
+		return err
+	}
+	if err := requireID("登录主体 id", userID); err != nil {
+		return err
+	}
+	return s.store.SetMerchantOwner(ctx, id, userID)
+}
+
 // 渠道路由参数的默认值，与 0001 迁移的列默认值一致。
 const (
 	defaultChannelPriority = 100
