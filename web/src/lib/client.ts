@@ -6,6 +6,13 @@ import { accessToken, clearSession, refreshToken, saveAccess } from './session';
 
 const REFRESH_PATH = '/api/v1/auth/refresh';
 
+/** PageMeta 是列表端点的分页信息，取自信封而非业务数据。 */
+export interface PageMeta {
+  page: number | null;
+  size: number | null;
+  total: number | null;
+}
+
 /** request 发起一次页面请求，返回解包后的 data；业务码非 200 抛 ApiError。 */
 export async function request<T>(
   path: string,
@@ -25,6 +32,23 @@ export async function requestEnvelope<T>(
   init: RequestInit & { skipRefresh?: boolean } = {},
 ): Promise<Envelope<T>> {
   return (await sendWithRefresh<T>(path, init)).env;
+}
+
+/**
+ * requestPage 取列表端点：除业务数据外还要信封的 page / size / total。
+ *
+ * 分页由服务端决定，页面不能用 items.length 推断总条数。
+ */
+export async function requestPage<T>(
+  path: string,
+  init: RequestInit & { skipRefresh?: boolean } = {},
+): Promise<{ data: T | null; meta: PageMeta }> {
+  const sent = await sendWithRefresh<T>(path, init);
+  return {
+    // 复用 unwrap：业务码非 200 时同样抛 ApiError，列表页才能进错误态。
+    data: unwrap(sent),
+    meta: { page: sent.env.page, size: sent.env.size, total: sent.env.total },
+  };
 }
 
 /** sendWithRefresh 发一次请求，并在会话过期时用刷新令牌换发一次后重放原请求。 */

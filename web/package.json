@@ -10,6 +10,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.1",
+    "@tanstack/react-table": "^9.2.6",
     "lucide-react": "^1.53.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

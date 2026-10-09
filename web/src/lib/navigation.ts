@@ -13,3 +13,12 @@ export function safeRedirect(raw: string | null): string {
   }
   return raw;
 }
+
+/**
+ * loginRedirect 生成登录页地址，把当前站内地址带进 redirect。
+ *
+ * 用户登录后回到原地址（含筛选与分页 query），而不是退回首页。
+ */
+export function loginRedirect(path: string): string {
+  return `/login?redirect=${encodeURIComponent(path)}`;
+}
