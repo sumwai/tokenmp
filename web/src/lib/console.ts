@@ -1,0 +1,65 @@
+import { request } from './client';
+
+/**
+ * 控制台清单：导航项、首页段落与能力集合，与 docs/openapi-web.yaml 的 ConsoleData 对齐。
+ *
+ * 角色与权限的真相在服务端：本文件只做取数与按路径定位，不出现角色取值。
+ */
+
+/** ConsoleEntry 是一条控制台条目：导航项与首页段落条目同一形状。 */
+export interface ConsoleEntry {
+  title: string;
+  description: string;
+  icon: string;
+  path: string;
+  capability: string;
+}
+
+/** ConsoleSection 是首页的一个段落。 */
+export interface ConsoleSection {
+  title: string;
+  description: string;
+  entries: ConsoleEntry[];
+}
+
+/** ConsoleData 是控制台清单。 */
+export interface ConsoleData {
+  role: string;
+  capabilities: string[];
+  navigation: ConsoleEntry[];
+  sections: ConsoleSection[];
+}
+
+/** loadConsole 取当前主体的控制台清单。 */
+export async function loadConsole(): Promise<ConsoleData> {
+  return request<ConsoleData>('/api/v1/user/console', { method: 'GET' });
+}
+
+/**
+ * entryForPath 在清单里按路径定位条目；导航项与首页段落条目都在查找范围内。
+ *
+ * 找不到即当前主体没有该路径的条目，骨架据此渲染无权访问页。
+ */
+export function entryForPath(data: ConsoleData, pathname: string): ConsoleEntry | null {
+  const inNavigation = data.navigation.find((entry) => entry.path === pathname);
+  if (inNavigation) {
+    return inNavigation;
+  }
+  for (const section of data.sections) {
+    const inSection = section.entries.find((entry) => entry.path === pathname);
+    if (inSection) {
+      return inSection;
+    }
+  }
+  return null;
+}
+
+/**
+ * allows 判断能力集合里是否含目标能力。
+ *
+ * 条目也自带所需能力：两者不一致时（服务端版本更旧或更新）以能力集合为准 ——
+ * 权限的真相是能力，条目只是入口。
+ */
+export function allows(data: ConsoleData, capability: string): boolean {
+  return data.capabilities.includes(capability);
+}

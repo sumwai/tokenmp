@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest';
+
+import { allows, entryForPath } from './console';
+import type { ConsoleData } from './console';
+
+/** 清单夹具：持有首页与密钥能力，段落里另有一个请求记录入口。 */
+const manifest: ConsoleData = {
+  role: 'member',
+  capabilities: ['console', 'keys'],
+  navigation: [
+    { title: '首页', description: '', icon: 'house', path: '/', capability: 'console' },
+    {
+      title: '密钥',
+      description: '签发与吊销调用密钥',
+      icon: 'key-round',
+      path: '/keys',
+      capability: 'keys',
+    },
+  ],
+  sections: [
+    {
+      title: '排障',
+      description: '按请求标识定位问题',
+      entries: [
+        {
+          title: '请求记录',
+          description: '脱敏报文与尝试时间线',
+          icon: 'scroll-text',
+          path: '/requests',
+          capability: 'requests',
+        },
+      ],
+    },
+  ],
+};
+
+describe('entryForPath', () => {
+  it('导航项与段落条目都按路径定位', () => {
+    expect(entryForPath(manifest, '/')?.title).toBe('首页');
+    expect(entryForPath(manifest, '/requests')?.title).toBe('请求记录');
+  });
+
+  it('清单里没有的路径返回 null：骨架据此渲染无权访问页', () => {
+    expect(entryForPath(manifest, '/usage')).toBeNull();
+  });
+});
+
+describe('allows', () => {
+  it('按能力集合判定，不按角色取值', () => {
+    expect(allows(manifest, 'keys')).toBe(true);
+    expect(allows(manifest, 'ops')).toBe(false);
+  });
+});
+
+describe('前端零角色分支', () => {
+  // 组件与页面不得出现角色取值字面量：导航与能力都来自服务端清单（web/AGENTS.md「多角色」）。
+  const sources = import.meta.glob('../**/*.{ts,tsx}', {
+    query: '?raw',
+    import: 'default',
+    eager: true,
+  }) as Record<string, string>;
+  const roleLiteral = /['"`](member|partner|admin)['"`]/;
+
+  it('web/src 里没有角色取值字面量', () => {
+    const offenders = Object.entries(sources)
+      .filter(([path]) => !path.includes('.test.'))
+      .filter(([, text]) => roleLiteral.test(text))
+      .map(([path]) => path);
+    expect(offenders).toEqual([]);
+  });
+
+  it('扫描范围非空，避免断言在空集合上通过', () => {
+    expect(Object.keys(sources).length).toBeGreaterThan(5);
+  });
+});

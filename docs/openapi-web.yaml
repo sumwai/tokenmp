@@ -505,6 +505,39 @@ paths:
   # ------------------------------------------------------------------
   # 用户级业务数据：作用域由会话推导，路径不接受账户 id。
   # ------------------------------------------------------------------
+  /api/v1/user/console:
+    get:
+      tags: [user]
+      summary: 控制台清单
+      description: |
+        返回当前登录主体可用的控制台清单：底部导航项、首页段落与能力集合。
+        角色与权限的真相在服务端：清单按角色生成，只包含当前主体确实持有的条目
+        （条目所需的能力不在 `capabilities` 里时该条目不出现），前端按清单渲染，
+        不硬编码角色取值。
+
+        `capabilities` 的取值：`console` 控制台首页、`keys` 密钥自助管理、
+        `requests` 请求记录、`usage` 用量与应扣量、`account` 账户概览、
+        `ops` 管理面。取值只增不改语义，未识别的取值前端忽略。
+      operationId: getUserConsole
+      responses:
+        "200":
+          description: 控制台清单。
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ConsoleData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/user/account:
     get:
       tags: [user]
@@ -1077,6 +1110,69 @@ components:
     # ------------------------------------------------------------------
     # 用户级业务数据
     # ------------------------------------------------------------------
+    ConsoleData:
+      type: object
+      description: 控制台清单：当前主体的导航项、首页段落与能力集合。
+      required: [role, capabilities, navigation, sections]
+      properties:
+        role:
+          type: string
+          description: |
+            当前主体角色，与 `SessionUser.role` 同取值域。它只用于展示与排障：
+            前端按 `capabilities` 与清单条目渲染，不按角色取值分支。
+        capabilities:
+          type: array
+          description: 当前主体持有的能力标识；取值只增不改语义，未识别的取值一律忽略。
+          items:
+            type: string
+        navigation:
+          type: array
+          description: 底部导航项，按顺序渲染；数量不超过 5。
+          items:
+            $ref: "#/components/schemas/ConsoleEntry"
+        sections:
+          type: array
+          description: 首页段落，按顺序渲染；条目被过滤光的段落不出现。
+          items:
+            $ref: "#/components/schemas/ConsoleSection"
+      additionalProperties: false
+
+    ConsoleEntry:
+      type: object
+      description: 一条控制台条目，即一个页面入口。
+      required: [title, description, icon, path, capability]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+          description: 一句话说明；无补充说明时为空串。
+        icon:
+          type: string
+          description: Lucide 图标名（kebab-case）；未登记的名字不渲染图标。
+        path:
+          type: string
+          description: 站内相对路径，用于导航与登录回跳。
+        capability:
+          type: string
+          description: 该条目所需的能力标识；不在 `capabilities` 里时不渲染本项。
+      additionalProperties: false
+
+    ConsoleSection:
+      type: object
+      description: 首页的一个段落。
+      required: [title, description, entries]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleEntry"
+      additionalProperties: false
+
     AccountSummary:
       type: object
       description: 账户摘要。字段只增不改语义；与数据面自助查询同口径。

@@ -19,14 +19,15 @@ import (
 
 type fakeSessions struct {
 	userID uint64
+	role   string
 	err    error
 }
 
-func (f *fakeSessions) SessionUserID(_ context.Context, _ string) (uint64, error) {
+func (f *fakeSessions) SessionSubject(_ context.Context, _ string) (uint64, string, error) {
 	if f.err != nil {
-		return 0, f.err
+		return 0, "", f.err
 	}
-	return f.userID, nil
+	return f.userID, f.role, nil
 }
 
 type fakeStore struct {
@@ -183,7 +184,7 @@ type testEnv struct {
 }
 
 func newTestEnv() *testEnv {
-	session := &fakeSessions{userID: 7}
+	session := &fakeSessions{userID: 7, role: store.RoleMember}
 	st := &fakeStore{account: &store.Account{ID: 42, Code: "acc_42"}}
 	summary := &fakeSummary{summary: &me.Summary{Account: me.AccountView{ID: 42, Code: "acc_42"}}}
 	return &testEnv{

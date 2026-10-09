@@ -28,6 +28,8 @@ var errInvalidRecent = errors.New("recent 必须是 0 到 100 之间的整数")
 // ServeHTTP 按路径分发到各动作；子树内未声明的路径回页面信封 404。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == ConsolePath:
+		h.handleConsole(w, r)
 	case r.URL.Path == AccountPath:
 		h.handleAccount(w, r)
 	case r.URL.Path == KeysPath:
@@ -84,21 +86,32 @@ func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request) {
 	webapi.WriteOK(w, summary)
 }
 
-// currentAccount 从会话推导当前账户。
-//
-// 会话无效回 401；会话有效但没有归属账户回 403。两者折叠成同一个码会让前端
-// 无法区分「重新登录」与「等待开户」，下一步动作不同。
-func (h *Handler) currentAccount(w http.ResponseWriter, r *http.Request) (*store.Account, bool) {
+// subject 是会话解析出的登录主体：作用域推导用 id，控制台清单还用到角色。
+type subject struct {
+	userID uint64
+	role   string
+}
+
+// currentSubject 从会话推导登录主体；会话无效回 401。
+func (h *Handler) currentSubject(w http.ResponseWriter, r *http.Request) (subject, bool) {
 	token, ok := webapi.BearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		webapi.WriteError(w, http.StatusUnauthorized, webapi.CodeUnauthorized, "登录状态已失效")
-		return nil, false
+		return subject{}, false
 	}
-	userID, err := h.sessions.SessionUserID(r.Context(), token)
+	userID, role, err := h.sessions.SessionSubject(r.Context(), token)
 	if err != nil {
 		webapi.WriteError(w, http.StatusUnauthorized, webapi.CodeUnauthorized, "登录状态已失效")
-		return nil, false
+		return subject{}, false
 	}
+	return subject{userID: userID, role: role}, true
+}
+
+// ownedAccount 在主体之上推导归属账户；没有归属账户回 403。
+//
+// 会话有效但没有归属账户回 403 而不是 401：两者的下一步动作不同 —— 一个是等待开户，
+// 一个是重新登录，折叠成同一个码会让前端无法区分。
+func (h *Handler) ownedAccount(w http.ResponseWriter, r *http.Request, userID uint64) (*store.Account, bool) {
 	account, err := h.store.AccountByOwner(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -109,6 +122,15 @@ func (h *Handler) currentAccount(w http.ResponseWriter, r *http.Request) (*store
 		return nil, false
 	}
 	return account, true
+}
+
+// currentAccount 是「解析主体 + 推导归属账户」的组合，供需要账户的端点取用。
+func (h *Handler) currentAccount(w http.ResponseWriter, r *http.Request) (*store.Account, bool) {
+	sub, ok := h.currentSubject(w, r)
+	if !ok {
+		return nil, false
+	}
+	return h.ownedAccount(w, r, sub.userID)
 }
 
 // parseRecent 解析 recent 查询参数：缺省取默认条数，负数或非整数报错，超上限截到上限。

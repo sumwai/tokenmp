@@ -19,6 +19,8 @@ import (
 const (
 	// PathPrefix 是用户级端点子树前缀，装配层按它挂载。
 	PathPrefix = "/api/v1/user/"
+	// ConsolePath 是控制台清单的固定路径。
+	ConsolePath = "/api/v1/user/console"
 	// AccountPath 是账户概览的固定路径。
 	AccountPath = "/api/v1/user/account"
 	// KeysPath 是密钥集合的固定路径。
@@ -39,8 +41,12 @@ const itemsKey = "items"
 
 // Sessions 解析页面会话令牌，由 internal/auth 的会话实现满足。
 type Sessions interface {
-	// SessionUserID 解析访问令牌并返回登录主体 id；令牌无效时返回错误。
-	SessionUserID(ctx context.Context, accessToken string) (uint64, error)
+	// SessionSubject 解析访问令牌并返回登录主体 id 与角色；令牌无效、会话已撤销
+	// 或已过期时返回错误。
+	//
+	// 回角色是控制台清单端点的需要：清单按角色生成能力集合。作用域推导只需要 id，
+	// 两者共用一次会话读取，同一请求不会读两遍会话。
+	SessionSubject(ctx context.Context, accessToken string) (userID uint64, role string, err error)
 }
 
 // Store 是用户级端点依赖的数据面。
