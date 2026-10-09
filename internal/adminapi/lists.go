@@ -444,6 +444,58 @@ func (h *Handler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	writeItems(w, items, page, total)
 }
 
+// handleRequests 列出全平台请求记录，支持按账户与请求字段过滤。
+//
+// 分页在数据库侧完成（limit / offset）：请求记录是持续增长的集合，先取回全量再切页
+// 会让单次查询的代价随历史规模线性增长。过滤口径与 `tokenmp admin requests list` 同源，
+// 视图也与该命令的 --json 行一致。
+func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
+	if !requireGet(w, r) {
+		return
+	}
+	page, ok := pageOf(w, r)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	accountID, err := parseOptionalUint(query, "account_id")
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	since, err := parseMomentParam("since", query.Get("since"))
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	until, err := parseMomentParam("until", query.Get("until"))
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	apiKeyID, err := parseOptionalUint(query, "api_key_id")
+	if err != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+		return
+	}
+	views, total, err := h.lister.ListRequests(r.Context(), admin.RequestListQuery{
+		AccountID:      accountID,
+		Since:          since,
+		Until:          until,
+		RequestedModel: strings.TrimSpace(query.Get("model")),
+		RequestID:      strings.TrimSpace(query.Get("request_id")),
+		Status:         strings.TrimSpace(query.Get("status")),
+		APIKeyID:       apiKeyID,
+		Limit:          page.size,
+		Offset:         (page.page - 1) * page.size,
+	})
+	if err != nil {
+		writeActionError(w, err)
+		return
+	}
+	writeItems(w, views, page, total)
+}
+
 // adminSettlementView 是一个商家的结算对账单的对外形状，字段与契约 AdminSettlementItem 对齐。
 //
 // 字段名与 `settlement.BillView` 一致，只多一个 merchant_id：管理面是跨商家的清单，

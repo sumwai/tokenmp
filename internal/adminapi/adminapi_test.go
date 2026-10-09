@@ -49,6 +49,7 @@ type fakeLister struct {
 	quotas        []admin.QuotaView
 	adjustments   []store.Adjustment
 	usage         []store.UsageListRow
+	requests      []admin.RequestView
 	settlements   []settlement.BillView
 	err           error
 	lastMerchant  uint64
@@ -59,6 +60,8 @@ type fakeLister struct {
 	lastSince     time.Time
 	// lastSettlement 保存最后一次出账查询，供账期与作用域断言。
 	lastSettlement admin.SettlementQuery
+	// lastRequestQuery 保存最后一次请求记录查询，供过滤与分页透传断言。
+	lastRequestQuery admin.RequestListQuery
 }
 
 func (f *fakeLister) ListMerchants(context.Context) ([]store.Merchant, error) {
@@ -99,6 +102,11 @@ func (f *fakeLister) ListAdjustments(_ context.Context, accountID uint64) ([]sto
 func (f *fakeLister) ListUsage(_ context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error) {
 	f.lastAccountID, f.lastSince = accountID, since
 	return f.usage, f.err
+}
+
+func (f *fakeLister) ListRequests(_ context.Context, q admin.RequestListQuery) ([]admin.RequestView, int, error) {
+	f.lastRequestQuery = q
+	return f.requests, len(f.requests), f.err
 }
 
 func (f *fakeLister) SettlementBills(_ context.Context, q admin.SettlementQuery) ([]settlement.BillView, error) {
