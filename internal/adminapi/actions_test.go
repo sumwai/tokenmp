@@ -224,6 +224,30 @@ func TestCreateChannelPassesBusinessInput(t *testing.T) {
 	}
 }
 
+// TestOptionalJSONFieldsAcceptNull 断言可选对象字段显式传 null 与省略等价。
+//
+// 客户端把没填的值序列化成 null 是常见形态，把它当成配错只会留下无从解释的 400。
+func TestOptionalJSONFieldsAcceptNull(t *testing.T) {
+	h, _, _, writer := newWriteEnv()
+	status, _ := doJSON(t, h, http.MethodPost, ChannelsPath, "token",
+		`{"merchant_id":2,"name":"c","type":"openai_chat","cred_group":"g","base_url":"https://u","config":null}`)
+	if status != http.StatusOK {
+		t.Fatalf("config 为 null 应 200: %d", status)
+	}
+	if writer.lastChannel.Config != "" {
+		t.Fatalf("config = %q，期望空", writer.lastChannel.Config)
+	}
+
+	status, _ = doJSON(t, h, http.MethodPut, ModelMapsPath, "token",
+		`{"channel_id":3,"model":"m","upstream_model":"u","request_overrides":null}`)
+	if status != http.StatusOK {
+		t.Fatalf("overrides 为 null 应 200: %d", status)
+	}
+	if len(writer.lastModelMap.RequestOverrides) != 0 {
+		t.Fatalf("overrides = %s，期望空", writer.lastModelMap.RequestOverrides)
+	}
+}
+
 // TestCreateChannelRejectsBadShape 断言渠道的形状与枚举校验。
 func TestCreateChannelRejectsBadShape(t *testing.T) {
 	const valid = `{"merchant_id":2,"name":"c","type":"openai_chat","cred_group":"g","base_url":"https://u"}`

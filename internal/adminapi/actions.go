@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -322,7 +323,7 @@ func (h *Handler) createChannel(w http.ResponseWriter, r *http.Request) {
 		BaseURL:         baseURL,
 		Priority:        req.Priority,
 		Weight:          req.Weight,
-		Config:          string(req.Config),
+		Config:          string(optionalJSON(req.Config)),
 		CredentialStyle: style,
 	})
 	if err != nil {
@@ -405,7 +406,7 @@ func (h *Handler) setModelMap(w http.ResponseWriter, r *http.Request) {
 		Model:            model,
 		UpstreamModel:    upstreamModel,
 		PriceMultiplier:  strings.TrimSpace(req.PriceMultiplier),
-		RequestOverrides: req.RequestOverrides,
+		RequestOverrides: optionalJSON(req.RequestOverrides),
 	}); err != nil {
 		writeActionError(w, err)
 		return
@@ -446,6 +447,18 @@ func parseSubresource(path, collection string) (uint64, string, bool) {
 		return 0, "", false
 	}
 	return id, action, true
+}
+
+// optionalJSON 把显式的 null 与空白当作「未给」。
+//
+// 契约里渠道 config 与模型映射 overrides 都是可选对象；客户端序列化一个未填的值
+// 时会得到 null，把它当成配错会在页面上留下无从解释的 400。
+func optionalJSON(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return trimmed
 }
 
 // decodeJSON 解析请求体并拒绝未知字段：契约之外的字段静默忽略会让拼写错误变成
