@@ -73,6 +73,10 @@ type fakeStore struct {
 	stats         []store.RequestStatsItem
 	statsErr      error
 	statsQuery    store.RequestStatsQuery
+	// 用量聚合：字段承载替身返回值与最后一次调用的入参。
+	usageStats      []store.UsageStatsItem
+	usageStatsErr   error
+	usageStatsQuery store.UsageStatsQuery
 }
 
 func (f *fakeStore) AccountByOwner(_ context.Context, _ uint64) (*store.Account, error) {
@@ -158,6 +162,14 @@ func (f *fakeStore) RequestStats(_ context.Context, q store.RequestStatsQuery) (
 		return nil, f.statsErr
 	}
 	return f.stats, nil
+}
+
+func (f *fakeStore) AccountUsageStats(_ context.Context, q store.UsageStatsQuery) ([]store.UsageStatsItem, error) {
+	f.usageStatsQuery = q
+	if f.usageStatsErr != nil {
+		return nil, f.usageStatsErr
+	}
+	return f.usageStats, nil
 }
 
 type fakeSummary struct {

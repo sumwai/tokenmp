@@ -36,6 +36,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleKeys(w, r)
 	case r.URL.Path == UsagePath:
 		h.handleUsage(w, r)
+	case r.URL.Path == UsagePath+usageStatsSuffix:
+		h.handleUsageStats(w, r)
 	case r.URL.Path == ModelsPath:
 		h.handleModels(w, r)
 	case r.URL.Path == RequestsPath:

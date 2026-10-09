@@ -109,6 +109,8 @@ type gatewayStore interface {
 	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
 	// ListAccountUsage 与 ListAccountModels 供用户级端点的用量流水与模型目录使用。
 	ListAccountUsage(ctx context.Context, f store.AccountUsageFilter) ([]store.AccountUsageRow, int, error)
+	// AccountUsageStats 供用户级端点的用量聚合使用。
+	AccountUsageStats(ctx context.Context, q store.UsageStatsQuery) ([]store.UsageStatsItem, error)
 	ListAccountModels(ctx context.Context, accountID uint64) ([]store.AccountModel, error)
 	// 请求记录相关方法供用户级端点的请求记录列表、详情与聚合使用。
 	ListRequestLogs(ctx context.Context, f store.RequestLogFilter) ([]store.RequestLogRow, int, error)

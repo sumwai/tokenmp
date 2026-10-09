@@ -9,7 +9,10 @@
 // 不认识的记录放大成整批查询失败。
 package billing
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // Metric 是计费计量指标，对应 billing_price_component.metric 与
 // billing_usage.usage 的键。
@@ -86,6 +89,19 @@ func ValidateMetric(m Metric) error {
 // 未知值原样返回，由上层决定跳过该行还是按不匹配处理。
 func MetricFromDB(raw string) Metric {
 	return Metric(raw)
+}
+
+// Metrics 返回全部已知指标的取值集合，按字典序。
+//
+// 给需要覆盖全部指标的读路径用（如账户面用量聚合逐指标求和）：清单只在
+// knownMetrics 维护一份，新增指标时聚合侧不必同步改一遍。
+func Metrics() []Metric {
+	out := make([]Metric, 0, len(knownMetrics))
+	for m := range knownMetrics {
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // UnitSettle 是结算单位，对应 billing_price_component.unit_settle，

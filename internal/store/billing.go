@@ -945,30 +945,57 @@ const accountUsageColumns = `SELECT id, model, requested_model, protocol, cross_
 	`, gross_amount, multiplier, created_at
 FROM billing_usage`
 
+// usagePredicate 是账户面用量读路径共用的过滤谓词。
+//
+// 列表与聚合共用一份：两处各拼一次谓词，任一处漏一个条件，同一区间上的明细与合计
+// 就会对不上，而那种偏差只在特定过滤组合下出现。
+type usagePredicate struct {
+	// AccountID 是流水的归属账户，必填：作用域只能来自会话。
+	AccountID uint64
+	// Since / Until 是写入时刻的闭区间；零值表示该侧不限。
+	Since time.Time
+	Until time.Time
+	// RequestedModel 按客户端请求的模型名精确匹配；空串表示不过滤。
+	RequestedModel string
+	// APIKeyID 按签发本次调用的密钥过滤；0 表示不过滤。
+	APIKeyID uint64
+}
+
+// where 组装 WHERE 子句与参数。
+func (p usagePredicate) where() (string, []any) {
+	conditions := []string{accountIDCondition}
+	args := []any{p.AccountID}
+	if !p.Since.IsZero() {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, p.Since)
+	}
+	if !p.Until.IsZero() {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, p.Until)
+	}
+	if p.RequestedModel != "" {
+		conditions = append(conditions, "requested_model = ?")
+		args = append(args, p.RequestedModel)
+	}
+	if p.APIKeyID != 0 {
+		conditions = append(conditions, "api_key_id = ?")
+		args = append(args, p.APIKeyID)
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
 // accountUsageWhere 组装账户面列表的 WHERE 子句与参数。
 //
 // 单独抽出来是为了让计数与取页必然同源：两处各拼一次谓词，任一处漏条件都会让
 // total 与当页对不上，而那种偏差只在特定过滤组合下出现。
 func accountUsageWhere(f AccountUsageFilter) (string, []any) {
-	conditions := []string{accountIDCondition}
-	args := []any{f.AccountID}
-	if !f.Since.IsZero() {
-		conditions = append(conditions, "created_at >= ?")
-		args = append(args, f.Since)
-	}
-	if !f.Until.IsZero() {
-		conditions = append(conditions, "created_at <= ?")
-		args = append(args, f.Until)
-	}
-	if f.RequestedModel != "" {
-		conditions = append(conditions, "requested_model = ?")
-		args = append(args, f.RequestedModel)
-	}
-	if f.APIKeyID != 0 {
-		conditions = append(conditions, "api_key_id = ?")
-		args = append(args, f.APIKeyID)
-	}
-	return " WHERE " + strings.Join(conditions, " AND "), args
+	return usagePredicate{
+		AccountID:      f.AccountID,
+		Since:          f.Since,
+		Until:          f.Until,
+		RequestedModel: f.RequestedModel,
+		APIKeyID:       f.APIKeyID,
+	}.where()
 }
 
 // ListAccountUsage 按账户分页列出用量流水，返回当页行与满足条件的总数。
