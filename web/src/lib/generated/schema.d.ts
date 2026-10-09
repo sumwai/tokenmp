@@ -1099,6 +1099,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 全平台请求记录
+         * @description 列出全平台请求记录，字段与 `tokenmp admin requests list --json` 的行一致；按主键倒序。
+         *     与用户面请求记录的差别只在作用域与归属层：这里跨账户，因此多出 `account_id`。
+         *     渠道、上游与商家标识不出现；排障需要的脱敏报文与尝试时间线走
+         *     `tokenmp admin requests get`，本端点只给清单。
+         *     请求方须持有管理面能力（`ops`），越权返回 `code=403`。
+         */
+        get: operations["listAdminRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/settlements": {
         parameters: {
             query?: never;
@@ -2260,6 +2284,57 @@ export interface components {
         };
         PageOfAdminUsageItem: {
             items: components["schemas"]["AdminUsageItem"][];
+        };
+        /**
+         * @description 一条跨账户的请求记录摘要，字段与 `tokenmp admin requests list --json` 的行一致；
+         *     比 RequestItem 多 `account_id`：管理面是跨账户清单，没有它分行无从归属。
+         */
+        AdminRequestItem: {
+            /** Format: int64 */
+            id: number;
+            request_id: string;
+            /**
+             * Format: int64
+             * @description 记录的归属账户。
+             */
+            account_id: number;
+            /**
+             * Format: int64
+             * @description 签发本次调用的密钥 id，可按它过滤。
+             */
+            api_key_id: number;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description 请求终态。
+             * @enum {string}
+             */
+            status: "success" | "failed" | "cancelled";
+            /** @description 返回给客户端的 HTTP 状态码。 */
+            http_status: number;
+            /** @description 最后一次上游尝试的状态码；未取得时为 `null`。 */
+            upstream_status: number | null;
+            /** @description 失败分类；成功时为 `null`。 */
+            failure_class: string | null;
+            /** @description 网关错误码；成功时为 `null`。 */
+            error_code: string | null;
+            duration_ms: number;
+            /** @description 客户端请求的模型名。 */
+            model: string;
+            /** @description 实际发往上游的模型名；与 `model` 不同表示网关改写过。 */
+            upstream_model: string;
+            protocol: string;
+            upstream_protocol: string;
+            cross_protocol: boolean;
+            stream: boolean;
+            written_bytes: number;
+            /** @description 取得的 token 用量；未取得时为 `null`。 */
+            usage: components["schemas"]["UsageTokens"] | null;
+            /** @description 是否存在可取的脱敏报文；失败请求保留 7 天，其余为 `false`。 */
+            payload_available: boolean;
+        };
+        PageOfAdminRequestItem: {
+            items: components["schemas"]["AdminRequestItem"][];
         };
         /**
          * @description 一个商家的结算对账单，字段与 `tokenmp admin settlement list --json` 的行一致；
@@ -4035,6 +4110,51 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["PageOfAdminUsageItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminRequests: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。 */
+                account_id?: components["parameters"]["AdminAccountFilter"];
+                /** @description 起始时刻（含），RFC3339；缺省不限。 */
+                since?: components["parameters"]["Since"];
+                /** @description 结束时刻（含），RFC3339；缺省不限。 */
+                until?: components["parameters"]["Until"];
+                /** @description 按模型名精确匹配；缺省不过滤。 */
+                model?: components["parameters"]["ModelFilter"];
+                /** @description 按签发本次调用的密钥 id 过滤；缺省不过滤。 */
+                api_key_id?: components["parameters"]["ApiKeyFilter"];
+                /** @description 按终态过滤；缺省不过滤。 */
+                status?: "success" | "failed" | "cancelled";
+                /** @description 按请求标识精确匹配，用于定位单条记录。 */
+                request_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 请求记录清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminRequestItem"];
                     };
                 };
             };

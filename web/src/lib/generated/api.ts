@@ -168,6 +168,10 @@ export const api = {
   listAdminQuotas: (init?: ApiInit<"/api/v1/admin/quotas", "get">) =>
     apiRequest("/api/v1/admin/quotas", "get", init),
 
+  /** 全平台请求记录 */
+  listAdminRequests: (init?: ApiInit<"/api/v1/admin/requests", "get">) =>
+    apiRequest("/api/v1/admin/requests", "get", init),
+
   /** 全平台结算对账单 */
   listAdminSettlements: (init?: ApiInit<"/api/v1/admin/settlements", "get">) =>
     apiRequest("/api/v1/admin/settlements", "get", init),
