@@ -936,6 +936,7 @@ export interface components {
         /** @description 触发频率限制，`code=429`。 */
         TooManyRequests: {
             headers: {
+                "Retry-After": components["headers"]["RetryAfter"];
                 [name: string]: unknown;
             };
             content: {
@@ -994,7 +995,13 @@ export interface components {
         ApiKeyFilter: number;
     };
     requestBodies: never;
-    headers: never;
+    headers: {
+        /**
+         * @description 触发频率限制（`code=429`）时出现，单位秒：按来源的滑动窗口推算出的最短等待时长。
+         *     页面按它显示等待时间，不做自动重试（web/AGENTS.md 的三态）。
+         */
+        RetryAfter: number;
+    };
     pathItems: never;
 }
 export type $defs = Record<string, never>;
