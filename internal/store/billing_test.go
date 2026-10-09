@@ -360,9 +360,47 @@ func TestInsertPurchaseArgs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("意外错误：%v", err)
 	}
-	want := []any{uint64(11), uint64(1), uint64(3), "2", "20", at}
+	// 未给幂等键时该列写 NULL：管理面的购买动作不携带幂等键。
+	want := []any{uint64(11), uint64(1), uint64(3), "2", "20", at, nil}
 	if !reflect.DeepEqual(fake.args, want) {
 		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
+	}
+}
+
+// TestInsertPurchasePassesIdempotencyKey 断言幂等键作为最后一个参数落入 account_purchase，
+// 页面下单的重复提交据此被唯一索引拦下。
+func TestInsertPurchasePassesIdempotencyKey(t *testing.T) {
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	fake := &recordedExec{}
+	if _, err := insertPurchase(context.Background(), fake, Purchase{
+		AccountID: 11, MerchantID: 1, ProductID: 3, Qty: "2", PricePaid: "20", PurchasedAt: at,
+		IdempotencyKey: "order-key-0001",
+	}); err != nil {
+		t.Fatalf("意外错误：%v", err)
+	}
+	want := []any{uint64(11), uint64(1), uint64(3), "2", "20", at, "order-key-0001"}
+	if !reflect.DeepEqual(fake.args, want) {
+		t.Errorf("参数 = %#v，期望 %#v", fake.args, want)
+	}
+	if !strings.Contains(fake.query, "idempotency_key") {
+		t.Errorf("写入语句应含 idempotency_key 列：%s", fake.query)
+	}
+}
+
+// TestInsertPurchaseRejectsLongIdempotencyKey 断言超长幂等键在进入 SQL 之前被拒绝：
+// 越界的键是调用方的契约错误，不该靠列定义在写入时报错。
+func TestInsertPurchaseRejectsLongIdempotencyKey(t *testing.T) {
+	fake := &recordedExec{}
+	_, err := insertPurchase(context.Background(), fake, Purchase{
+		AccountID: 11, MerchantID: 1, ProductID: 3, Qty: "2", PricePaid: "20",
+		PurchasedAt:    time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
+		IdempotencyKey: strings.Repeat("k", maxIdempotencyKeyLen+1),
+	})
+	if err == nil {
+		t.Fatal("超长幂等键应被拒绝")
+	}
+	if fake.calls != 0 {
+		t.Errorf("校验失败不应触达驱动，实际调用 %d 次", fake.calls)
 	}
 }
 

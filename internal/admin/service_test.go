@@ -735,7 +735,7 @@ func TestCreditBucketValidates(t *testing.T) {
 	if _, err := s.CreditBucket(context.Background(), base); err != nil {
 		t.Fatalf("合法输入不应报错：%v", err)
 	}
-	if got.Total != "100" || got.Remaining != "100" || got.Priority != defaultBucketPriority {
+	if got.Total != "100" || got.Remaining != "100" || got.Priority != store.DefaultBucketPriority {
 		t.Errorf("账本初值不符：%+v", got)
 	}
 }

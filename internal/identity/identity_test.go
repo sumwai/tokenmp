@@ -40,7 +40,7 @@ func TestRolesUnknownIsEmpty(t *testing.T) {
 // admin 同时是 partner 与 member，逐个身份拼接会把数据面能力重复三次。
 func TestCapabilitiesAreUnionAcrossIdentities(t *testing.T) {
 	roles := Roles(store.RoleAdmin)
-	want := []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapOps}
+	want := []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase, CapOps}
 	if got := Capabilities(roles); !slices.Equal(got, want) {
 		t.Fatalf("admin 的能力 = %v，期望 %v", got, want)
 	}
@@ -53,7 +53,7 @@ func TestCapabilitiesAreUnionAcrossIdentities(t *testing.T) {
 
 // TestCapabilitiesBaseIdentity 断言基线的能力集合：数据面能力齐全，管理面能力缺席。
 func TestCapabilitiesBaseIdentity(t *testing.T) {
-	want := []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount}
+	want := []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase}
 	if got := Capabilities([]string{store.RoleMember}); !slices.Equal(got, want) {
 		t.Fatalf("member 的能力 = %v，期望 %v", got, want)
 	}

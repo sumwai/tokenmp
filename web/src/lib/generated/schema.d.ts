@@ -297,7 +297,7 @@ export interface paths {
          *
          *     `capabilities` 的取值：`console` 控制台首页、`keys` 密钥自助管理、
          *     `requests` 请求记录、`usage` 用量与应扣量、`account` 账户概览、
-         *     `ops` 管理面。取值只增不改语义，未识别的取值前端忽略。
+         *     `purchase` 充值 / 购买、`ops` 管理面。取值只增不改语义，未识别的取值前端忽略。
          */
         get: operations["getUserConsole"];
         put?: never;
@@ -320,11 +320,66 @@ export interface paths {
          * @description 返回当前登录主体所属账户的摘要：账户标识、可用包存量、生效中的窗口限额与最近流水。
          *     与数据面的账户自助查询（`docs/openapi.yaml` 的 `/v1/me/account`）口径一致，
          *     差别只在鉴权与作用域推导；判定复用同一份实现，展示与判定不会漂移。
+         *     账户无可用额度（`settlement.Fundable` 判定为否）时回 `402`，与数据面同一门闸；
+         *     页面据此把 402 分支渲染成充值 / 购买引导。
          *     响应不含密钥、上游凭据或商家内部标识。
          */
         get: operations["getUserAccount"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/user/products": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 商品目录
+         * @description 列出可购买的商品档位：名称、结算单位、每份数量、售价、可用模型范围与有效天数。
+         *     数量与售价都是十进制字符串；`model_scope` 为 `null` 表示不限模型。
+         *     目录不分页，但分页三字段照填：档位是运营上架的有限集合，与模型目录同一形状。
+         */
+        get: operations["listUserProducts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/user/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 订单列表
+         * @description 列出当前账户的订单，按购买时刻倒序。每笔订单记录买了哪个商品档位、几份、
+         *     实付金额与派生的存量；金额、数量与折算率都是十进制字符串，不经浮点。
+         */
+        get: operations["listUserOrders"];
+        put?: never;
+        /**
+         * 下单购买
+         * @description 购买一个商品档位：写入购买事实并派生账本，存量、有效期与折算率按档位口径生成。
+         *     归属由会话推导，不接受账户或商家参数。
+         *
+         *     幂等：请求必须携带客户端生成的 `idempotency_key`，服务端以
+         *     `(账户, idempotency_key)` 唯一。同一键重复提交（双击、超时重试）只产生一笔订单，
+         *     响应返回首次创建的那笔订单，不重复发放存量。键在账户内唯一，不同账户可用同一个键；
+         *     同一键用于不同的商品或份数时同样返回首次订单，不按本次请求重新下单。
+         */
+        post: operations["createUserOrder"];
         delete?: never;
         options?: never;
         head?: never;
@@ -710,7 +765,7 @@ export interface components {
          *     取值与常量名同时是前端业务码常量的生成来源。
          * @enum {integer}
          */
-        BusinessCode: 200 | 400 | 401 | 403 | 404 | 409 | 410 | 429 | 500;
+        BusinessCode: 200 | 400 | 401 | 402 | 403 | 404 | 409 | 410 | 429 | 500;
         /** @description 页面通信的统一信封，六个字段固定出现。 */
         Envelope: {
             code: components["schemas"]["BusinessCode"];
@@ -1020,6 +1075,68 @@ export interface components {
         };
         PageOfModelInfo: {
             items: components["schemas"]["ModelInfo"][];
+        };
+        /** @description 一个可购买的商品档位；数量与售价都是十进制字符串。 */
+        Product: {
+            /** Format: int64 */
+            id: number;
+            /** @description 档位名称，面向用户。 */
+            name: string;
+            /** @description 派生存量的结算单位 `currency` / `token` / `credit`。 */
+            unit: string;
+            /** @description 每份包含的数量，十进制字符串。 */
+            qty: string;
+            /** @description 售价，十进制字符串。 */
+            price: string;
+            /**
+             * @description 该档位的可用模型范围；`null` 表示不限。空数组表示一个模型都不含，
+             *     与 `null` 是两个不同的口径。
+             */
+            model_scope: string[] | null;
+            /** @description 派生账本的有效天数；`0` 表示不过期。 */
+            validity_days: number;
+        };
+        PageOfProduct: {
+            items: components["schemas"]["Product"][];
+        };
+        /** @description 下单请求；账户归属由会话推导，不接受账户或商家参数。 */
+        CreateOrderRequest: {
+            /** Format: int64 */
+            product_id: number;
+            /** @description 购买份数，正数的十进制字符串。 */
+            qty: string;
+            /**
+             * @description 客户端生成的幂等键。同一账户下同一键的重复提交只产生一笔订单，
+             *     响应返回首次创建的那笔订单；键在账户内唯一，不同账户可以用同一个键。
+             */
+            idempotency_key: string;
+        };
+        /** @description 一笔订单；金额、数量与折算率都是十进制字符串，不经浮点。 */
+        Order: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            product_id: number;
+            /** @description 购买时档位的名称。 */
+            product_name: string;
+            /** @description 派生存量的结算单位 `currency` / `token` / `credit`。 */
+            unit: string;
+            /** @description 购买份数，十进制字符串。 */
+            qty: string;
+            /** @description 实付金额，十进制字符串。 */
+            price_paid: string;
+            /** @description 本次购买派生的存量 = 每份数量 × 份数，十进制字符串。 */
+            total: string;
+            /** @description 购买时刻锁定的折算率 = 售价 / 每份数量，十进制字符串。 */
+            unit_rate: string;
+            /**
+             * Format: date-time
+             * @description 购买时刻。
+             */
+            purchased_at: string;
+        };
+        PageOfOrder: {
+            items: components["schemas"]["Order"][];
         };
         /** @description 一条请求记录的摘要与归属层字段。 */
         RequestItem: {
@@ -1358,6 +1475,19 @@ export interface components {
         };
         /** @description 未登录、会话失效或凭据错误，`code=401`。 */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Envelope"];
+            };
+        };
+        /**
+         * @description 账户无可用额度，`code=402`。与数据面同一判定（`settlement.Fundable`）：
+         *     没有任何未过期且可扣的账本，也不存在可透支的货币账本。
+         *     页面据此给出充值 / 购买引导（web/AGENTS.md 的三态）。
+         */
+        PaymentRequired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1893,6 +2023,95 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            402: components["responses"]["PaymentRequired"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUserProducts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 商品目录。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfProduct"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUserOrders: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 订单列表。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfOrder"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUserOrder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOrderRequest"];
+            };
+        };
+        responses: {
+            /** @description 订单；幂等命中时是首次创建的那笔。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["Order"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
         };

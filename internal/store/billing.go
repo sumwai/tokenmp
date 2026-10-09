@@ -847,6 +847,10 @@ type OrderRow struct {
 }
 
 // OrderRowFrom 把一笔购买与它的商品档位折成订单展示口径。
+//
+// 购买行的 qty / price_paid 从 DECIMAL 列读回时带列标度（写入 "2" 读回 "2.00000000"），
+// 这里按数值归一到 decimal.String() 的形态：否则同一笔订单在「下单响应」与「订单列表」
+// 两条路径上会给出不同的字符串，展示层也会把尾零一并显示出来。
 func OrderRowFrom(p Purchase, product Product) (OrderRow, error) {
 	productQty, err := decimal.NewFromString(product.Qty)
 	if err != nil {
@@ -860,13 +864,17 @@ func OrderRowFrom(p Purchase, product Product) (OrderRow, error) {
 	if err != nil {
 		return OrderRow{}, fmt.Errorf("store: 订单 %d 的份数无法解析: %w", p.ID, err)
 	}
+	pricePaid, err := decimal.NewFromString(p.PricePaid)
+	if err != nil {
+		return OrderRow{}, fmt.Errorf("store: 订单 %d 的实付金额无法解析: %w", p.ID, err)
+	}
 	return OrderRow{
 		ID:          p.ID,
 		ProductID:   product.ID,
 		ProductName: product.Name,
 		Unit:        product.Unit,
-		Qty:         p.Qty,
-		PricePaid:   p.PricePaid,
+		Qty:         qty.String(),
+		PricePaid:   pricePaid.String(),
 		Total:       productQty.Mul(qty).String(),
 		UnitRate:    DeriveUnitRate(productPrice, productQty),
 		PurchasedAt: p.PurchasedAt,

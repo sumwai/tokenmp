@@ -88,20 +88,40 @@ type createOrderRequest struct {
 }
 
 // newProductView 把商品档位裁剪为对外视图。
+//
+// 数量与售价从 DECIMAL 列读回时带列标度（写入 "10" 读回 "10.00000000"），这里归一到
+// decimal.String() 的形态：契约承诺的是十进制字符串，展示层只会按单位补零，不会截尾零。
 func newProductView(p store.Product) (productView, error) {
 	scope, err := decodeModelScope(p.ModelScope)
 	if err != nil {
 		return productView{}, err
 	}
+	qty, err := normalizeDecimal(p.Qty)
+	if err != nil {
+		return productView{}, fmt.Errorf("user: 商品 %d 的数量无法解析: %w", p.ID, err)
+	}
+	price, err := normalizeDecimal(p.Price)
+	if err != nil {
+		return productView{}, fmt.Errorf("user: 商品 %d 的价格无法解析: %w", p.ID, err)
+	}
 	return productView{
 		ID:           p.ID,
 		Name:         p.Name,
 		Unit:         string(p.Unit),
-		Qty:          p.Qty,
-		Price:        p.Price,
+		Qty:          qty,
+		Price:        price,
 		ModelScope:   scope,
 		ValidityDays: p.ValidityDays,
 	}, nil
+}
+
+// normalizeDecimal 把数据库读回的定点文本归一到 decimal.String() 的形态（去掉多余尾零）。
+func normalizeDecimal(raw string) (string, error) {
+	value, err := decimal.NewFromString(raw)
+	if err != nil {
+		return "", err
+	}
+	return value.String(), nil
 }
 
 // decodeModelScope 解析商品档位的可用模型范围；列值为 NULL 或空时返回 nil，
@@ -216,8 +236,8 @@ func (h *Handler) createOrder(w http.ResponseWriter, r *http.Request, account *s
 		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateIdempotencyKey(req.IdempotencyKey); err != nil {
-		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, err.Error())
+	if keyErr := validateIdempotencyKey(req.IdempotencyKey); keyErr != nil {
+		webapi.WriteError(w, http.StatusBadRequest, webapi.CodeBadRequest, keyErr.Error())
 		return
 	}
 	product, ok := h.lookupProduct(w, r, req.ProductID)

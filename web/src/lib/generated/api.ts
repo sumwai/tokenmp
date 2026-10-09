@@ -20,6 +20,10 @@ export const api = {
   createUserKey: (init: ApiInit<"/api/v1/user/keys", "post">) =>
     apiRequest("/api/v1/user/keys", "post", init),
 
+  /** 下单购买 */
+  createUserOrder: (init: ApiInit<"/api/v1/user/orders", "post">) =>
+    apiRequest("/api/v1/user/orders", "post", init),
+
   /** 注销账号 */
   eraseAccount: (init: ApiInit<"/api/v1/auth/erase", "post">) =>
     apiRequest("/api/v1/auth/erase", "post", init),
@@ -103,6 +107,14 @@ export const api = {
   /** 可用模型 */
   listUserModels: (init?: ApiInit<"/api/v1/user/models", "get">) =>
     apiRequest("/api/v1/user/models", "get", init),
+
+  /** 订单列表 */
+  listUserOrders: (init?: ApiInit<"/api/v1/user/orders", "get">) =>
+    apiRequest("/api/v1/user/orders", "get", init),
+
+  /** 商品目录 */
+  listUserProducts: (init?: ApiInit<"/api/v1/user/products", "get">) =>
+    apiRequest("/api/v1/user/products", "get", init),
 
   /** 请求记录 */
   listUserRequests: (init?: ApiInit<"/api/v1/user/requests", "get">) =>

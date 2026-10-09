@@ -24,6 +24,8 @@ const (
 	CapUsage = "usage"
 	// CapAccount 是账户概览查看。
 	CapAccount = "account"
+	// CapPurchase 是充值 / 购买：商品目录、下单与订单查看。
+	CapPurchase = "purchase"
 	// CapOps 是管理面能力：平台运营对象的只读清单页面。
 	CapOps = "ops"
 )
@@ -44,9 +46,9 @@ var stacks = map[string][]string{
 // 平台管理员另有管理面能力。商家面是否进控制台尚未定论（见 issue #143），
 // 定论只落在本表。
 var roleCapabilities = map[string][]string{
-	store.RoleMember:  {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
-	store.RolePartner: {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
-	store.RoleAdmin:   {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapOps},
+	store.RoleMember:  {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase},
+	store.RolePartner: {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase},
+	store.RoleAdmin:   {CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapPurchase, CapOps},
 }
 
 // Roles 把账号已授予的最高身份展开成叠加后的身份集合。
