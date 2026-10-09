@@ -1201,10 +1201,13 @@ func (p usagePredicate) where() (string, []any) {
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
+// scopeConditionCap 是作用域谓词的条件数上限：账户与商家各一个。
+const scopeConditionCap = 2
+
 // scopeConditions 组装作用域谓词：账户与商家各自按是否给出取值出现。
 func (p usagePredicate) scopeConditions() ([]string, []any) {
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 2)
+	conditions := make([]string, 0, scopeConditionCap)
+	args := make([]any, 0, scopeConditionCap)
 	if p.AccountID != 0 {
 		conditions = append(conditions, accountIDCondition)
 		args = append(args, p.AccountID)

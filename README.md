@@ -64,7 +64,7 @@ TOKENMP_MYSQL_DSN='user:password@tcp(db.example:3306)/tokenmp?parseTime=true' \
 
 | 组 | 动作 |
 |---|---|
-| `merchant` | `create` / `list` / `disable` |
+| `merchant` | `create` / `list` / `disable` / `set-owner` |
 | `channel` | `create` / `list` / `enable` / `disable` |
 | `credential` | `add` / `list` / `enable` / `disable` / `oauth-login` |
 | `model-map` | `set` / `list` / `disable` |
@@ -109,12 +109,15 @@ internal/oauth/         订阅型上游的 OAuth 协议交互：刷新、设备�
 internal/access/        客户端鉴权、额度预检与限额处置
 internal/apikey/        客户端 API 密钥的生成、展示前缀与存储哈希
 internal/auth/          页面账号体系：注册、登录、会话签发与销毁
+internal/identity/      页面身份与能力的唯一出处：身份叠加展开与能力并集
 internal/me/            账户自助查询端点：摘要、包存量、限额窗口与最近流水
 internal/user/          /api/v1/user/* 用户级业务端点
+internal/partner/       /api/v1/partner/* 商家域端点：上游账号与名下用量
 internal/webapi/        页面通信的公共部分：六字段信封与会话令牌解析
 internal/route/         选路候选链：加权随机首选与同协议／跨协议分段拼链
 internal/failure/       上游失败处理的唯一出处：诊断、处置与动作
 internal/observability/ 请求日志与尝试日志的字段拼装
+internal/requestlog/    请求记录落库：请求记录主表与尝试时间线
 internal/usage/         用量落库编排：归属补全、request 分量与结算接入
 internal/ratelimit/     渠道级进程内限流：令牌桶与并发位
 internal/circuit/       渠道级进程内熔断：连续失败隔离与半开探测
@@ -122,6 +125,7 @@ internal/billing/       计费领域的公共定义：计费指标与用量映�
 internal/quota/         窗口限额判定：窗口计算与超限比较
 internal/plan/          上游套餐与配额：耗尽判定、声明式探针与周期采集
 internal/settlement/    用量结算与商家分佣：定价解析、倍率链、账本扣减与账期出账
+internal/gateway/       转发网关装配：把适配器、凭据、上游、流水线、入口与鉴权接起来
 internal/store/         MySQL 连接、迁移与 schema 读写
 internal/admin/         管理面业务层：商家、渠道、账户、定价与充值
 internal/plugin/        网关中间件：moejs 沙箱加载、四个钩子与进程内统计

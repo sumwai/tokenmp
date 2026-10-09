@@ -174,6 +174,7 @@ func listMerchants(ctx context.Context, q querier) ([]Merchant, error) {
 		}
 		m.Kind = MerchantKindFromDB(kindRaw)
 		if owner.Valid {
+			//nolint:gosec // G115：owner_user_id 是非负的登录主体 id，列类型为 BIGINT UNSIGNED。
 			id := uint64(owner.Int64)
 			m.OwnerUserID = &id
 		}

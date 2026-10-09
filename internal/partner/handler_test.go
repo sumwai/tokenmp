@@ -144,7 +144,7 @@ func do(t *testing.T, h *Handler, method, path, body, token string) (int, map[st
 	} else {
 		reader = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, path, reader)
+	req := httptest.NewRequestWithContext(context.Background(), method, path, reader)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

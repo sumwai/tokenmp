@@ -707,6 +707,8 @@ func channelConfig(style domain.CredentialHeaderStyle) (json.RawMessage, error) 
 }
 
 // configFieldCredentialStyle 是渠道 config 里凭据注入形态的键名，与选路边界的读取口径同源。
+//
+//nolint:gosec // G101：这是渠道配置的键名，不是凭据。
 const configFieldCredentialStyle = "credential_style"
 
 // defaultChannelPriority / defaultChannelWeight 与 0001 迁移的列默认值一致：
