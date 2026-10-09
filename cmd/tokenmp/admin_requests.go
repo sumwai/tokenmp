@@ -111,7 +111,7 @@ func adminRequestsList(ctx context.Context, args []string, env *adminEnv) int {
 		[]string{
 			flagID, "request_id", "account_id", "api_key_id", headerCreatedAt, headerStatus,
 			"http_status", "upstream_status", "failure_class", "error_code", "duration_ms",
-			flagModel, "upstream_model", "protocol", "upstream_protocol", "cross_protocol",
+			flagModel, headerUpstreamModel, "protocol", "upstream_protocol", "cross_protocol",
 			"stream", "written_bytes", "payload_available",
 		},
 		rows, views)
@@ -174,7 +174,7 @@ func adminRequestsStats(ctx context.Context, args []string, env *adminEnv) int {
 			strconv.FormatInt(v.Failed, 10), strconv.FormatInt(v.Cancelled, 10),
 		})
 	}
-	return env.emit(*asJSON, []string{"key", "total", "success", "failed", "cancelled"}, rows, views)
+	return env.emit(*asJSON, []string{keyName, "total", "success", "failed", "cancelled"}, rows, views)
 }
 
 // parseRequestWindow 解析请求记录的 --since / --until；任一不可解析即报用法错误。
@@ -223,7 +223,7 @@ func writeRequestDetail(env *adminEnv, view *admin.RequestDetailView) int {
 		{"error_code", formatOptionalString(r.ErrorCode)},
 		{"duration_ms", strconv.FormatInt(r.DurationMS, 10)},
 		{flagModel, r.RequestedModel},
-		{"upstream_model", r.UpstreamModel},
+		{headerUpstreamModel, r.UpstreamModel},
 		{"protocol", r.Protocol},
 		{"upstream_protocol", r.UpstreamProtocol},
 		{"stream", formatBool(r.Stream)},

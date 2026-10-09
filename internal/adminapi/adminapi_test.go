@@ -176,13 +176,13 @@ func metaOf(t *testing.T, env map[string]json.RawMessage) (page, size, total int
 // listPaths 是全部只读清单路径，按契约顺序排列。
 var listPaths = []string{
 	MerchantsPath, ChannelsPath, CredentialsPath, ModelMapsPath, AccountsPath,
-	PricingPath, QuotasPath, AdjustmentsPath, UsagePath, SettlementsPath,
+	PricingPath, QuotasPath, AdjustmentsPath, UsagePath, RequestsPath, SettlementsPath,
 }
 
 // readOnlyPaths 是没有写入口的清单路径。渠道、凭据、模型映射与商家各自有配置动作，
 // 对它们发写方法得到的是动作分派的结果，不在此列。
 var readOnlyPaths = []string{
-	AccountsPath, PricingPath, QuotasPath, AdjustmentsPath, UsagePath, SettlementsPath,
+	AccountsPath, PricingPath, QuotasPath, AdjustmentsPath, UsagePath, RequestsPath, SettlementsPath,
 }
 
 // listItemKeys 是各清单里「一行」的标识字段名，供数条目用。
@@ -233,6 +233,7 @@ func TestAdminListsReturnItems(t *testing.T) {
 	lister.quotas = []admin.QuotaView{{ID: 7, Scope: billing.ScopeAccount, ScopeID: 5, LimitAmount: "10"}}
 	lister.adjustments = []store.Adjustment{{ID: 8, AccountID: 5, DeltaAmount: "-1", Reason: "退费"}}
 	lister.usage = []store.UsageListRow{{ID: 9, AccountID: 5, Model: "m", GrossAmount: "0.5", Multiplier: "1"}}
+	lister.requests = []admin.RequestView{{ID: 11, RequestID: "req-1", AccountID: 5, APIKeyID: 9, Status: "success", RequestedModel: "m", CreatedAt: time.Unix(0, 0).UTC()}}
 	lister.settlements = []settlement.BillView{{
 		MerchantID: 2, Period: "month", From: "2026-09-01T00:00:00Z", To: "2026-10-01T00:00:00Z",
 		CommissionRate: "0.1000", Trades: 3,
@@ -408,6 +409,71 @@ func TestUsageFilters(t *testing.T) {
 	status, env := do(t, h, http.MethodGet, UsagePath+"?since=昨天", "token")
 	if status != http.StatusBadRequest || codeOf(t, env) != webapi.CodeBadRequest {
 		t.Fatalf("非法 since 应 400: %d %s", status, env)
+	}
+}
+
+// TestRequestFilters 断言请求记录的过滤与分页透传：账户为 0 表示跨账户，page / size
+// 换算成 limit / offset 在数据库侧完成。
+func TestRequestFilters(t *testing.T) {
+	h, _, lister := newEnv()
+	const since = "2026-10-01T00:00:00Z"
+	const until = "2026-10-05T00:00:00Z"
+	status, env := do(t, h, http.MethodGet,
+		RequestsPath+"?account_id=5&api_key_id=9&model=gpt-4o&request_id=req-1&status=failed&since="+since+"&until="+until+"&page=2&size=5",
+		"token")
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	got := lister.lastRequestQuery
+	if got.AccountID != 5 || got.APIKeyID != 9 || got.RequestedModel != "gpt-4o" ||
+		got.RequestID != "req-1" || got.Status != "failed" {
+		t.Fatalf("过滤参数 = %+v", got)
+	}
+	if got.Limit != 5 || got.Offset != 5 {
+		t.Fatalf("分页 = limit %d / offset %d，期望 5 / 5", got.Limit, got.Offset)
+	}
+	wantSince, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		t.Fatalf("解析夹具时刻: %v", err)
+	}
+	wantUntil, err := time.Parse(time.RFC3339, until)
+	if err != nil {
+		t.Fatalf("解析夹具时刻: %v", err)
+	}
+	if !got.Since.Equal(wantSince) || !got.Until.Equal(wantUntil) {
+		t.Fatalf("时间区间 = %s ~ %s，期望 %s ~ %s", got.Since, got.Until, since, until)
+	}
+
+	// 缺省不过滤：账户为 0，limit 取 size 缺省值。
+	lister.lastRequestQuery = admin.RequestListQuery{}
+	if _, env := do(t, h, http.MethodGet, RequestsPath, "token"); codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("缺省查询应 200: %s", env)
+	}
+	if lister.lastRequestQuery.AccountID != 0 || lister.lastRequestQuery.Limit != defaultPageSize {
+		t.Fatalf("缺省查询 = %+v，期望跨账户且 limit 为默认页大小", lister.lastRequestQuery)
+	}
+
+	for _, query := range []string{"?since=昨天", "?api_key_id=0"} {
+		status, env := do(t, h, http.MethodGet, RequestsPath+query, "token")
+		if status != http.StatusBadRequest || codeOf(t, env) != webapi.CodeBadRequest {
+			t.Errorf("%s 应 400: %d %s", query, status, env)
+		}
+	}
+}
+
+// TestRequestViewFields 断言管理面清单带跨账户归属，且脱敏报文可用标志透传。
+func TestRequestViewFields(t *testing.T) {
+	h, _, lister := newEnv()
+	lister.requests = []admin.RequestView{{
+		ID: 11, RequestID: "req-1", AccountID: 5, APIKeyID: 9, Status: "failed",
+		RequestedModel: "claude-sonnet", PayloadAvailable: true, CreatedAt: time.Unix(0, 0).UTC(),
+	}}
+	_, env := do(t, h, http.MethodGet, RequestsPath, "token")
+	items := string(itemsOf(t, env))
+	for _, want := range []string{`"account_id":5`, `"request_id":"req-1"`, `"payload_available":true`, `"model":"claude-sonnet"`} {
+		if !strings.Contains(items, want) {
+			t.Errorf("请求记录清单缺 %s: %s", want, items)
+		}
 	}
 }
 

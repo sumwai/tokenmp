@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sumwai/tokenmp/internal/admin"
 	"github.com/sumwai/tokenmp/internal/billing"
 )
 
@@ -180,6 +182,104 @@ func TestAdminSettlementListWindowFlags(t *testing.T) {
 				t.Errorf("stderr 未包含 %q，实际：%s", tt.wantErr, stderr.String())
 			}
 		})
+	}
+}
+
+// TestAdminRequestsUsageErrors 覆盖 requests 组的用法校验：缺参、未知动作、非法
+// 过滤值与非法时刻都在连库前判定。用例都停在业务层之前，因此无需 service。
+func TestAdminRequestsUsageErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantErr  string
+	}{
+		{name: "缺动作", args: []string{requestsName}, wantCode: exitUsage, wantErr: "requests 需要动作"},
+		{name: "未知动作", args: []string{requestsName, "frobnicate"}, wantCode: exitUsage, wantErr: "requests 未知动作"},
+		{name: "get 缺 request-id", args: []string{requestsName, actionGet}, wantCode: exitUsage, wantErr: "需要 --request-id"},
+		{name: "list 非法终态", args: []string{requestsName, actionList, "--status", "nope"}, wantCode: exitUsage, wantErr: "--status 取值"},
+		{name: "list 非法条数", args: []string{requestsName, actionList, "--limit", "0"}, wantCode: exitUsage, wantErr: "--limit 必须为正"},
+		{name: "list 非法偏移", args: []string{requestsName, actionList, "--offset", "-1"}, wantCode: exitUsage, wantErr: "--offset 不能为负"},
+		{name: "list 非法时刻", args: []string{requestsName, actionList, "--since", "2026/01/01"}, wantCode: exitUsage, wantErr: "无法解析"},
+		{name: "stats 非法分组", args: []string{requestsName, actionStats, "--group-by", "week"}, wantCode: exitUsage, wantErr: "--group-by 取值"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			code := dispatchAdmin(context.Background(), tt.args, &adminEnv{stdout: &stdout, stderr: &stderr})
+			if code != tt.wantCode {
+				t.Errorf("退出码 = %d，期望 %d", code, tt.wantCode)
+			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("stderr 未包含 %q，实际：%s", tt.wantErr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestFormatRequestHelpers 覆盖请求详情与列表用到的可空值 / JSON 格式化。
+func TestFormatRequestHelpers(t *testing.T) {
+	if got := formatOptionalInt(nil); got != "-" {
+		t.Errorf("nil 整数应为占位符，得到 %q", got)
+	}
+	status := 429
+	if got := formatOptionalInt(&status); got != "429" {
+		t.Errorf("整数格式不符：%q", got)
+	}
+	if got := formatOptionalString(nil); got != "-" {
+		t.Errorf("nil 字符串应为占位符，得到 %q", got)
+	}
+	empty := ""
+	if got := formatOptionalString(&empty); got != "-" {
+		t.Errorf("空串应为占位符，得到 %q", got)
+	}
+	if got := formatJSONBlob(nil); got != "-" {
+		t.Errorf("无报文应为占位符，得到 %q", got)
+	}
+	if got := formatRewrittenParts(nil); got != "-" {
+		t.Errorf("无改写标注应为占位符，得到 %q", got)
+	}
+	if got := formatRewrittenParts([]string{"request_model"}); got != "request_model" {
+		t.Errorf("改写标注格式不符：%q", got)
+	}
+}
+
+// TestWriteRequestDetailOutput 断言 get 的人类可读输出包含摘要、尝试时间线与脱敏报文。
+func TestWriteRequestDetailOutput(t *testing.T) {
+	var stdout, stderr strings.Builder
+	env := &adminEnv{stdout: &stdout, stderr: &stderr}
+	upstreamStatus := 429
+	failureClass := "rate_limit"
+	view := &admin.RequestDetailView{
+		Request: admin.RequestView{
+			ID: 5, RequestID: "req-7f3a", AccountID: 1, APIKeyID: 9,
+			CreatedAt: time.Date(2026, 10, 5, 12, 30, 0, 0, time.UTC),
+			Status:    "failed", HTTPStatus: 502, UpstreamStatus: &upstreamStatus,
+			FailureClass: &failureClass, DurationMS: 85, RequestedModel: "claude-sonnet",
+			UpstreamModel: "claude-3-5-sonnet", Protocol: "anthropic_messages",
+			UpstreamProtocol: "anthropic_messages", Stream: true, PayloadAvailable: true,
+		},
+		Attempts: []admin.RequestAttemptView{{
+			Attempt: 1, Outcome: "failed", UpstreamStatus: &upstreamStatus,
+			FailureClass: &failureClass, DurationMS: 85,
+		}},
+		RequestShape:   json.RawMessage(`{"model":"claude-sonnet"}`),
+		RewrittenParts: []string{"request_model"},
+		ClientIP:       "203.0.113.7",
+		UserAgent:      "client/1.0",
+	}
+	if code := writeRequestDetail(env, view); code != exitOK {
+		t.Fatalf("退出码 = %d，期望 %d", code, exitOK)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"请求 req-7f3a", "account_id", "upstream_status", "client_ip", "203.0.113.7",
+		"尝试时间线（1 条）", "#1", "rate_limit", "请求报文", `{"model":"claude-sonnet"}`,
+		"改写标注", "request_model",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("输出缺少 %q：\n%s", want, out)
+		}
 	}
 }
 
