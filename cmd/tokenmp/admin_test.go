@@ -83,6 +83,8 @@ func TestAdminUsageExitCodes(t *testing.T) {
 		{name: "未知动作", args: []string{"merchant", "frobnicate"}, wantCode: exitUsage, wantErr: "merchant 未知动作"},
 		{name: "限额缺动作", args: []string{"quota"}, wantCode: exitUsage, wantErr: "quota 需要动作"},
 		{name: "限额未知动作", args: []string{"quota", "frobnicate"}, wantCode: exitUsage, wantErr: "quota 未知动作"},
+		{name: "结算缺动作", args: []string{"settlement"}, wantCode: exitUsage, wantErr: "settlement 需要动作"},
+		{name: "结算未知动作", args: []string{"settlement", "frobnicate"}, wantCode: exitUsage, wantErr: "settlement 未知动作"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,6 +123,50 @@ func TestAdminQuotaListScopeFlags(t *testing.T) {
 			name:     "未知 scope",
 			args:     []string{"quota", actionList, "--scope", "tenant", "--scope-id", "7"},
 			wantCode: exitUsage, wantErr: "未知的规则范围",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			code := dispatchAdmin(context.Background(), tt.args, &adminEnv{stdout: &stdout, stderr: &stderr})
+			if code != tt.wantCode {
+				t.Errorf("退出码 = %d，期望 %d", code, tt.wantCode)
+			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("stderr 未包含 %q，实际：%s", tt.wantErr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestAdminSettlementListWindowFlags 覆盖 settlement list 的账期参数校验：
+// --from 与 --to 必须成对，且终点必须晚于起点，都在连库前判定。
+func TestAdminSettlementListWindowFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantErr  string
+	}{
+		{
+			name:     "只给起点",
+			args:     []string{"settlement", actionList, "--from", "2026-09-01"},
+			wantCode: exitUsage, wantErr: "要么都给，要么都不给",
+		},
+		{
+			name:     "只给终点",
+			args:     []string{"settlement", actionList, "--to", "2026-10-01"},
+			wantCode: exitUsage, wantErr: "要么都给，要么都不给",
+		},
+		{
+			name:     "终点不晚于起点",
+			args:     []string{"settlement", actionList, "--from", "2026-10-01", "--to", "2026-09-01"},
+			wantCode: exitUsage, wantErr: "--to 必须晚于 --from",
+		},
+		{
+			name:     "时间参数不可解析",
+			args:     []string{"settlement", actionList, "--from", "2026/09/01"},
+			wantCode: exitUsage, wantErr: "无法解析",
 		},
 	}
 	for _, tt := range tests {

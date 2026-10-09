@@ -17,8 +17,9 @@
 | 7 流水与余额核对 | 步骤 7 admin 回读对账 |
 | 8 上游套餐配额 | 步骤 9 上游套餐配额跳过 |
 | 9 网关中间件 | `cmd/tokenmp/plugin_e2e_test.go` 的 `TestE2EPluginMiddleware` |
+| 10 商家分佣与结算出账 | 本文件独有：管理面出账是只读动作，e2e 剧本不演练 |
 
-第 4 步的调账命令不在 e2e 剧本内（剧本只演练限额），其余步骤与子测试逐项对应。
+第 4 步的调账命令不在 e2e 剧本内（剧本只演练限额），第 10 步同理，其余步骤与子测试逐项对应。
 订阅型凭据的 OAuth 登录与续期由 `cmd/tokenmp/oauth_e2e_test.go` 的 `TestE2EOAuthJourney`
 独立演练，本文件并入步骤 5。
 `make e2e` 的 DSN 经 `TOKENMP_TEST_MYSQL_DSN` 传入，须指向可丢弃的库。
@@ -726,3 +727,44 @@ $ curl -s localhost:8080/v1/chat/completions -H 'Authorization: Bearer ***' \
 - **取用成本随插件与依赖数量增长**。每个请求的取用都会核对插件文件的指纹（`mtime + 大小`），
   静态导入与运行期 `import()` 触及的文件各算一个。插件目录里文件越多，这段固定成本越高；
   用 `go test -bench 'BenchmarkAcquire' ./internal/plugin/` 对照即可，不必凭印象判断。
+
+## 步骤 10：商家分佣与结算出账
+
+出账不是运营改数，而是把已经发生的流水按商家自定的口径折成一张对账单；口径（抽成率、
+账期、四项合计的来源与相互约束）见 [docs/compatibility.md](compatibility.md) 的
+「分佣与结算口径」。本节的动作序列不在 e2e 剧本内。
+
+先给入驻商家配分账口径（平台抽成 10%、按自然月出账）：
+
+```
+$ tokenmp admin settlement set --merchant 2 --commission-rate 0.1 --period month
+已写入商家 2 的分账口径：抽成率 0.1000，账期 month
+```
+
+`--commission-rate` 与 `--period` 可以只给一个：没给的字段保留现值，不会被重置回默认口径。
+读回现值用 `settlement get`：
+
+```
+$ tokenmp admin settlement get --merchant 2
+merchant_id  commission_rate  period
+2            0.1000           month
+```
+
+按账期出账。不给区间时，每个商家按自己的账期取「上一个完整自然周期」：
+
+```
+$ tokenmp admin settlement list --merchant 2
+merchant_id  period  from                  to                    trades  gross_sales   commission   upstream_cost  payout
+2            month   2026-09-01T00:00:00Z  2026-10-01T00:00:00Z  1       100.00000000  10.00000000  30.00000000    60.00000000
+```
+
+核对口径：
+
+- **四项恒等式**：商家收益 + 平台抽成 = 卖出总额 − 上游成本。上例 60 + 10 = 100 − 30。
+  上游成本超过卖出总额时收益为负，那是账期事实，不被抹平。
+- **金额都是十进制字符串**，可直接当十进制数参与复算，不必担心 JSON 数字的双精度丢位。
+- **账期是左闭右开区间** `[from, to)`，边界时刻的流水归后一期。要按自定义区间出账时
+  `--from` 与 `--to` 一起给（接受 `2006-01-02`、`2006-01-02 15:04:05` 与 RFC3339）；只给一侧是用法错误。
+- 不给 `--merchant` 时列出全部商家，即全平台结算视图。
+- 出账是只读动作：它不动账户存量、不写账本。卖出总额取自 `account_purchase`，
+  上游成本取自 `billing_usage`。
