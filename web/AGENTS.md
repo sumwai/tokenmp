@@ -73,6 +73,10 @@
 ## 工程与门禁
 
 - 依赖与工具链版本只在仓库根 `.mise.toml` 声明。
+- 接口类型与薄请求客户端由 `npm run gen` 从 `docs/openapi-web.yaml` 生成到
+  `src/lib/generated/`：生成物入库、带「勿手改」文件头，`npm run gen:check` 校验生成物与
+  契约一致（CI 的 web job 跑它，漂移即失败）。生成范围只到类型与客户端，不生成页面、
+  状态与样式。请求层的运行时语义（信封解包、令牌注入与一次性刷新）手写在 `src/lib/client.ts`。
 - 前端检查走独立目标（lint / test），**不得并入 `make check`**——根门禁只依赖
   Go 与 golangci-lint。
 - 测试分层：纯逻辑与 hooks 用单元测试，关键流程（登录回跳、深层链接、权限路径）

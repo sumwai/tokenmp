@@ -7,7 +7,7 @@ GOLANGCI_LINT ?= golangci-lint
 # .golangci.yml 的 exclusions.paths 同步排除。
 GO_PKGS = $(shell $(GO) list ./... 2>/dev/null | grep -v node_modules)
 
-.PHONY: build build-binary test lint fmt fmt-check check check-integration e2e tools web-install web-lint web-test web-build
+.PHONY: build build-binary test lint fmt fmt-check check check-integration e2e tools web-install web-gen web-gen-check web-lint web-test web-build
 
 # 编译检查。刻意把产物导到临时目录并在退出时删除，而不是裸跑 `go build ./...`：
 # 当模块里只有一个 main 包时（本仓库当前就是），`go build ./...` 会把可执行文件
@@ -118,9 +118,11 @@ e2e:
 # 前端目标：node 门槛，刻意不进 check —— check 的契约是只依赖 Go 与 golangci-lint
 # （见 AGENTS.md）。工具链版本由 .mise.toml 统一声明。
 
-# 装前端依赖（web/package-lock.json 由首次安装生成并入库）。
+# 装前端依赖。用 npm ci 而不是 npm install：按 package-lock.json 精确安装，
+# 本机与 CI 装出同一棵树；lockfile 与 package.json 不同步时直接失败，
+# 而不是悄悄改写 lockfile。新增依赖在 web/ 内 npm install <pkg> 并提交 lockfile。
 web-install:
-	cd web && npm install
+	cd web && npm ci
 
 # 前端静态检查。
 web-lint:
@@ -133,6 +135,15 @@ web-test:
 # 前端类型检查与构建；产物在 web/dist，由部署侧取用，不入二进制。
 web-build:
 	cd web && npm run build
+
+# 按 docs/openapi-web.yaml 生成前端类型、业务码与薄请求客户端（web/src/lib/generated/）。
+web-gen:
+	cd web && npm run gen
+
+# 生成物与契约的漂移核对：不一致即非零退出。改了契约必须重新生成并提交产物，
+# CI 的 web job 跑本目标，所以漂移必然被拦下。
+web-gen-check:
+	cd web && npm run gen:check
 
 # 按 .mise.toml 装齐本机工具链。
 tools:

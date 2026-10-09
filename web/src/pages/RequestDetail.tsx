@@ -76,7 +76,7 @@ export function RequestDetail() {
       ) : (
         <div className="mt-4">
           <ErrorPanel
-            error={new ApiError(Code.Internal, '服务端错误')}
+            error={new ApiError(Code.InternalError, '服务端错误')}
             onRetry={detail.reload}
           />
         </div>

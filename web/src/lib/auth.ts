@@ -1,37 +1,28 @@
-import { request } from './client';
+import type { Payload } from './client';
 import { ApiError, Code } from './envelope';
+import { api } from './generated/api';
+import type { components } from './generated/schema';
 import { encryptSecret, fetchChallenge, fingerprint } from './crypto';
 import { saveOauthProvider } from './session';
 
-/** 认证端点的请求与响应类型，与 docs/openapi-web.yaml 对齐。 */
+/**
+ * 认证端点的调用封装。
+ *
+ * 请求与响应类型一律取自契约生成物（./generated），本文件只承担流程：
+ * 「取公钥 → 加密 → 提交 → 410 重试一次」，以及把结果收窄成页面要的形状。
+ */
 
 /** SessionUser 是会话返回的身份。 */
-export interface SessionUser {
-  id: number;
-  username: string;
-  role: string;
-  identities: string[];
-}
+export type SessionUser = components['schemas']['SessionUser'];
 
 /** SessionTokens 是登录与注册的签发结果。 */
-export interface SessionTokens {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  user: SessionUser;
-}
+export type SessionTokens = components['schemas']['SessionTokens'];
 
 /** AuthProvider 是一个可用的第三方登录方式。 */
-export interface AuthProvider {
-  id: string;
-  name: string;
-}
+export type AuthProvider = components['schemas']['AuthProvider'];
 
-/** OAuthAuthorizeData 是第三方授权跳转地址。 */
-export interface OAuthAuthorizeData {
-  authorize_url: string;
-  state: string;
-}
+/** OAuthAuthorizeData 是第三方授权跳转地址，取自契约里该端点的成功响应。 */
+export type OAuthAuthorizeData = Payload<'/api/v1/auth/oauth/{provider}', 'get'>;
 
 /**
  * withSecret 承担「取公钥 → 加密 → 提交 → 410 重试一次」的通用流程。
@@ -40,23 +31,17 @@ export interface OAuthAuthorizeData {
  * 其它错误原样上抛。plain 是明文密码，只在本函数栈内存在。
  */
 async function withSecret<T>(
-  path: string,
   plain: string,
-  build: (cipher: string, fp: string) => unknown,
-  method = 'POST',
+  call: (cipher: string, fp: string) => Promise<T>,
 ): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     const challenge = await fetchChallenge();
     const cipher = await encryptSecret(plain, challenge.public_key);
     try {
-      const data = await request<T>(path, {
-        method,
-        body: JSON.stringify(build(cipher, fingerprint())),
-        skipRefresh: true,
-      });
+      const data = await call(cipher, fingerprint());
       if (!data) {
-        throw new ApiError(Code.Internal, '服务端错误');
+        throw new ApiError(Code.InternalError, '服务端错误');
       }
       return data;
     } catch (error) {
@@ -71,12 +56,12 @@ async function withSecret<T>(
 
 /** signin 登录。 */
 export async function signin(identifier: string, password: string): Promise<SessionTokens> {
-  const data = await withSecret<SessionTokens>(
-    '/api/v1/auth/signin',
-    password,
-    (cipher, fp) => ({ username: identifier, password: cipher, fingerprint: fp }),
+  return withSecret(password, (cipher, fp) =>
+    api.signin({
+      body: { username: identifier, password: cipher, fingerprint: fp },
+      skipRefresh: true,
+    }),
   );
-  return data;
 }
 
 /** signup 注册。 */
@@ -85,10 +70,11 @@ export async function signup(
   username: string,
   password: string,
 ): Promise<SessionTokens> {
-  return withSecret<SessionTokens>(
-    '/api/v1/auth/signup',
-    password,
-    (cipher, fp) => ({ email, username, password: cipher, fingerprint: fp }),
+  return withSecret(password, (cipher, fp) =>
+    api.signup({
+      body: { email, username, password: cipher, fingerprint: fp },
+      skipRefresh: true,
+    }),
   );
 }
 
@@ -98,10 +84,11 @@ export async function resetPassword(
   otp: string,
   password: string,
 ): Promise<void> {
-  await withSecret<null>(
-    '/api/v1/auth/reset',
-    password,
-    (cipher, fp) => ({ email, otp, password: cipher, fingerprint: fp }),
+  await withSecret(password, (cipher, fp) =>
+    api.resetPassword({
+      body: { email, otp, password: cipher, fingerprint: fp },
+      skipRefresh: true,
+    }),
   );
 }
 
@@ -117,14 +104,13 @@ export async function changePassword(
     const newChallenge = await fetchChallenge();
     const newCipher = await encryptSecret(newPassword, newChallenge.public_key);
     try {
-      await request<null>('/api/v1/auth/password', {
-        method: 'PUT',
-        body: JSON.stringify({
+      await api.changePassword({
+        body: {
           current_password: currentCipher,
           current_fingerprint: fp,
           new_password: newCipher,
           new_fingerprint: fp,
-        }),
+        },
         skipRefresh: true,
       });
       return;
@@ -140,7 +126,7 @@ export async function changePassword(
 
 /** session 查询当前身份。 */
 export async function session(): Promise<SessionUser> {
-  const data = await request<SessionUser>('/api/v1/auth/session', { method: 'GET' });
+  const data = await api.getAuthSession();
   if (!data) {
     throw new ApiError(Code.Unauthorized, '登录状态已失效');
   }
@@ -149,31 +135,27 @@ export async function session(): Promise<SessionUser> {
 
 /** signout 登出（幂等）。 */
 export async function signout(): Promise<void> {
-  await request<null>('/api/v1/auth/signout', { method: 'POST' });
+  await api.signout();
 }
 
 /** sendOtp 发送一次性验证码（purpose: reset | erase）。 */
 export async function sendOtp(email: string, purpose: 'reset' | 'erase'): Promise<void> {
-  await request<null>('/api/v1/auth/otp', {
-    method: 'POST',
-    body: JSON.stringify({ email, purpose }),
+  await api.sendAuthOtp({
+    body: { email, purpose },
     skipRefresh: true,
   });
 }
 
 /** listProviders 列出已配置的第三方登录方式。 */
 export async function listProviders(): Promise<AuthProvider[]> {
-  const data = await request<{ items: AuthProvider[] }>('/api/v1/auth/providers', {
-    method: 'GET',
-    skipRefresh: true,
-  });
+  const data = await api.listAuthProviders({ skipRefresh: true });
   return data?.items ?? [];
 }
 
 /** oauthAuthorize 取第三方授权跳转地址；发起时记录提供方供回调页使用。 */
 export async function oauthAuthorize(provider: string): Promise<OAuthAuthorizeData> {
-  const data = await request<OAuthAuthorizeData>(`/api/v1/auth/oauth/${provider}`, {
-    method: 'GET',
+  const data = await api.getAuthOauthUrl({
+    params: { path: { provider } },
     skipRefresh: true,
   });
   if (!data) {
@@ -189,13 +171,13 @@ export async function oauthExchange(
   code: string,
   state: string,
 ): Promise<SessionTokens> {
-  const data = await request<SessionTokens>(`/api/v1/auth/oauth/${provider}/exchange`, {
-    method: 'POST',
-    body: JSON.stringify({ code, state }),
+  const data = await api.exchangeAuthOauth({
+    params: { path: { provider } },
+    body: { code, state },
     skipRefresh: true,
   });
   if (!data) {
-    throw new ApiError(Code.Internal, '服务端错误');
+    throw new ApiError(Code.InternalError, '服务端错误');
   }
   return data;
 }

@@ -73,6 +73,8 @@ describe('前端零角色分支', () => {
   it('web/src 里没有角色取值字面量', () => {
     const offenders = Object.entries(sources)
       .filter(([path]) => !path.includes('.test.'))
+      // 生成物镜像契约，必然出现角色取值（SessionUser.role 的 enum）；红线针对手写代码。
+      .filter(([path]) => !path.includes('/generated/'))
       .filter(([, text]) => roleLiteral.test(text))
       .map(([path]) => path);
     expect(offenders).toEqual([]);

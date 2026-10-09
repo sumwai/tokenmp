@@ -249,7 +249,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/SessionData"
+                        $ref: "#/components/schemas/SessionUser"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -892,14 +892,22 @@ components:
         与数据面的模型 API 密钥是两套独立凭据，不得互换。
 
   schemas:
+    BusinessCode:
+      type: integer
+      description: |-
+        业务结果码，取值见 info.description 的业务码表；程序按它分支，不解析 message。
+        取值与常量名同时是前端业务码常量的生成来源。
+      enum: [200, 400, 401, 403, 404, 409, 410, 429, 500]
+      x-enum-varnames:
+        [OK, BadRequest, Unauthorized, Forbidden, NotFound, Conflict, ChallengeExpired, TooManyRequests, InternalError]
+
     Envelope:
       type: object
       description: 页面通信的统一信封，六个字段固定出现。
       required: [code, data, message, page, size, total]
       properties:
         code:
-          type: integer
-          description: 业务结果码，取值见 info.description 的业务码表；程序按它分支。
+          $ref: "#/components/schemas/BusinessCode"
         data:
           description: 业务数据，结构由各端点声明；无数据时省略或为 null。
         message:
@@ -1010,14 +1018,6 @@ components:
         expires_in:
           type: integer
           description: 访问令牌有效期，单位秒。
-      additionalProperties: false
-
-    SessionData:
-      type: object
-      required: [user]
-      properties:
-        user:
-          $ref: "#/components/schemas/SessionUser"
       additionalProperties: false
 
     SessionUser:
