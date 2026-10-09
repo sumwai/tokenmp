@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatDecimal, formatUnitAmount, parseUnsignedInt } from './decimal';
+import { addDecimals, formatDecimal, formatUnitAmount, parseUnsignedInt } from './decimal';
 
 describe('formatDecimal', () => {
   it('整数部分加千分位，小数位补到展示位数', () => {
@@ -35,6 +35,36 @@ describe('formatDecimal', () => {
     expect(formatDecimal('n/a', 2)).toBe('n/a');
     expect(formatDecimal('1,000', 2)).toBe('1,000');
     expect(formatDecimal('12abc', 2)).toBe('12abc');
+  });
+});
+
+describe('addDecimals', () => {
+  it('整数与小数按位相加，结果不带多余尾零', () => {
+    expect(addDecimals(['1', '2'])).toBe('3');
+    expect(addDecimals(['0.1', '0.2'])).toBe('0.3');
+    expect(addDecimals(['1234.5', '1'])).toBe('1235.5');
+    expect(addDecimals(['1.999', '0.001'])).toBe('2');
+    expect(addDecimals([])).toBe('0');
+  });
+
+  it('超出双精度的大数逐位保真：经 Number 会丢末位', () => {
+    expect(addDecimals(['9007199254740993', '1'])).toBe('9007199254740994');
+    expect(addDecimals(['123456789012345678901234567890', '1'])).toBe(
+      '123456789012345678901234567891',
+    );
+  });
+
+  it('负数与零按符号相加', () => {
+    expect(addDecimals(['1.5', '-0.5'])).toBe('1');
+    expect(addDecimals(['1', '-3'])).toBe('-2');
+    expect(addDecimals(['1', '-1'])).toBe('0');
+  });
+
+  it('非十进制形态的取值使合计取不回，返回 null', () => {
+    expect(addDecimals(['1', ''])).toBeNull();
+    expect(addDecimals(['n/a'])).toBeNull();
+    expect(addDecimals(['1,000'])).toBeNull();
+    expect(addDecimals(['1.2.3'])).toBeNull();
   });
 });
 
