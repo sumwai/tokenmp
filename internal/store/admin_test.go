@@ -232,8 +232,9 @@ func TestListMerchantsScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("意外错误：%v", err)
 	}
-	if fake.query != listMerchantsSQL {
-		t.Errorf("SQL = %q，期望 %q", fake.query, listMerchantsSQL)
+	wantQuery := "SELECT " + merchantColumns + " FROM merchant ORDER BY id"
+	if fake.query != wantQuery {
+		t.Errorf("SQL = %q，期望 %q", fake.query, wantQuery)
 	}
 	if len(got) != 2 || got[0].Code != "platform" || got[0].Kind != MerchantKindPlatform || !got[0].CreatedAt.Equal(created) {
 		t.Errorf("结果不符：%+v", got)

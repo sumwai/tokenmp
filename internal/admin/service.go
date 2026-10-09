@@ -27,6 +27,8 @@ type Store interface {
 	// 商家。
 	InsertMerchant(ctx context.Context, m store.Merchant) (uint64, error)
 	ListMerchants(ctx context.Context) ([]store.Merchant, error)
+	MerchantByID(ctx context.Context, id uint64) (*store.Merchant, error)
+	UpdateMerchant(ctx context.Context, id uint64, code, name string, kind store.MerchantKind) error
 	SetMerchantStatus(ctx context.Context, id uint64, status string) error
 	// 商家分账口径与账期聚合。读出的 settle_info 是原文，解析规则在 internal/settlement。
 	MerchantSettleInfo(ctx context.Context, id uint64) ([]byte, error)
@@ -38,18 +40,24 @@ type Store interface {
 	// 渠道。
 	InsertChannel(ctx context.Context, c store.Channel) (uint64, error)
 	ListChannels(ctx context.Context) ([]store.Channel, error)
+	ChannelByID(ctx context.Context, id uint64) (*store.Channel, error)
+	UpdateChannel(ctx context.Context, c store.Channel) error
 	SetChannelEnabled(ctx context.Context, id uint64, enabled bool) error
 
 	// 上游凭据。
 	InsertCredential(ctx context.Context, c store.CredentialRow) (uint64, error)
 	ListCredentials(ctx context.Context) ([]store.CredentialRow, error)
+	CredentialByID(ctx context.Context, id uint64) (*store.CredentialRow, error)
+	UpdateCredential(ctx context.Context, c store.CredentialRow) error
 	SetCredentialEnabled(ctx context.Context, id uint64, enabled bool) error
 	// ChannelConfigByCredGroup 读凭据分组对应渠道的 config JSON，供 OAuth 登录取端点画像。
 	ChannelConfigByCredGroup(ctx context.Context, merchantID uint64, credGroup string) ([]byte, error)
 
 	// 渠道模型映射。
 	UpsertModelMap(ctx context.Context, m store.ModelMap) (uint64, error)
+	UpdateModelMap(ctx context.Context, m store.ModelMap) error
 	ListModelMaps(ctx context.Context) ([]store.ModelMap, error)
+	ModelMapByID(ctx context.Context, id uint64) (*store.ModelMap, error)
 	SetModelMapEnabled(ctx context.Context, id uint64, enabled bool) error
 
 	// 账户。
@@ -63,6 +71,9 @@ type Store interface {
 	InsertAPIKey(ctx context.Context, k store.APIKey) (uint64, error)
 	ListAPIKeys(ctx context.Context) ([]store.APIKey, error)
 	SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) error
+
+	// 登录主体：商家归属绑定前校验主体存在。
+	WebUserByID(ctx context.Context, id uint64) (*store.WebUser, error)
 
 	// 账本。
 	InsertBucket(ctx context.Context, b store.BucketRow) (uint64, error)

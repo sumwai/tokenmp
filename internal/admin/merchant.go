@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -13,23 +12,51 @@ import (
 
 // 本文件是商家与渠道的管理动作。
 
+// merchantRow 校验商家字段并折成存储行；新建与修改共用同一套口径。
+//
+// 不带状态与归属：状态由 Enable / DisableMerchant 置位，归属由 SetMerchantOwner 绑定。
+func merchantRow(code, name string, kind store.MerchantKind) (store.Merchant, error) {
+	if err := requireString("商家 code", code); err != nil {
+		return store.Merchant{}, err
+	}
+	if err := requireString("商家 name", name); err != nil {
+		return store.Merchant{}, err
+	}
+	if err := store.ValidateMerchantKind(kind); err != nil {
+		return store.Merchant{}, err
+	}
+	return store.Merchant{Code: code, Name: name, Kind: kind}, nil
+}
+
 // CreateMerchant 新建一个商家；新建一律 active，停用是独立动作。
 //
 // 入驻商家（partner）与平台自营走同一条路径，kind 只是数据：平台自营也是一行数据，
 // 不是特例。
 func (s *Service) CreateMerchant(ctx context.Context, code, name string, kind store.MerchantKind) (uint64, error) {
-	if err := requireString("商家 code", code); err != nil {
+	row, err := merchantRow(code, name, kind)
+	if err != nil {
 		return 0, err
 	}
-	if err := requireString("商家 name", name); err != nil {
-		return 0, err
+	row.Status = store.StatusActive
+	return s.store.InsertMerchant(ctx, row)
+}
+
+// UpdateMerchant 改一个商家的编码、名称与类型。
+//
+// 状态与归属不在这里：前者走 Enable / DisableMerchant，后者走 SetMerchantOwner，
+// 三者的写入条件不同（归属有唯一键，状态是启停动作）。
+func (s *Service) UpdateMerchant(ctx context.Context, id uint64, code, name string, kind store.MerchantKind) error {
+	if err := requireID("商家 id", id); err != nil {
+		return err
 	}
-	if err := store.ValidateMerchantKind(kind); err != nil {
-		return 0, err
+	row, err := merchantRow(code, name, kind)
+	if err != nil {
+		return err
 	}
-	return s.store.InsertMerchant(ctx, store.Merchant{
-		Code: code, Name: name, Kind: kind, Status: store.StatusActive,
-	})
+	if _, err := s.store.MerchantByID(ctx, id); err != nil {
+		return requireRow(err, notFoundf("admin: 商家 %d 不存在", id))
+	}
+	return s.store.UpdateMerchant(ctx, id, row.Code, row.Name, row.Kind)
 }
 
 // ListMerchants 列出全部商家。
@@ -39,10 +66,27 @@ func (s *Service) ListMerchants(ctx context.Context) ([]store.Merchant, error) {
 
 // DisableMerchant 停用一个商家。
 func (s *Service) DisableMerchant(ctx context.Context, id uint64) error {
+	return s.setMerchantStatus(ctx, id, store.StatusDisabled)
+}
+
+// EnableMerchant 启用一个商家。
+//
+// 与 DisableMerchant 成对：停用是运营动作，误停之后必须能原地恢复。
+func (s *Service) EnableMerchant(ctx context.Context, id uint64) error {
+	return s.setMerchantStatus(ctx, id, store.StatusActive)
+}
+
+// setMerchantStatus 是启用 / 停用的公共校验与调用。
+//
+// 先确认这一行存在：主键写错时不至于得到「停用成功」而实际什么都没变。
+func (s *Service) setMerchantStatus(ctx context.Context, id uint64, status string) error {
 	if err := requireID("商家 id", id); err != nil {
 		return err
 	}
-	return s.store.SetMerchantStatus(ctx, id, store.StatusDisabled)
+	if _, err := s.store.MerchantByID(ctx, id); err != nil {
+		return requireRow(err, notFoundf("admin: 商家 %d 不存在", id))
+	}
+	return s.store.SetMerchantStatus(ctx, id, status)
 }
 
 // SetMerchantOwner 把商家绑定到一个登录主体，商家域的作用域由此推导。
@@ -55,6 +99,14 @@ func (s *Service) SetMerchantOwner(ctx context.Context, id, userID uint64) error
 	}
 	if err := requireID("登录主体 id", userID); err != nil {
 		return err
+	}
+	if _, err := s.store.MerchantByID(ctx, id); err != nil {
+		return requireRow(err, notFoundf("admin: 商家 %d 不存在", id))
+	}
+	// 绑定前先确认主体存在：web_user.id 是自增的，绑到一个还不存在的 id 之后，
+	// 那个 id 被后来注册的人拿到时，这个商家连同它在商家域的全部数据会归到对方名下。
+	if _, err := s.store.WebUserByID(ctx, userID); err != nil {
+		return requireRow(err, invalidf("admin: 登录主体 %d 不存在", userID))
 	}
 	return s.store.SetMerchantOwner(ctx, id, userID)
 }
@@ -102,12 +154,12 @@ func channelConfigJSON(raw string, style domain.CredentialHeaderStyle) (json.Raw
 		return config, nil
 	}
 	if !style.Valid() {
-		return nil, fmt.Errorf("admin: 凭据注入形态 %q 不受支持", string(style))
+		return nil, invalidf("admin: 凭据注入形态 %q 不受支持", string(style))
 	}
 	object := map[string]json.RawMessage{}
 	if len(config) > 0 {
 		if uerr := json.Unmarshal(config, &object); uerr != nil {
-			return nil, errors.New("渠道 config 必须是 JSON 对象")
+			return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 		}
 	}
 	encoded, err := json.Marshal(string(style))
@@ -122,25 +174,29 @@ func channelConfigJSON(raw string, style domain.CredentialHeaderStyle) (json.Raw
 	return json.RawMessage(merged), nil
 }
 
-// CreateChannel 新建一条渠道。
+// channelRow 校验渠道字段并折成存储行；新建与修改共用同一套口径。
 //
 // 协议方言决定数据面的分发键，必须走 store 白名单；priority / weight 为 0 时
 // 取列默认值 100，避免把「没配」写成 0（0 会让该渠道永远排在最后）。
-func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, error) {
+// 归属商家先确认存在：引用不存在会留下归属不明的行。
+func (s *Service) channelRow(ctx context.Context, in ChannelInput) (store.Channel, error) {
 	if err := requireID("渠道 merchant", in.MerchantID); err != nil {
-		return 0, err
+		return store.Channel{}, err
+	}
+	if _, err := s.store.MerchantByID(ctx, in.MerchantID); err != nil {
+		return store.Channel{}, requireRow(err, invalidf("admin: 商家 %d 不存在", in.MerchantID))
 	}
 	if err := requireString("渠道 name", in.Name); err != nil {
-		return 0, err
+		return store.Channel{}, err
 	}
 	if err := store.ValidateChannelType(in.Type); err != nil {
-		return 0, err
+		return store.Channel{}, err
 	}
 	if err := requireString("渠道 cred-group", in.CredGroup); err != nil {
-		return 0, err
+		return store.Channel{}, err
 	}
 	if err := requireString("渠道 base-url", in.BaseURL); err != nil {
-		return 0, err
+		return store.Channel{}, err
 	}
 	if in.Priority == 0 {
 		in.Priority = defaultChannelPriority
@@ -150,9 +206,9 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 	}
 	config, err := channelConfigJSON(in.Config, in.CredentialStyle)
 	if err != nil {
-		return 0, err
+		return store.Channel{}, err
 	}
-	return s.store.InsertChannel(ctx, store.Channel{
+	return store.Channel{
 		MerchantID: in.MerchantID,
 		Name:       in.Name,
 		Vendor:     in.Vendor,
@@ -162,7 +218,34 @@ func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, e
 		Priority:   in.Priority,
 		Weight:     in.Weight,
 		Config:     config,
-	})
+	}, nil
+}
+
+// CreateChannel 新建一条渠道。
+func (s *Service) CreateChannel(ctx context.Context, in ChannelInput) (uint64, error) {
+	row, err := s.channelRow(ctx, in)
+	if err != nil {
+		return 0, err
+	}
+	return s.store.InsertChannel(ctx, row)
+}
+
+// UpdateChannel 改一条渠道的全部配置字段。
+//
+// 启用位不在本动作里：启停是独立的运营动作，改配置不应把一条已停用的渠道意外启用。
+func (s *Service) UpdateChannel(ctx context.Context, id uint64, in ChannelInput) error {
+	if err := requireID("渠道 id", id); err != nil {
+		return err
+	}
+	if _, err := s.store.ChannelByID(ctx, id); err != nil {
+		return requireRow(err, notFoundf("admin: 渠道 %d 不存在", id))
+	}
+	row, err := s.channelRow(ctx, in)
+	if err != nil {
+		return err
+	}
+	row.ID = id
+	return s.store.UpdateChannel(ctx, row)
 }
 
 // channelConfigArg 校验渠道扩展配置是 JSON 对象，空值表示不配置。
@@ -173,10 +256,10 @@ func channelConfigArg(raw string) (json.RawMessage, error) {
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
-		return nil, errors.New("渠道 config 必须是 JSON 对象")
+		return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 	}
 	if object == nil {
-		return nil, errors.New("渠道 config 必须是 JSON 对象")
+		return nil, invalidf("admin: 渠道 config 必须是 JSON 对象")
 	}
 	if err := validateConfigHeaders(object); err != nil {
 		return nil, err
@@ -199,11 +282,11 @@ func validateConfigHeaders(object map[string]json.RawMessage) error {
 	}
 	var headers map[string]string
 	if err := json.Unmarshal(raw, &headers); err != nil {
-		return errors.New("渠道 config 的 headers 必须是字符串到字符串的 JSON 对象")
+		return invalidf("admin: 渠道 config 的 headers 必须是字符串到字符串的 JSON 对象")
 	}
 	for name := range headers {
 		if domain.IsReservedUpstreamHeader(name) {
-			return fmt.Errorf("admin: 渠道静态请求头 %q 由网关自身占用，不能配置", name)
+			return invalidf("admin: 渠道静态请求头 %q 由网关自身占用，不能配置", name)
 		}
 	}
 	return nil
@@ -228,6 +311,9 @@ func (s *Service) DisableChannel(ctx context.Context, id uint64) error {
 func (s *Service) setChannelEnabled(ctx context.Context, id uint64, enabled bool) error {
 	if err := requireID("渠道 id", id); err != nil {
 		return err
+	}
+	if _, err := s.store.ChannelByID(ctx, id); err != nil {
+		return requireRow(err, notFoundf("admin: 渠道 %d 不存在", id))
 	}
 	return s.store.SetChannelEnabled(ctx, id, enabled)
 }

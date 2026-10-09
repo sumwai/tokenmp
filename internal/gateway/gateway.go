@@ -486,6 +486,7 @@ func New(st gatewayStore, opts Options) (*Gateway, error) {
 		mux.Handle(adminapi.PathPrefix, adminapi.NewHandler(adminapi.Options{
 			Sessions: webAuth,
 			Lister:   service,
+			Writer:   service,
 		}))
 	}
 	// 商家域挂在同一页面会话之上：归属由会话推导出的商家给定，读与写都按商家收敛，
