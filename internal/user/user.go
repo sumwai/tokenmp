@@ -41,12 +41,12 @@ const itemsKey = "items"
 
 // Sessions 解析页面会话令牌，由 internal/auth 的会话实现满足。
 type Sessions interface {
-	// SessionSubject 解析访问令牌并返回登录主体 id 与角色；令牌无效、会话已撤销
+	// SessionSubject 解析访问令牌并返回登录主体 id 与身份集合；令牌无效、会话已撤销
 	// 或已过期时返回错误。
 	//
-	// 回角色是控制台清单端点的需要：清单按角色生成能力集合。作用域推导只需要 id，
-	// 两者共用一次会话读取，同一请求不会读两遍会话。
-	SessionSubject(ctx context.Context, accessToken string) (userID uint64, role string, err error)
+	// 回身份集合是控制台清单端点的需要：身份是叠加的，清单按各身份取能力并集。
+	// 作用域推导只需要 id，两者共用一次会话读取，同一请求不会读两遍会话。
+	SessionSubject(ctx context.Context, accessToken string) (userID uint64, roles []string, err error)
 }
 
 // Store 是用户级端点依赖的数据面。

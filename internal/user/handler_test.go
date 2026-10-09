@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sumwai/tokenmp/internal/identity"
 	"github.com/sumwai/tokenmp/internal/me"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
@@ -19,15 +20,15 @@ import (
 
 type fakeSessions struct {
 	userID uint64
-	role   string
+	roles  []string
 	err    error
 }
 
-func (f *fakeSessions) SessionSubject(_ context.Context, _ string) (uint64, string, error) {
+func (f *fakeSessions) SessionSubject(_ context.Context, _ string) (uint64, []string, error) {
 	if f.err != nil {
-		return 0, "", f.err
+		return 0, nil, f.err
 	}
-	return f.userID, f.role, nil
+	return f.userID, f.roles, nil
 }
 
 type fakeStore struct {
@@ -196,7 +197,7 @@ type testEnv struct {
 }
 
 func newTestEnv() *testEnv {
-	session := &fakeSessions{userID: 7, role: store.RoleMember}
+	session := &fakeSessions{userID: 7, roles: identity.Roles(store.RoleMember)}
 	st := &fakeStore{account: &store.Account{ID: 42, Code: "acc_42"}}
 	summary := &fakeSummary{summary: &me.Summary{Account: me.AccountView{ID: 42, Code: "acc_42"}}}
 	return &testEnv{

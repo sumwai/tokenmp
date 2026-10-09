@@ -5,13 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 
+	"github.com/sumwai/tokenmp/internal/identity"
 	"github.com/sumwai/tokenmp/internal/store"
 	"github.com/sumwai/tokenmp/internal/webapi"
 )
 
-// 本文件覆盖控制台清单端点：会话与账户两道判定、按角色的能力集合、条目过滤与
+// 本文件覆盖控制台清单端点：会话与账户两道判定、按身份并集的能力集合、条目过滤与
 // 清单的空值形状。判定过程不经数据库。
 
 // consoleDataOf 解出清单响应里的 data。
@@ -68,12 +70,15 @@ func TestConsoleRejectsNonGet(t *testing.T) {
 	}
 }
 
-// TestConsolePerRole 覆盖三种角色的清单：角色差异只来自服务端的能力集合，
-// 条目按能力过滤，因此前端不需要按角色分支。
-func TestConsolePerRole(t *testing.T) {
+// TestConsolePerIdentity 覆盖三种身份的清单：身份是叠加的（库里只存最高身份，
+// 响应下发它包含的全部身份），差异只来自服务端的能力集合，条目按能力过滤，
+// 因此前端不需要按身份分支。
+func TestConsolePerIdentity(t *testing.T) {
+	dataCaps := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount}
 	tests := []struct {
 		name       string
 		role       string
+		wantRoles  []string
 		wantCaps   []string
 		wantNav    []string
 		wantSectNo int
@@ -81,23 +86,26 @@ func TestConsolePerRole(t *testing.T) {
 		{
 			name:       "调用方",
 			role:       store.RoleMember,
-			wantCaps:   []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
+			wantRoles:  []string{store.RoleMember},
+			wantCaps:   dataCaps,
 			wantNav:    []string{"/", "/keys", "/usage", "/account"},
 			wantSectNo: 1,
 		},
 		{
 			name:       "商户",
 			role:       store.RolePartner,
-			wantCaps:   []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount},
+			wantRoles:  []string{store.RoleMember, store.RolePartner},
+			wantCaps:   dataCaps,
 			wantNav:    []string{"/", "/keys", "/usage", "/account"},
 			wantSectNo: 1,
 		},
 		{
 			// 平台管理员另有管理面能力；管理面页面尚未定义，因此当前只体现在
-			// 能力集合上，导航与段落与其余角色一致。
+			// 能力集合上，导航与段落与其余身份一致。
 			name:       "平台管理员",
 			role:       store.RoleAdmin,
-			wantCaps:   []string{CapConsole, CapKeys, CapRequests, CapUsage, CapAccount, CapOps},
+			wantRoles:  []string{store.RoleMember, store.RolePartner, store.RoleAdmin},
+			wantCaps:   append(slices.Clone(dataCaps), identity.CapOps),
 			wantNav:    []string{"/", "/keys", "/usage", "/account"},
 			wantSectNo: 1,
 		},
@@ -105,31 +113,20 @@ func TestConsolePerRole(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newTestEnv()
-			e.session.role = tt.role
+			e.session.roles = identity.Roles(tt.role)
 			status, env := e.do(t, http.MethodGet, ConsolePath, "token", "")
 			if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
 				t.Fatalf("应 200: %d %s", status, env)
 			}
 			data := consoleDataOf(t, env)
-			if data.Role != tt.role {
-				t.Errorf("role = %q，期望 %q", data.Role, tt.role)
+			if !slices.Equal(data.Roles, tt.wantRoles) {
+				t.Errorf("roles = %v，期望 %v", data.Roles, tt.wantRoles)
 			}
-			if len(data.Capabilities) != len(tt.wantCaps) {
-				t.Fatalf("capabilities = %v，期望 %v", data.Capabilities, tt.wantCaps)
+			if !slices.Equal(data.Capabilities, tt.wantCaps) {
+				t.Errorf("capabilities = %v，期望 %v", data.Capabilities, tt.wantCaps)
 			}
-			for i, cap := range tt.wantCaps {
-				if data.Capabilities[i] != cap {
-					t.Errorf("capabilities[%d] = %q，期望 %q", i, data.Capabilities[i], cap)
-				}
-			}
-			if got := pathsOf(data.Navigation); len(got) != len(tt.wantNav) {
-				t.Fatalf("navigation = %v，期望 %v", got, tt.wantNav)
-			} else {
-				for i, path := range tt.wantNav {
-					if got[i] != path {
-						t.Errorf("navigation[%d] = %q，期望 %q", i, got[i], path)
-					}
-				}
+			if got := pathsOf(data.Navigation); !slices.Equal(got, tt.wantNav) {
+				t.Errorf("navigation = %v，期望 %v", got, tt.wantNav)
 			}
 			if len(data.Sections) != tt.wantSectNo {
 				t.Fatalf("sections = %d 段，期望 %d 段", len(data.Sections), tt.wantSectNo)
@@ -143,20 +140,41 @@ func TestConsolePerRole(t *testing.T) {
 	}
 }
 
+// TestConsoleCapabilitiesAreUnion 断言同一主体持有多个身份时能力集合是各身份的并集
+// 且不重复：管理员的身份集合含 partner 与 member，逐个身份拼接会把数据面能力重复三次。
+func TestConsoleCapabilitiesAreUnion(t *testing.T) {
+	e := newTestEnv()
+	// 顺序也刻意打乱：并集不随身份顺序漂移。
+	e.session.roles = []string{store.RoleAdmin, store.RoleMember, store.RolePartner}
+	status, env := e.do(t, http.MethodGet, ConsolePath, "token", "")
+	if status != http.StatusOK || codeOf(t, env) != webapi.CodeOK {
+		t.Fatalf("应 200: %d %s", status, env)
+	}
+	data := consoleDataOf(t, env)
+	want := []string{identity.CapConsole, identity.CapKeys, identity.CapRequests, identity.CapUsage, identity.CapAccount, identity.CapOps}
+	if !slices.Equal(data.Capabilities, want) {
+		t.Fatalf("capabilities = %v，期望并集 %v", data.Capabilities, want)
+	}
+	// 条目同样不重复：能力重复会让同一入口在导航里出现多次。
+	if got := pathsOf(data.Navigation); !slices.Equal(got, []string{"/", "/keys", "/usage", "/account"}) {
+		t.Fatalf("navigation = %v，期望每条目一次", got)
+	}
+}
+
 // TestConsoleFiltersByCapability 断言条目按能力过滤：条目所需的能力不在集合里时
 // 该条目不出现，段落条目被过滤光时整段不返回。
 func TestConsoleFiltersByCapability(t *testing.T) {
 	// 缺少请求记录能力：唯一含该能力的段落整体消失，导航不含相关条目。
-	caps := []string{CapConsole, CapKeys, CapUsage, CapAccount}
+	caps := []string{identity.CapConsole, identity.CapKeys, identity.CapUsage, identity.CapAccount}
 	if nav := filterEntries(consoleNavigation, caps); len(nav) != len(consoleNavigation) {
-		t.Fatalf("导航项都不需要 %s，应全部保留，得到 %d 项", CapRequests, len(nav))
+		t.Fatalf("导航项都不需要 %s，应全部保留，得到 %d 项", identity.CapRequests, len(nav))
 	}
 	if sections := filterSections(consoleSections, caps); len(sections) != 0 {
-		t.Fatalf("缺少 %s 时应没有段落，得到 %d 段", CapRequests, len(sections))
+		t.Fatalf("缺少 %s 时应没有段落，得到 %d 段", identity.CapRequests, len(sections))
 	}
 
 	// 只剩首页能力：导航只剩首页项，段落同样为空。
-	if nav := filterEntries(consoleNavigation, []string{CapConsole}); len(nav) != 1 || nav[0].Path != "/" {
+	if nav := filterEntries(consoleNavigation, []string{identity.CapConsole}); len(nav) != 1 || nav[0].Path != "/" {
 		t.Fatalf("只剩首页能力时导航应只有首页项，得到 %v", pathsOf(nav))
 	}
 
@@ -169,19 +187,21 @@ func TestConsoleFiltersByCapability(t *testing.T) {
 	}
 }
 
-// TestConsoleUnknownRoleIsEmpty 断言未登记的角色得到空清单：越权在配置出错时
-// 不能因为回落到某个角色而静默生效。
-func TestConsoleUnknownRoleIsEmpty(t *testing.T) {
-	data := consoleFor("nobody")
-	if len(data.Capabilities) != 0 || len(data.Navigation) != 0 || len(data.Sections) != 0 {
-		t.Fatalf("未登记角色应得到空清单，得到 %s", data)
+// TestConsoleUnknownIdentityIsEmpty 断言未登记的身份得到空清单：越权在配置出错时
+// 不能因为回落到基线身份而静默生效。
+func TestConsoleUnknownIdentityIsEmpty(t *testing.T) {
+	for _, roles := range [][]string{nil, {"nobody"}} {
+		data := consoleFor(roles)
+		if len(data.Roles) != 0 || len(data.Capabilities) != 0 || len(data.Navigation) != 0 || len(data.Sections) != 0 {
+			t.Fatalf("未登记身份 %v 应得到空清单，得到 %s", roles, data)
+		}
 	}
 }
 
-// TestConsoleSlicesSerializeAsArrays 断言三个数组字段序列化成 [] 而不是 null：
+// TestConsoleSlicesSerializeAsArrays 断言四个数组字段序列化成 [] 而不是 null：
 // 契约把它们声明为数组，null 会让前端多一条「空清单」与「字段缺失」的分支。
 func TestConsoleSlicesSerializeAsArrays(t *testing.T) {
-	raw, err := json.Marshal(consoleFor("nobody"))
+	raw, err := json.Marshal(consoleFor(nil))
 	if err != nil {
 		t.Fatalf("序列化清单: %v", err)
 	}
@@ -189,7 +209,7 @@ func TestConsoleSlicesSerializeAsArrays(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatalf("解析清单: %v", err)
 	}
-	for _, key := range []string{"capabilities", "navigation", "sections"} {
+	for _, key := range []string{"roles", "capabilities", "navigation", "sections"} {
 		if string(fields[key]) != "[]" {
 			t.Errorf("%s = %s，期望 []", key, fields[key])
 		}

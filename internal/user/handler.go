@@ -88,10 +88,10 @@ func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request) {
 	webapi.WriteOK(w, summary)
 }
 
-// subject 是会话解析出的登录主体：作用域推导用 id，控制台清单还用到角色。
+// subject 是会话解析出的登录主体：作用域推导用 id，控制台清单还用到身份集合。
 type subject struct {
 	userID uint64
-	role   string
+	roles  []string
 }
 
 // currentSubject 从会话推导登录主体；会话无效回 401。
@@ -101,12 +101,12 @@ func (h *Handler) currentSubject(w http.ResponseWriter, r *http.Request) (subjec
 		webapi.WriteError(w, http.StatusUnauthorized, webapi.CodeUnauthorized, "登录状态已失效")
 		return subject{}, false
 	}
-	userID, role, err := h.sessions.SessionSubject(r.Context(), token)
+	userID, roles, err := h.sessions.SessionSubject(r.Context(), token)
 	if err != nil {
 		webapi.WriteError(w, http.StatusUnauthorized, webapi.CodeUnauthorized, "登录状态已失效")
 		return subject{}, false
 	}
-	return subject{userID: userID, role: role}, true
+	return subject{userID: userID, roles: roles}, true
 }
 
 // ownedAccount 在主体之上推导归属账户；没有归属账户回 403。
