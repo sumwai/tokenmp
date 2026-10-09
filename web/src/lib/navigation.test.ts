@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { safeRedirect } from './navigation';
+import { loginRedirect, safeRedirect } from './navigation';
 
 describe('safeRedirect', () => {
   it('放行站内相对路径', () => {
@@ -21,5 +21,21 @@ describe('safeRedirect', () => {
   it('空值回落首页', () => {
     expect(safeRedirect(null)).toBe('/');
     expect(safeRedirect('')).toBe('/');
+  });
+});
+
+describe('loginRedirect', () => {
+  it('把当前地址编码进 redirect，筛选与分页一并带回', () => {
+    expect(loginRedirect('/keys?page=2&enabled=false')).toBe(
+      '/login?redirect=%2Fkeys%3Fpage%3D2%26enabled%3Dfalse',
+    );
+  });
+
+  it('编码后的地址能还原成站内路径', () => {
+    const target = '/keys?page=2&enabled=false';
+    const raw = new URL(loginRedirect(target), 'https://console.example').searchParams.get(
+      'redirect',
+    );
+    expect(safeRedirect(raw)).toBe(target);
   });
 });
