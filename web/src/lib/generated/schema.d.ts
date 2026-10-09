@@ -522,6 +522,185 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 渠道清单
+         * @description 列出全部上游渠道，与 `tokenmp admin channel list --json` 同一份行数据。
+         *     渠道的 `config` 不回显：探针请求头里可能有鉴权 token。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminChannels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 上游凭据清单
+         * @description 列出全部上游凭据，与 `tokenmp admin credential list --json` 同一份行数据。
+         *     只给脱敏前缀与形态，明文与 secret JSON 任何端点都不返回。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminCredentials"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/modelmaps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 渠道模型映射清单
+         * @description 列出全部渠道模型映射，与 `tokenmp admin model-map list --json` 同一份行数据。
+         *     路径段用单词（`modelmaps`），与认证面路径的命名约定一致。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminModelMaps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 账户清单
+         * @description 列出全部账户，与 `tokenmp admin account list --json` 同一份行数据。
+         *     含归属主体与默认商家的标识：管理面要据此把账户与运营对象对应起来。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminAccounts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/pricing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 定价版本清单
+         * @description 列出定价版本，与 `tokenmp admin price list --json` 同一份行数据；按 id 升序。
+         *     未下架的行 `retired_at` 为 `null`，据此区分生效与已退役版本（与 CLI 的
+         *     `active` / `retired` 列同一判定）。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminPricing"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/quotas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 窗口限额清单
+         * @description 列出窗口限额定义，附当前窗口的已用量与剩余额度，与
+         *     `tokenmp admin quota list --json` 同一份行数据。已用量与剩余额度复用判定链上的
+         *     同一份窗口计算；无法判定的行两者为 `null`，展示层给占位符。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminQuotas"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/adjustments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 调账清单
+         * @description 列出人工调账记录，与 `tokenmp admin adjust list --json` 同一份行数据；按 id 升序。
+         *     调整数量是十进制字符串，正数为补扣、负数为退费。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminAdjustments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 全平台用量流水
+         * @description 列出用量流水，与 `tokenmp admin usage list --json` 同一份行数据；按 id 升序。
+         *     与用户面流水的差别只在作用域：这里跨账户，用于对账与排障，因此多出
+         *     `merchant_id` 与结算字段。
+         *     请求方须持有管理面能力，越权返回 `code=403`。
+         */
+        get: operations["listAdminUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -954,6 +1133,218 @@ export interface components {
              */
             user_agent: string;
         };
+        /**
+         * @description 一条上游渠道，字段与 `tokenmp admin channel list --json` 的行一致。
+         *     `config` 不在其中：探针请求头里可能有鉴权 token，管理面不回显配置原文。
+         */
+        AdminChannel: {
+            /** Format: int64 */
+            id: number;
+            /**
+             * Format: int64
+             * @description 归属商家 id。
+             */
+            merchant_id: number;
+            name: string;
+            /** @description 厂商标识，如 `openai` / `anthropic` / `gemini`。 */
+            vendor: string;
+            /** @description 渠道的线协议类型，取值见数据面的渠道类型白名单。 */
+            type: string;
+            /** @description 取用上游凭据的分组名。 */
+            cred_group: string;
+            /** @description 上游基地址。 */
+            base_url: string;
+            /** @description 选路优先级，越小越优先。 */
+            priority: number;
+            /** @description 同优先级内的加权轮询权重。 */
+            weight: number;
+            enabled: boolean;
+        };
+        PageOfAdminChannel: {
+            items: components["schemas"]["AdminChannel"][];
+        };
+        /**
+         * @description 一行上游凭据，字段与 `tokenmp admin credential list --json` 的行一致。
+         *     明文与 secret JSON 从不出现，只有脱敏前缀。
+         */
+        AdminCredential: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            merchant_id: number;
+            /** @description 凭据分组；渠道按它取用凭据。 */
+            cred_group: string;
+            /** @description 凭据名，用于同组内区分轮换。 */
+            name: string;
+            /** @description 凭据形态：`api`、`oauth`，解析失败时为 `unknown`。 */
+            kind: string;
+            /** @description 可展示的明文前缀。 */
+            prefix: string;
+            /** @description oauth 凭据的过期时刻（RFC3339）；api 凭据没有该字段。 */
+            expires?: string;
+            /** @description oauth 凭据的访问令牌是否已过期；api 凭据恒为 false。 */
+            expired: boolean;
+            enabled: boolean;
+        };
+        PageOfAdminCredential: {
+            items: components["schemas"]["AdminCredential"][];
+        };
+        /** @description 一条渠道模型映射，字段与 `tokenmp admin model-map list --json` 的行一致。 */
+        AdminModelMap: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            channel_id: number;
+            /** @description 客户端请求的模型名。 */
+            model: string;
+            /** @description 转发给该渠道时替换成的模型名。 */
+            upstream_model: string;
+            /** @description 该映射的价格倍率，十进制字符串。 */
+            price_multiplier: string;
+            /** @description 转发时叠加到请求体上的字段；未配置时该字段不出现。 */
+            request_overrides?: {
+                [key: string]: unknown;
+            };
+            enabled: boolean;
+        };
+        PageOfAdminModelMap: {
+            items: components["schemas"]["AdminModelMap"][];
+        };
+        /** @description 一个账户，字段与 `tokenmp admin account list --json` 的行一致。 */
+        AdminAccount: {
+            /** Format: int64 */
+            id: number;
+            code: string;
+            name: string;
+            /** @description 归属登录主体的 id；平台账户没有归属时为 `null`。 */
+            owner_user_id: number | null;
+            /** @description 默认商家 id；未指定时为 `null`。 */
+            default_merchant_id: number | null;
+            /** @description 账户级价格倍率，十进制字符串。 */
+            price_multiplier: string;
+            /** @description 账户状态：`active` 可用，`disabled` 已停用。 */
+            status: string;
+        };
+        PageOfAdminAccount: {
+            items: components["schemas"]["AdminAccount"][];
+        };
+        /**
+         * @description 一个定价版本，字段与 `tokenmp admin price list --json` 的行一致。
+         *     改价产生新版本行并把旧版本 `retired_at` 置位，不覆盖旧行。
+         */
+        AdminPricing: {
+            /** Format: int64 */
+            id: number;
+            /**
+             * Format: int64
+             * @description 定价归属的商家 id。
+             */
+            merchant_id: number;
+            /** @description 客户端请求的模型名。 */
+            model: string;
+            /** @description 同一 (商家, 模型) 下自增的版本号。 */
+            version: number;
+            /**
+             * Format: date-time
+             * @description 版本生效时刻。
+             */
+            effective_at: string;
+            /**
+             * Format: date-time
+             * @description 版本退役时刻；`null` 表示当前生效。
+             */
+            retired_at: string | null;
+        };
+        PageOfAdminPricing: {
+            items: components["schemas"]["AdminPricing"][];
+        };
+        /**
+         * @description 一条窗口限额定义加当前窗口的已用量，字段与 `tokenmp admin quota list --json`
+         *     的行一致。已用量与剩余额度由判定链上的同一份窗口计算得出。
+         */
+        AdminQuota: {
+            /** Format: int64 */
+            id: number;
+            /** @description 限额作用范围：`account` / `api_key` / `channel` / `plan`。 */
+            scope: string;
+            /**
+             * Format: int64
+             * @description 范围实体的 id。
+             */
+            scope_id: number;
+            /** @description 计量指标，取值见数据面的计费指标白名单。 */
+            metric: string;
+            /** @description 窗口类型。 */
+            window_kind: string;
+            /** @description 窗口周期。 */
+            period: string;
+            /** @description 窗口内允许的额度上限，十进制字符串。 */
+            limit_amount: string;
+            /** @description 超限时的处置动作。 */
+            action: string;
+            /** @description 当前窗口已用量，十进制字符串；无法判定时为 `null`。 */
+            used: string | null;
+            /** @description 当前窗口剩余额度，十进制字符串；无法判定时为 `null`。 */
+            remaining: string | null;
+        };
+        PageOfAdminQuota: {
+            items: components["schemas"]["AdminQuota"][];
+        };
+        /** @description 一条人工调账记录，字段与 `tokenmp admin adjust list --json` 的行一致。 */
+        AdminAdjustment: {
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            account_id: number;
+            /** @description 调整数量，十进制字符串；正数为补扣，负数为退费。 */
+            delta_amount: string;
+            reason: string;
+            /** @description 操作者标识。 */
+            operator: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        PageOfAdminAdjustment: {
+            items: components["schemas"]["AdminAdjustment"][];
+        };
+        /**
+         * @description 一条跨账户的用量流水，字段与 `tokenmp admin usage list --json` 的行一致。
+         *     流水是 append-only 的计费事实，一次请求一行。
+         */
+        AdminUsageItem: {
+            /** Format: int64 */
+            id: number;
+            /**
+             * Format: int64
+             * @description 结算归属的商家 id。
+             */
+            merchant_id: number;
+            /** Format: int64 */
+            account_id: number;
+            /**
+             * Format: int64
+             * @description 实际履约的渠道 id。
+             */
+            channel_id: number;
+            model: string;
+            /** @description 本次调用的用量分量，键为计费指标、值为十进制字符串。 */
+            usage: {
+                [key: string]: string;
+            };
+            /** @description 结算前的应扣量，十进制字符串。 */
+            gross_amount: string;
+            /** @description 本次生效的总倍率，十进制字符串。 */
+            multiplier: string;
+            /** @description 结算明细；未结算时该字段不出现。 */
+            settlement?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        PageOfAdminUsageItem: {
+            items: components["schemas"]["AdminUsageItem"][];
+        };
     };
     responses: {
         /** @description 参数缺失或非法，`code=400`。 */
@@ -1043,6 +1434,17 @@ export interface components {
         ModelFilter: string;
         /** @description 按签发本次调用的密钥 id 过滤；缺省不过滤。 */
         ApiKeyFilter: number;
+        /** @description 按商家 id 过滤；缺省不过滤。 */
+        AdminMerchantFilter: number;
+        /** @description 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。 */
+        AdminAccountFilter: number;
+        /**
+         * @description 按限额 / 规则的作用范围过滤，取值 `account` / `api_key` / `channel` / `plan`；
+         *     与 `scope_id` 必须成对给出，缺省列出全部。
+         */
+        AdminScopeFilter: "account" | "api_key" | "channel" | "plan";
+        /** @description 范围实体的 id，与 `scope` 成对使用。 */
+        AdminScopeIDFilter: number;
     };
     requestBodies: never;
     headers: {
@@ -1790,6 +2192,273 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminChannels: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 渠道清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminChannel"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminCredentials: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 凭据清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminCredential"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminModelMaps: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 模型映射清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminModelMap"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminAccounts: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 账户清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminAccount"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminPricing: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按商家 id 过滤；缺省不过滤。 */
+                merchant_id?: components["parameters"]["AdminMerchantFilter"];
+                /** @description 按模型名精确匹配；缺省不过滤。 */
+                model?: components["parameters"]["ModelFilter"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 定价版本清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminPricing"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminQuotas: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /**
+                 * @description 按限额 / 规则的作用范围过滤，取值 `account` / `api_key` / `channel` / `plan`；
+                 *     与 `scope_id` 必须成对给出，缺省列出全部。
+                 */
+                scope?: components["parameters"]["AdminScopeFilter"];
+                /** @description 范围实体的 id，与 `scope` 成对使用。 */
+                scope_id?: components["parameters"]["AdminScopeIDFilter"];
+                /** @description 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。 */
+                account_id?: components["parameters"]["AdminAccountFilter"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 限额清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminQuota"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminAdjustments: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。 */
+                account_id?: components["parameters"]["AdminAccountFilter"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 调账清单。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminAdjustment"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listAdminUsage: {
+        parameters: {
+            query?: {
+                /** @description 页码，从 1 起；缺省 1。 */
+                page?: components["parameters"]["Page"];
+                /** @description 每页条数；缺省 20，上限 100。 */
+                size?: components["parameters"]["Size"];
+                /** @description 按账户 id 过滤；缺省不过滤。管理面独有：用户面的作用域一律由会话推导。 */
+                account_id?: components["parameters"]["AdminAccountFilter"];
+                /** @description 起始时刻（含），RFC3339；缺省不限。 */
+                since?: components["parameters"]["Since"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 用量流水。 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["PageOfAdminUsageItem"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

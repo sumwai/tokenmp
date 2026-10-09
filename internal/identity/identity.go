@@ -24,7 +24,7 @@ const (
 	CapUsage = "usage"
 	// CapAccount 是账户概览查看。
 	CapAccount = "account"
-	// CapOps 是管理面能力；管理面页面尚未定义，当前只作为能力出现。
+	// CapOps 是管理面能力：平台运营对象的只读清单页面。
 	CapOps = "ops"
 )
 

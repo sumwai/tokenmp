@@ -1,5 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChartLine, House, KeyRound, ScrollText, UserRound } from 'lucide-react';
+import {
+  ChartLine,
+  Gauge,
+  House,
+  KeyRound,
+  Receipt,
+  Route,
+  Scale,
+  ScrollText,
+  ShieldCheck,
+  Shuffle,
+  Tag,
+  UserRound,
+  Users,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 
@@ -26,6 +40,15 @@ const icons: Record<string, LucideIcon> = {
   'chart-line': ChartLine,
   'scroll-text': ScrollText,
   'user-round': UserRound,
+  // 管理面条目的图标（清单里的名字由服务端下发，这里只做名字到组件的映射）。
+  route: Route,
+  'shield-check': ShieldCheck,
+  shuffle: Shuffle,
+  users: Users,
+  tag: Tag,
+  gauge: Gauge,
+  scale: Scale,
+  receipt: Receipt,
 };
 
 /** EntryIcon 渲染条目声明的图标；名字未登记时不渲染。 */

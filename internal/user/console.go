@@ -46,7 +46,8 @@ var consoleNavigation = []consoleEntry{
 // consoleSections 是首页段落目录。
 //
 // 放不占导航的实体入口：日志类实体走全屏列表页，首页只提供预览入口
-// （web/AGENTS.md 的移动端约定）。
+// （web/AGENTS.md 的移动端约定）。管理面段落的条目都指向 /api/v1/admin/* 的只读
+// 清单，整体以 ops 能力为门槛：不具备该能力的主体看不到，也不该取到那些端点。
 var consoleSections = []consoleSection{
 	{
 		Title:       "排障",
@@ -58,6 +59,68 @@ var consoleSections = []consoleSection{
 				Icon:        "scroll-text",
 				Path:        "/requests",
 				Capability:  identity.CapRequests,
+			},
+		},
+	},
+	{
+		Title:       "管理面",
+		Description: "平台运营对象的只读清单",
+		Entries: []consoleEntry{
+			{
+				Title:       "渠道",
+				Description: "上游渠道与启用状态",
+				Icon:        "route",
+				Path:        "/admin/channels",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "凭据",
+				Description: "上游凭据的形态与脱敏前缀",
+				Icon:        "shield-check",
+				Path:        "/admin/credentials",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "模型映射",
+				Description: "渠道的模型替换与倍率",
+				Icon:        "shuffle",
+				Path:        "/admin/modelmaps",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "账户",
+				Description: "账户归属与状态",
+				Icon:        "users",
+				Path:        "/admin/accounts",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "价格",
+				Description: "定价版本与生效状态",
+				Icon:        "tag",
+				Path:        "/admin/pricing",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "限额",
+				Description: "窗口限额与当前用量",
+				Icon:        "gauge",
+				Path:        "/admin/quotas",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "调账",
+				Description: "人工补扣与退费记录",
+				Icon:        "scale",
+				Path:        "/admin/adjustments",
+				Capability:  identity.CapOps,
+			},
+			{
+				Title:       "流水",
+				Description: "全平台用量流水",
+				Icon:        "receipt",
+				Path:        "/admin/usage",
+				Capability:  identity.CapOps,
 			},
 		},
 	},

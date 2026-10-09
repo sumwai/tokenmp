@@ -100,14 +100,13 @@ func TestConsolePerIdentity(t *testing.T) {
 			wantSectNo: 1,
 		},
 		{
-			// 平台管理员另有管理面能力；管理面页面尚未定义，因此当前只体现在
-			// 能力集合上，导航与段落与其余身份一致。
+			// 平台管理员另有管理面能力，因此多出管理面段落；导航与其余身份一致。
 			name:       "平台管理员",
 			role:       store.RoleAdmin,
 			wantRoles:  []string{store.RoleMember, store.RolePartner, store.RoleAdmin},
 			wantCaps:   append(slices.Clone(dataCaps), identity.CapOps),
 			wantNav:    []string{"/", "/keys", "/usage", "/account"},
-			wantSectNo: 1,
+			wantSectNo: 2,
 		},
 	}
 	for _, tt := range tests {
@@ -137,6 +136,34 @@ func TestConsolePerIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestConsoleAdminSectionPaths 断言管理面段落的条目路径与契约里的清单端点一一对应：
+// 页面路由与 `docs/openapi-web.yaml` 的 /api/v1/admin/* 同段名，改名会在这里被发现。
+func TestConsoleAdminSectionPaths(t *testing.T) {
+	sections := filterSections(consoleSections, []string{identity.CapOps})
+	if len(sections) != 1 {
+		t.Fatalf("持有 %s 时应恰有一段管理面，得到 %d 段", identity.CapOps, len(sections))
+	}
+	want := []string{
+		"/admin/channels",
+		"/admin/credentials",
+		"/admin/modelmaps",
+		"/admin/accounts",
+		"/admin/pricing",
+		"/admin/quotas",
+		"/admin/adjustments",
+		"/admin/usage",
+	}
+	got := pathsOf(sections[0].Entries)
+	if len(got) != len(want) {
+		t.Fatalf("管理面条目 = %v，期望 %v", got, want)
+	}
+	for i, path := range want {
+		if got[i] != path {
+			t.Errorf("管理面条目[%d] = %q，期望 %q", i, got[i], path)
+		}
 	}
 }
 
