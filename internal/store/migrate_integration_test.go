@@ -119,6 +119,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	assertUnitRateColumn(ctx, t, s.DB())
 	assertAPIKeyColumn(ctx, t, s.DB())
 	assertAccountOwnerColumn(ctx, t, s.DB())
+	assertPurchaseIdempotencyColumn(ctx, t, s.DB())
 
 	// 重复启动的幂等性：第二次迁移不应因表已存在而失败，也不应重复插入种子行。
 	if err := s.Migrate(ctx); err != nil {
@@ -132,6 +133,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	assertAPIKeyColumn(ctx, t, s.DB())
 	// 0007 的重复加列 / 加索引同样应当被跳过。
 	assertAccountOwnerColumn(ctx, t, s.DB())
+	// 0010 的重复加列 / 加索引同样应当被跳过。
+	assertPurchaseIdempotencyColumn(ctx, t, s.DB())
 }
 
 func dropKnownTables(ctx context.Context, t *testing.T, db *sql.DB) {
@@ -254,6 +257,34 @@ func assertAPIKeyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 	if columns != 2 {
 		t.Errorf("idx_usage_api_key_time 列数 = %d，期望 2", columns)
+	}
+}
+
+// assertPurchaseIdempotencyColumn 断言 0010 加上的幂等键列与 (account_id, idempotency_key) 唯一索引存在。
+func assertPurchaseIdempotencyColumn(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var nullable string
+	err := db.QueryRowContext(ctx,
+		"SELECT is_nullable FROM information_schema.columns "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account_purchase' AND column_name = 'idempotency_key'").
+		Scan(&nullable)
+	if err != nil {
+		t.Fatalf("查询 account_purchase.idempotency_key 列失败：%v", err)
+	}
+	if nullable != "YES" {
+		t.Errorf("account_purchase.idempotency_key 应为可空列，得到 is_nullable=%q", nullable)
+	}
+
+	var columns int
+	err = db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.statistics "+
+			"WHERE table_schema = DATABASE() AND table_name = 'account_purchase' AND index_name = 'uk_purchase_idempotency'").
+		Scan(&columns)
+	if err != nil {
+		t.Fatalf("查询 account_purchase.uk_purchase_idempotency 索引失败：%v", err)
+	}
+	if columns != 2 {
+		t.Errorf("uk_purchase_idempotency 列数 = %d，期望 2", columns)
 	}
 }
 

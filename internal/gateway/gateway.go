@@ -119,6 +119,11 @@ type gatewayStore interface {
 	RequestLogByRequestID(ctx context.Context, accountID uint64, requestID string) (*store.RequestLogRow, error)
 	RequestAttempts(ctx context.Context, requestID string) ([]store.RequestAttempt, error)
 	RequestStats(ctx context.Context, q store.RequestStatsQuery) ([]store.RequestStatsItem, error)
+	// 商品与订单：供用户级端点的商品目录与下单 / 订单列表使用。
+	ListProducts(ctx context.Context) ([]store.Product, error)
+	Product(ctx context.Context, id uint64) (*store.Product, error)
+	CreateOrder(ctx context.Context, p store.Purchase, b store.BucketRow) (store.OrderWrite, error)
+	ListOrdersByAccount(ctx context.Context, accountID uint64, limit, offset int) ([]store.OrderRow, int, error)
 	// settlement.Repo 提供结算事务、账本查询与额度预检所需的账户账本读取。
 	settlement.Repo
 	// quota.Repo 提供窗口限额判定所需的限额定义与窗口用量聚合。

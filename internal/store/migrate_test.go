@@ -294,6 +294,42 @@ func TestRequestLogMigrationShape(t *testing.T) {
 	}
 }
 
+// TestPurchaseIdempotencyMigrationShape 锁定 0010 的形状：给 account_purchase 加可空的
+// 幂等键列与 (account_id, idempotency_key) 唯一索引，两处都先查 information_schema
+// 再执行。与 0003 同理，若改成裸 ALTER / 裸 CREATE INDEX，重跑会因对象已存在而中断。
+func TestPurchaseIdempotencyMigrationShape(t *testing.T) {
+	raw, err := migrationsFS.ReadFile(migrationsDir + "/0010_account_purchase_idempotency.sql")
+	if err != nil {
+		t.Fatalf("读取内嵌迁移失败：%v", err)
+	}
+	statements := splitStatements(string(raw))
+	script := strings.Join(statements, "\n")
+
+	if len(statements) != 8 {
+		t.Errorf("0010 应拆成 8 条语句（列与索引各一组 SET / PREPARE / EXECUTE / DEALLOCATE），得到 %d：%#v",
+			len(statements), statements)
+	}
+	for _, want := range []string{
+		"ALTER TABLE account_purchase ADD COLUMN idempotency_key VARCHAR(64) NULL",
+		"CREATE UNIQUE INDEX uk_purchase_idempotency ON account_purchase (account_id, idempotency_key)",
+		"information_schema.COLUMNS",
+		"information_schema.STATISTICS",
+		"PREPARE",
+		"EXECUTE",
+		"DEALLOCATE PREPARE",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("0010 缺少可重跑所需的 %q", want)
+		}
+	}
+	// 只加列与索引、不回填存量：不得出现 UPDATE / INSERT，也不建新表。
+	for _, forbidden := range []string{"UPDATE account_purchase", "INSERT INTO", "CREATE TABLE"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("0010 不应包含 %q", forbidden)
+		}
+	}
+}
+
 func TestParseMigrationName(t *testing.T) {
 	tests := []struct {
 		name        string

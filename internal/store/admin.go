@@ -991,6 +991,10 @@ func (s *Store) SetAPIKeyEnabled(ctx context.Context, id uint64, enabled bool) e
 	return setAPIKeyEnabled(ctx, s.db, id, enabled)
 }
 
+// DefaultBucketPriority 是账本扣减顺序的默认优先级，与列的 DEFAULT 100 一致。
+// 购买派生的账本显式写入它而不是依赖列默认值：读回的行因此总有确定的优先级。
+const DefaultBucketPriority = 100
+
 // BucketRow 是 account_bucket 的一行，供管理面列表与发放使用。
 //
 // UnitRate 为 nil 即 SQL NULL，表示该账本没有锁定的折算率（赠送、手工充值）；

@@ -10,8 +10,10 @@ package user
 
 import (
 	"context"
+	"time"
 
 	"github.com/sumwai/tokenmp/internal/me"
+	"github.com/sumwai/tokenmp/internal/settlement"
 	"github.com/sumwai/tokenmp/internal/store"
 )
 
@@ -31,6 +33,10 @@ const (
 	ModelsPath = "/api/v1/user/models"
 	// RequestsPath 是请求记录集合的固定路径。
 	RequestsPath = "/api/v1/user/requests"
+	// ProductsPath 是商品目录的固定路径。
+	ProductsPath = "/api/v1/user/products"
+	// OrdersPath 是订单集合的固定路径：GET 列出、POST 下单。
+	OrdersPath = "/api/v1/user/orders"
 )
 
 // itemsKey 是列表数据的字段名。
@@ -75,6 +81,16 @@ type Store interface {
 	RequestAttempts(ctx context.Context, requestID string) ([]store.RequestAttempt, error)
 	// RequestStats 按维度聚合账户的请求计数。
 	RequestStats(ctx context.Context, q store.RequestStatsQuery) ([]store.RequestStatsItem, error)
+	// AccountBuckets 读账户的全部账本行，供额度预检使用；与数据面 402 预检共用一份口径。
+	AccountBuckets(ctx context.Context, accountID uint64) ([]settlement.Bucket, error)
+	// ListProducts 列出可购买的商品档位。
+	ListProducts(ctx context.Context) ([]store.Product, error)
+	// Product 按 id 查商品档位；无匹配时返回 sql.ErrNoRows。
+	Product(ctx context.Context, id uint64) (*store.Product, error)
+	// CreateOrder 幂等地下单：写购买记录与派生账本，重复提交返回首次创建的订单。
+	CreateOrder(ctx context.Context, p store.Purchase, b store.BucketRow) (store.OrderWrite, error)
+	// ListOrdersByAccount 按账户分页列出订单，返回当页行与满足条件的总数。
+	ListOrdersByAccount(ctx context.Context, accountID uint64, limit, offset int) ([]store.OrderRow, int, error)
 }
 
 // SummaryReader 是账户摘要的读取入口，由 internal/me 的实现满足。
@@ -82,11 +98,13 @@ type SummaryReader interface {
 	Summary(ctx context.Context, accountID, apiKeyID uint64, recentLimit int) (*me.Summary, error)
 }
 
-// Options 是装配参数；三个字段都必填。
+// Options 是装配参数；前三个字段必填。
 type Options struct {
 	Sessions Sessions
 	Store    Store
 	Summary  SummaryReader
+	// Now 是取当前时刻的函数，供额度预检与购买派生的有效期使用；nil 即系统时钟。
+	Now func() time.Time
 }
 
 // Handler 是用户级端点的 HTTP 入口，按路径分发到各动作。
@@ -94,9 +112,14 @@ type Handler struct {
 	sessions Sessions
 	store    Store
 	summary  SummaryReader
+	now      func() time.Time
 }
 
 // NewHandler 构造用户级端点处理器。
 func NewHandler(opts Options) *Handler {
-	return &Handler{sessions: opts.Sessions, store: opts.Store, summary: opts.Summary}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Handler{sessions: opts.Sessions, store: opts.Store, summary: opts.Summary, now: now}
 }

@@ -15,13 +15,6 @@ import (
 
 // 本文件是账本、商品与购买的管理动作。
 
-// defaultBucketPriority 是账本扣减顺序的默认优先级，与列的 DEFAULT 100 一致。
-const defaultBucketPriority = 100
-
-// unitRateScale 是购买派生折算率的十进制小数位，与 account_bucket.unit_rate
-// 列定义 DECIMAL(24,8) 的标度一致。
-const unitRateScale int32 = 8
-
 // CreditBucketInput 是发放账本的输入。
 type CreditBucketInput struct {
 	AccountID  uint64
@@ -58,7 +51,7 @@ func (s *Service) CreditBucket(ctx context.Context, in CreditBucketInput) (uint6
 		return 0, err
 	}
 	if in.Priority == 0 {
-		in.Priority = defaultBucketPriority
+		in.Priority = store.DefaultBucketPriority
 	}
 	return s.store.InsertBucket(ctx, store.BucketRow{
 		AccountID:  in.AccountID,
@@ -203,8 +196,8 @@ func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 	}
 	total := productQty.Mul(qty)
 	pricePaid := productPrice.Mul(qty)
-	// 折算率在单份口径上计算，与购买份数无关。
-	unitRate := productPrice.DivRound(productQty, unitRateScale).String()
+	// 折算率在单份口径上计算，与购买份数无关；算式与订单读取共用一份（store.DeriveUnitRate）。
+	unitRate := store.DeriveUnitRate(productPrice, productQty)
 
 	now := s.now()
 	var expiresAt *time.Time
@@ -231,7 +224,7 @@ func (s *Service) Buy(ctx context.Context, in BuyInput) (*BuyResult, error) {
 			ExpiresAt:  expiresAt,
 			Fallback:   fallback,
 			Source:     billing.SourcePurchase,
-			Priority:   defaultBucketPriority,
+			Priority:   store.DefaultBucketPriority,
 			UnitRate:   &unitRate,
 		})
 	if err != nil {
