@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.1.11](https://github.com/sumwai/tokenmp/compare/v0.1.10...v0.1.11) (2026-10-10)
+
+
+### Features
+
+* **admin:** 管理面只读清单——渠道、凭据、模型映射、账户、价格、限额、调账与流水 ([#163](https://github.com/sumwai/tokenmp/issues/163)) ([7f752db](https://github.com/sumwai/tokenmp/commit/7f752dbbf3b6d78b98236417cf553fb605f269ca))
+* **admin:** 管理面配置动作——商家、渠道、凭据与模型映射 ([#169](https://github.com/sumwai/tokenmp/issues/169)) ([2fad222](https://github.com/sumwai/tokenmp/commit/2fad222ae3d9da474217b9fc404474c1e83bcb40))
+* **admin:** 请求记录的 CLI 查询 ([#175](https://github.com/sumwai/tokenmp/issues/175)) ([#179](https://github.com/sumwai/tokenmp/issues/179)) ([84b1635](https://github.com/sumwai/tokenmp/commit/84b163564bf3b86706975a7037aa9ce35d391e6d))
+* **partner:** 分佣与结算口径（settle_info）与服务端账期出账 ([#165](https://github.com/sumwai/tokenmp/issues/165)) ([42a4ba2](https://github.com/sumwai/tokenmp/commit/42a4ba2012a8905e2316fa2ad1b2e0bab30998ac))
+* **partner:** 分账对账单的商家域与全平台读路径 ([#167](https://github.com/sumwai/tokenmp/issues/167)) ([6c374e3](https://github.com/sumwai/tokenmp/commit/6c374e33ee10c28f936e7c00b868363c00bac947))
+* **partner:** 商家域——上游账号与名下用量 ([#166](https://github.com/sumwai/tokenmp/issues/166)) ([4054914](https://github.com/sumwai/tokenmp/commit/40549149e7a323bbc64e5975dd8e2b03496052ba))
+* **user:** 用量聚合端点（按天、模型、密钥的合计） ([#154](https://github.com/sumwai/tokenmp/issues/154)) ([db88884](https://github.com/sumwai/tokenmp/commit/db88884711c292f09d4d63b2125ddfeebc317fee))
+* **web:** 充值/购买契约与账户页的额度引导 ([#164](https://github.com/sumwai/tokenmp/issues/164)) ([0ef7e6f](https://github.com/sumwai/tokenmp/commit/0ef7e6fa171dbc0da37c8affa446d8d9460671a4))
+* **web:** 密钥管理页（列表、创建、吊销） ([#149](https://github.com/sumwai/tokenmp/issues/149)) ([302e985](https://github.com/sumwai/tokenmp/commit/302e985d75e36b54106cfa701711f03db7e7e6ca))
+* **web:** 控制台骨架——角色清单端点与按清单渲染的导航 ([#150](https://github.com/sumwai/tokenmp/issues/150)) ([cc3ffb3](https://github.com/sumwai/tokenmp/commit/cc3ffb339d65cf49522ea67642030bd822781146))
+* **web:** 用量页——区间与维度的合计表 ([#161](https://github.com/sumwai/tokenmp/issues/161)) ([8a093f1](https://github.com/sumwai/tokenmp/commit/8a093f1416b37e034a4f4a99e11a0bfee19c2f67))
+* **web:** 角色改为叠加身份，能力清单按并集下发 ([#162](https://github.com/sumwai/tokenmp/issues/162)) ([e24414b](https://github.com/sumwai/tokenmp/commit/e24414bd712cabdc3335e75521f97891b5ad40c5))
+* **web:** 请求记录页（列表、详情、脱敏报文差异与尝试时间线） ([#151](https://github.com/sumwai/tokenmp/issues/151)) ([05a8858](https://github.com/sumwai/tokenmp/commit/05a885805686a74270612e735c10fb875ec0ac8d))
+* **web:** 账户概览页（包存量、窗口限额、最近流水） ([#148](https://github.com/sumwai/tokenmp/issues/148)) ([9d05611](https://github.com/sumwai/tokenmp/commit/9d056116378250323d3639226c0b6f070ab85018))
+* 用户级端点落地密钥自助管理 ([#118](https://github.com/sumwai/tokenmp/issues/118)) ([effc209](https://github.com/sumwai/tokenmp/commit/effc2091c93ae8bb2ecafa8702ddcb05f6532613))
+* 用户级端点落地用量、模型目录与请求记录 ([#129](https://github.com/sumwai/tokenmp/issues/129)) ([83b5279](https://github.com/sumwai/tokenmp/commit/83b5279ba1e09b4417c23f803edaf224444d6fd9))
+* 用户级端点骨架与账户概览 ([#116](https://github.com/sumwai/tokenmp/issues/116)) ([2c5de75](https://github.com/sumwai/tokenmp/commit/2c5de7577619b31f76c098f52f5779a545d30b07))
+
+
+### Bug Fixes
+
+* **auth:** 页面侧限流补 Retry-After 头 ([#153](https://github.com/sumwai/tokenmp/issues/153)) ([66d1160](https://github.com/sumwai/tokenmp/commit/66d1160c64f4ed033bdbfc3b2db1ba6a54a12002))
+* **plugin:** scope.models 在 onRequest 与其余钩子上判的不是同一个模型名 ([#131](https://github.com/sumwai/tokenmp/issues/131)) ([c6891b4](https://github.com/sumwai/tokenmp/commit/c6891b49d2a2ba992b17e43b8508109d58eb8e3d)), closes [#120](https://github.com/sumwai/tokenmp/issues/120)
+* **plugin:** 混帧绕过中间件时留一条限频告警 ([#147](https://github.com/sumwai/tokenmp/issues/147)) ([7f7ddf2](https://github.com/sumwai/tokenmp/commit/7f7ddf2096ad0ea4ea7c8f84d977a2734da5dbdb))
+* **plugin:** 请求改写后 req.Headers 被清空，客户端头覆盖静默失效 ([#130](https://github.com/sumwai/tokenmp/issues/130)) ([b8c6fe6](https://github.com/sumwai/tokenmp/commit/b8c6fe6a25e9893fc932d87f34576ee8ab198a00)), closes [#119](https://github.com/sumwai/tokenmp/issues/119)
+* **plugin:** 非 onRequest 钩子里调用 ctx.reject 无任何反馈 ([#132](https://github.com/sumwai/tokenmp/issues/132)) ([9a5cbe7](https://github.com/sumwai/tokenmp/commit/9a5cbe7cc035b293eeb03d6d48eb2dca03586cd8)), closes [#121](https://github.com/sumwai/tokenmp/issues/121)
+
+
+### Performance Improvements
+
+* **plugin:** 取用路径的指纹检查移出中间件锁，并补并发基准 ([#133](https://github.com/sumwai/tokenmp/issues/133)) ([c7d9a86](https://github.com/sumwai/tokenmp/commit/c7d9a86ab83d1f4e0d27408203de42f9369bc6cf))
+
+
+### Documentation
+
+* **readme:** 收敛为索引式 README，补齐目录结构与文档表 ([#125](https://github.com/sumwai/tokenmp/issues/125)) ([604240f](https://github.com/sumwai/tokenmp/commit/604240f70a3fc3961c322eb5263de2016597a5b1))
+* 能力概览改为表格，AGENTS.md 目录块与仓库事实对齐 ([#127](https://github.com/sumwai/tokenmp/issues/127)) ([307a5c7](https://github.com/sumwai/tokenmp/commit/307a5c79bb7118fa2bd9007f44913e6d021b0b1d))
+
 ## [0.1.10](https://github.com/sumwai/tokenmp/compare/v0.1.9...v0.1.10) (2026-10-08)
 
 
