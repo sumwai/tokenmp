@@ -55,6 +55,8 @@ const (
 	AdjustmentsPath = "/api/v1/admin/adjustments"
 	// UsagePath 是全平台用量流水的固定路径。
 	UsagePath = "/api/v1/admin/usage"
+	// RequestsPath 是全平台请求记录的固定路径。
+	RequestsPath = "/api/v1/admin/requests"
 	// SettlementsPath 是全平台结算对账单的固定路径。
 	SettlementsPath = "/api/v1/admin/settlements"
 )
@@ -90,6 +92,8 @@ type Lister interface {
 	ListQuotas(ctx context.Context, scope billing.Scope, scopeID uint64) ([]admin.QuotaView, error)
 	ListAdjustments(ctx context.Context, accountID uint64) ([]store.Adjustment, error)
 	ListUsage(ctx context.Context, accountID uint64, since time.Time) ([]store.UsageListRow, error)
+	// ListRequests 分页列出全平台请求记录；账户为 0 表示跨账户。
+	ListRequests(ctx context.Context, q admin.RequestListQuery) ([]admin.RequestView, int, error)
 	// SettlementBills 按账期出账，返回每个商家的对账单；缺省账期按各商家口径取上一期。
 	SettlementBills(ctx context.Context, q admin.SettlementQuery) ([]settlement.BillView, error)
 }
@@ -173,6 +177,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdjustments(w, r)
 	case r.URL.Path == UsagePath:
 		h.handleUsage(w, r)
+	case r.URL.Path == RequestsPath:
+		h.handleRequests(w, r)
 	case r.URL.Path == SettlementsPath:
 		h.handleSettlements(w, r)
 	default:

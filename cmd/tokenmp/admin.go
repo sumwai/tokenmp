@@ -75,6 +75,11 @@ const (
 	flagWindow        = "window"
 	flagPeriod        = "period"
 	flagLimit         = "limit"
+	flagOffset        = "offset"
+	flagUntil         = "until"
+	flagRequestID     = "request-id"
+	flagStatus        = "status"
+	flagGroupBy       = "group-by"
 	flagAction        = "action"
 	flagBaseline      = "baseline"
 )
@@ -107,6 +112,7 @@ const (
 	actionSetOwner      = "set-owner"
 	actionReset         = "reset"
 	actionOAuthLogin    = "oauth-login"
+	actionStats         = "stats"
 )
 
 // 表格列名里出现三次以上的取值。
@@ -127,10 +133,17 @@ const (
 	headerValidTo        = "valid_to"
 	headerTimeFrom       = "time_from"
 	headerTimeTo         = "time_to"
+	headerUpstreamModel  = "upstream_model"
 )
 
 // usageName 同时是管理组名与用量流水表的列名。
 const usageName = "usage"
+
+// requestsName 是请求记录组的组名，与契约的管理面路径尾段一致。
+const requestsName = "requests"
+
+// keyName 同时是客户端密钥组的组名与聚合计数表的列名。
+const keyName = "key"
 
 // settlementName 同时是管理组名与流水表的结算明细列名，理由同 usageName。
 const settlementName = "settlement"
@@ -201,7 +214,7 @@ var adminGroups = []adminGroupSpec{
 	{"credential", []string{actionAdd, actionList, actionEnable, actionDisable, actionOAuthLogin}},
 	{"model-map", []string{actionSet, actionList, actionDisable}},
 	{flagAccount, []string{actionCreate, actionList, actionDisable, actionSetMultiplier, actionSetMerchant}},
-	{"key", []string{actionIssue, actionList, actionRevoke}},
+	{keyName, []string{actionIssue, actionList, actionRevoke}},
 	{"bucket", []string{actionCredit, actionList}},
 	{"product", []string{actionCreate, actionList}},
 	{"purchase", []string{actionBuy, actionList}},
@@ -209,6 +222,7 @@ var adminGroups = []adminGroupSpec{
 	{"rule", []string{actionAdd, actionList, actionDel}},
 	{"calendar", []string{actionImport, actionList}},
 	{usageName, []string{actionList}},
+	{requestsName, []string{actionList, actionGet, actionStats}},
 	{"adjust", []string{actionAdd, actionList}},
 	{"quota", []string{actionAdd, actionList, actionDel, actionReset}},
 	{"plan", []string{actionAdd, actionList}},
@@ -310,7 +324,7 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminModelMap(ctx, rest, env)
 	case flagAccount:
 		return adminAccount(ctx, rest, env)
-	case "key":
+	case keyName:
 		return adminKey(ctx, rest, env)
 	case "bucket":
 		return adminBucket(ctx, rest, env)
@@ -326,6 +340,8 @@ func dispatchAdmin(ctx context.Context, args []string, env *adminEnv) int {
 		return adminCalendar(ctx, rest, env)
 	case usageName:
 		return adminUsage(ctx, rest, env)
+	case requestsName:
+		return adminRequests(ctx, rest, env)
 	case "adjust":
 		return adminAdjust(ctx, rest, env)
 	case "quota":

@@ -782,3 +782,67 @@ merchant_id  period  from                  to                    trades  gross_s
 - 同一次出账还有两个页面读路径（口径与上面逐条相同，只是作用域不同）：
   `GET /api/v1/admin/settlements` 是全平台视图，`GET /api/v1/partner/settlement`
   是商家自己的对账单（作用域由会话推导，不接受商家参数）。
+
+## 请求记录排查（管理面）
+
+请求记录是单次请求粒度的排障事实。命令行视图挂在 `requests` 组下，数据源与账户面
+页面同一份；本节命令不在 e2e 剧本内。
+
+按账户、时间区间、模型、请求标识、终态与密钥过滤，默认按请求时刻倒序，`--limit` /
+`--offset` 控制偏移分页：
+
+```
+$ tokenmp admin requests list --account 1 --status failed --limit 20
+id  request_id  account_id  api_key_id  created_at           status  http_status  upstream_status  failure_class  error_code             duration_ms  model          upstream_model     protocol            upstream_protocol   cross_protocol  stream  written_bytes  payload_available
+5   req-7f3a    1           9           2026-10-05 12:30:00  failed  502          429              rate_limit     upstream_rate_limited  85           claude-sonnet  claude-3-5-sonnet  anthropic_messages  anthropic_messages  否               是       0              是
+```
+
+`--account` 缺省表示全部账户：管理面是跨账户视图。`--json` 输出与页面清单同一份字段。
+
+按请求标识读单条，输出摘要字段、尝试时间线与三段脱敏报文：
+
+```
+$ tokenmp admin requests get --request-id req-7f3a
+请求 req-7f3a
+  account_id        1
+  api_key_id        9
+  created_at        2026-10-05 12:30:00
+  status            failed
+  http_status       502
+  upstream_status   429
+  failure_class     rate_limit
+  error_code        upstream_rate_limited
+  duration_ms       85
+  model             claude-sonnet
+  upstream_model    claude-3-5-sonnet
+  protocol          anthropic_messages
+  upstream_protocol anthropic_messages
+  stream            是
+  written_bytes     0
+  payload_available 是
+  client_ip         203.0.113.7
+  user_agent        client/1.0
+
+尝试时间线（1 条）
+  #1  failed  upstream_status=429  failure_class=rate_limit  error_code=upstream_rate_limited  duration_ms=85
+
+请求报文
+  {"model":"claude-sonnet","messages":[{"role":"user","content":{"__redacted":"string","len":42}}]}
+```
+
+报文按「落盘即脱敏」处理，只保留键名、嵌套结构与参数真值；只保留 7 天，超期后
+`payload_available` 为 `否`、报文段为 `-`，与账户面口径一致。`get --json` 给机器可读形状。
+
+按天 / 模型 / 终态 / 账户聚合计数：
+
+```
+$ tokenmp admin requests stats --group-by status --since 2026-10-01
+key      total  success  failed  cancelled
+failed   1      0        1       0
+```
+
+- `--group-by` 取值 `day` / `model` / `status` / `account`，缺省 `day`；`account` 维度
+  回答「哪个账户在用」，账户面没有该维度。
+- 聚合来自随明细同步维护的按天缓存，明细归档后同一区间仍可查。
+- 同一份清单也有页面读路径 `GET /api/v1/admin/requests`：能力门槛 `ops`，分页用
+  `page` / `size`，过滤参数与 `requests list` 对应。
