@@ -152,6 +152,7 @@ func (s *Service) ListRequests(ctx context.Context, q RequestListQuery) ([]Reque
 	}
 	records, total, err := reader.ListRequestLogs(ctx, store.RequestLogFilter{
 		AccountID:      q.AccountID,
+		AllAccounts:    q.AccountID == 0,
 		Since:          q.Since,
 		Until:          q.Until,
 		RequestedModel: q.RequestedModel,
@@ -235,6 +236,7 @@ func (s *Service) RequestStats(ctx context.Context, q RequestStatsQuery) ([]Requ
 	}
 	items, err := reader.RequestStats(ctx, store.RequestStatsQuery{
 		AccountID:      q.AccountID,
+		AllAccounts:    q.AccountID == 0,
 		Since:          q.Since,
 		Until:          q.Until,
 		RequestedModel: q.RequestedModel,

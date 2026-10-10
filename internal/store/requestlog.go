@@ -327,9 +327,13 @@ func nullableInt(v int) any {
 
 // RequestLogFilter 是请求记录列表的过滤条件。
 type RequestLogFilter struct {
-	// AccountID 是记录的归属账户。0 表示不限账户，仅管理面全平台清单使用；
-	// 账户面必须传会话推导出的非零值。
+	// AccountID 是记录的归属账户；AllAccounts 为假时必填，传 0 会被拒绝。
 	AccountID uint64
+	// AllAccounts 为真时跨账户读取，不带 account_id 条件。
+	//
+	// 用显式开关而不是「AccountID 为 0 即不限」：零值同时代表「没设置」，
+	// 账户面漏传账户时会静默变成全平台查询。只有管理面清单置位本字段。
+	AllAccounts bool
 	// Since / Until 是请求时刻的闭区间；零值表示该侧不限。
 	Since time.Time
 	Until time.Time
@@ -420,9 +424,9 @@ const statusNotNullCondition = "status IS NOT NULL"
 func requestLogWhere(f RequestLogFilter) (string, []any) {
 	conditions := []string{statusNotNullCondition}
 	var args []any
-	// 账户缺省表示不限账户：只有管理面全平台清单这么用，账户面的调用方始终传入
-	// 会话推导出的非零账户，作用域不会因此落空。
-	if f.AccountID != 0 {
+	// 全平台清单不带账户条件；其余调用方一律带账户，缺账户在 ListRequestLogs
+	// 入口就被拒绝，不会走到这里退化成全平台查询。
+	if !f.AllAccounts {
 		conditions = append(conditions, accountIDCondition)
 		args = append(args, f.AccountID)
 	}
@@ -457,6 +461,9 @@ func requestLogWhere(f RequestLogFilter) (string, []any) {
 //
 // 排序按主键倒序：同一秒内的多条请求也有确定顺序，翻页不会重复或漏行。
 func (s *Store) ListRequestLogs(ctx context.Context, f RequestLogFilter) ([]RequestLogRow, int, error) {
+	if !f.AllAccounts && f.AccountID == 0 {
+		return nil, 0, errors.New("store: request_log.account_id 不能为 0")
+	}
 	if f.Limit <= 0 {
 		return nil, 0, errors.New("store: 分页条数必须为正")
 	}
@@ -593,9 +600,10 @@ func scanRequestLogRow(scan func(dest ...any) error, withPayload bool) (*Request
 
 // RequestStatsQuery 是按维度聚合请求计数的条件。
 type RequestStatsQuery struct {
-	// AccountID 是聚合的归属账户。0 表示不限账户，仅管理面全平台聚合使用；
-	// 账户面必须传会话推导出的非零值。
+	// AccountID 是聚合的归属账户；AllAccounts 为假时必填，传 0 会被拒绝。
 	AccountID uint64
+	// AllAccounts 为真时跨账户聚合，不带 account_id 条件；只由管理面置位。
+	AllAccounts bool
 	// Since / Until 是请求时刻的闭区间，按天取整；零值表示该侧不限。
 	Since time.Time
 	Until time.Time
@@ -633,14 +641,17 @@ var requestStatsKeys = map[string]string{
 
 // RequestStats 按维度聚合账户的请求计数，按 key 升序返回。
 func (s *Store) RequestStats(ctx context.Context, q RequestStatsQuery) ([]RequestStatsItem, error) {
+	if !q.AllAccounts && q.AccountID == 0 {
+		return nil, errors.New("store: request_stats_daily.account_id 不能为 0")
+	}
 	keyExpr, ok := requestStatsKeys[q.GroupBy]
 	if !ok {
 		return nil, fmt.Errorf("store: 未知的聚合维度 %q", q.GroupBy)
 	}
 	conditions := []string{}
 	var args []any
-	// 账户缺省表示不限账户，与 ListRequestLogs 同一口径。
-	if q.AccountID != 0 {
+	// 全平台聚合不带账户条件，与 ListRequestLogs 同一口径。
+	if !q.AllAccounts {
 		conditions = append(conditions, accountIDCondition)
 		args = append(args, q.AccountID)
 	}
